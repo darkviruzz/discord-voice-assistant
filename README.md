@@ -1,18 +1,26 @@
-## README.md (vollständig, zum Einfügen ins Repo)
-
-### Title
+## Title
 
 Discord Voice Assistant – Bot + LAN Audio Server (per-Speaker Uplink, low-latency Downlink)
 
-### Überblick
+## Überblick
 
 Dieses Monorepo enthält:
 
-* **Bot (`apps/bot`)**: Discord-Recorder und -Player. Er verwaltet Audio-Sessions in Voice-Channels und zeichnet jede Sprecherin und jeden Sprecher getrennt auf. Zusätzlich erstellt er einen zeitlich korrekten Mix des gesamten Gesprächs. Parallel sendet er pro Sprecher 20-ms-Frames im Original-Codec (kein Mix, kein unnötiges Re-Encoding) an den LAN-Server. Eingehende Downlink-Frames vom Server werden in einem Jitter-/Playout-Puffer gesammelt und nur in Sprechpausen abgespielt (Gating), sodass Systemmeldungen oder LLM-Antworten nicht ins Wort fallen.
-* **Server (`apps/server`)**: Nimmt Uplink-Frames an (Opus/PCM), verwaltet Sessions & Speaker, streamt Downlink (Opus 20 ms), bietet Control-WebSocket (JSON) und Hooks für **ollama** (lokal) sowie **OpenAI** (Spezialfälle).
-* **Protocol (`packages/protocol`)**: Gemeinsames Binär-Protokoll (Header, Parser, HMAC), Zeit/Seq-Hilfen.
+* **Bot (apps/bot)**
 
-### Architektur
+  * Discord-Recorder/Player: pro Sprecher WAV-Chunks, zeitkorrekter Session-Mix (HQ/LQ), zusätzlich je **Sprecher HQ/LQ-Mix**.
+  * **Ohne Server voll nutzbar**: Aufnehmen, Speichern, Mischen.
+  * Optional: **per-Speaker Uplink** (20-ms Frames, Opus/PCM passthrough) an den LAN-Server.
+  * Downlink-Wiedergabe mit **Jitter-/Playout-Puffer** und **Gating** (spielt nur bei Stille).
+
+* **Server (apps/server)** *(optional)*
+
+  * Nimmt per-Speaker Uplink an (kein Mix, kein Re-encode im Bot nötig).
+  * Schickt Downlink-Frames (20-ms Opus) an den Bot.
+  * Control-WS (JSON) für Befehle (z. B. Testton, künftig TTS/STT-Hooks).
+  * Für **Windows** oder Linux geeignet; keine speziellen Abhängigkeiten außer Node.js.
+
+## Architektur
 
 * **Transport:** Drei Kanäle
 
@@ -22,73 +30,111 @@ Dieses Monorepo enthält:
 * **Gating/Playout im Bot:** Wiedergabe startet nur, wenn `activeSpeakers.size == 0` für ≥ `GATE_MS`. Bei Unterbrechung pausieren und mit Puffer fortsetzen. Optional „Pre-roll“: beim Resume ein paar vorangehende Frames erneut senden (später).
 * **Latenz:** LAN-Ziel 0,5–2,0 s end-to-end (Transport << 5 ms; Rest Puffer + STT/TTS/LLM).
 
-### Voraussetzungen
+## Konfiguration
 
-* Node.js ≥ 20, ffmpeg (für Offline-Mix im Bot), Discord-App/Token.
-* Netzwerk: Bot auf **192.168.20.137**, Server auf **192.168.20.101** (anpassbar).
-* Optional: ollama lokal (Standardantworten), OpenAI API Key für Spezialaufgaben.
+### Bot – `apps/bot/.env.example`
 
-### Quickstart (lokal)
+```
+DISCORD_TOKEN=...
+GUILD_ID=...
+
+# Daten
+DATA_DIR=/opt/discord-recorder/data
+DEBUG=1
+SESSION_IDLE_HOURS=4
+
+# Uplink (optional; Server nur bei Bedarf aktiv)
+UPLINK_PROTO=ws
+UPLINK_HOST=192.168.20.101
+UPLINK_PORT=7440
+UPLINK_CODEC=opus       # opus|pcm
+UPLINK_OPUS_BITRATE=32000
+
+# Downlink/Control (optional)
+DOWNLINK_WS_URL=ws://192.168.20.101:7440/downlink
+CONTROL_WS_URL=ws://192.168.20.101:7440/control
+CONTROL_BEARER=...
+
+# Wiedergabe (Gating)
+GATE_MS=400
+JITTER_MS=200
+PLAYOUT_MS=1000
+PLAYOUT_MAX_MS=2000
+```
+
+### Server – `apps/server/.env.example`
+
+```
+HOST=0.0.0.0
+PORT=7440
+CONTROL_BEARER=changeme
+SESSION_SECRET=
+```
+
+## Installation
+
+### Bot (empfohlen als systemd-Dienst)
 
 ```bash
 # im Repo-Root
-cp .env.example .env  # optional
 npm install
-# Bot- und Server-spezifische Envs
 cp apps/bot/.env.example apps/bot/.env
-cp apps/server/.env.example apps/server/.env
-# Envs anpassen (IPs/Ports/Token)
-npm run dev
+# .env ausfüllen (Token/Guild/…)
+npm run register
+npm run start:bot   # zum Testen im Vordergrund
 ```
 
-### Deployment (Proxmox – Beispiel)
-
-* **Bot**: LXC `20021` auf Node `pve-jn` (`discord-bot-jn`, IP 192.168.20.137).
-
-  * `apps/bot` deployen, `.env` setzen, **systemd**: `deploy/bot/systemd/discord-bot.service`.
-* **Server**: VM/Container auf `pve-jn` oder separatem Node, IP **192.168.20.101**.
-
-  * `apps/server` deployen, `.env` setzen, **systemd**: `deploy/server/systemd/discord-audio-server.service`.
-* Optional **Docker**: Beide `Dockerfile`s und `docker-compose.yml` für schnellen lokalen Test, produktiv würde ich hier bei systemd bleiben (einfach, robust).
-
-### Konfiguration (wichtige Variablen)
-
-* **Bot (`apps/bot/.env`)**
-
-  * `DISCORD_TOKEN`, `GUILD_ID`
-  * Uplink: `UPLINK_PROTO=ws`, `UPLINK_HOST=192.168.20.101`, `UPLINK_PORT=7440`, `UPLINK_CODEC=opus`
-  * Downlink/Control: `DOWNLINK_WS_URL=ws://192.168.20.101:7440/downlink`, `CONTROL_WS_URL=ws://192.168.20.101:7440/control`, `CONTROL_BEARER=...`
-  * Playback: `GATE_MS=400`, `JITTER_MS=200`, `PLAYOUT_MS=1000`, `PLAYOUT_MAX_MS=2000`
-* **Server (`apps/server/.env`)**
-
-  * `HOST=0.0.0.0`, `PORT=7440`, `CONTROL_BEARER=...`
-  * Optional: `SESSION_SECRET=...` für HMAC pro Frame
-  * STT/LLM/TTS: `OLLAMA_URL`, `OLLAMA_MODEL`, `OPENAI_API_KEY`, `PIPER_PATH`, `PIPER_VOICE`
-
-### Protokoll (20-ms Frames)
-
-Header (Big-Endian):
+**systemd** (Deploy-Beispiel):
 
 ```
-magic(4)='UPLK'|'DNLK' | ver(1)=1 | flags(1):bit0 codec(0=pcm,1=opus) | rsv(2)
-sessionId(8 u64) | userId(8 u64) | seq(4 u32) | ts_ms(8 u64, monotonic) | len(2 u16) | payload(len)
+[Unit]
+Description=Discord Audio Recorder Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/discord-voice-assistant/apps/bot
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Optional HMAC über Header+Payload (separat über Control vereinbart).
+### Server (Windows)
 
-### Tests
+* Node.js LTS installieren.
+* Repo klonen oder nur `apps/server` kopieren.
+* `npm install` in `apps/server`, `.env` füllen, `npm start`.
+* Optional als Dienst via **NSSM** einrichten (nicht erforderlich).
 
-* **Downlink**: `/control` → `{ "type":"play_test_tone", "sessionId":"<u64>" }`
-* **Uplink**: Bot verbindet `/uplink` und schickt pro Sprecher Frames (seq++/20 ms). Server zählt Frames und kann sie in Dateien oder STT schieben.
+## Nutzung (ohne Server)
 
-### Roadmap
+* In Discord in den Voice-Channel, **/join** → Aufnahme startet.
+* **/save-session** → erzeugt:
 
-* Bot-Pre-roll beim Resume (einige Frames zurückspulen).
-* Per-Speaker Speicherung/Transkript (Server).
-* STT-Pipeline: Whisper/WhisperX/Whisper-cpp oder cartesia; VAD/Segmentierung.
-* Dynamische Priorisierung (System-Prompts vs. LLM-Antworten).
-* TLS/Mutual-TLS, HMAC Pflicht.
+  * `session_mix_hq.ogg`, `session_mix_lq.ogg`
+  * `user_<name>_hq.ogg`, `user_<name>_lq.ogg`
+  * WAV-Chunks + `session.json` (Timeline).
+* **/leave** verlässt den Channel.
+* Bei Neustart werden inaktive Sessions (>4 h) automatisch finalisiert.
 
-### Lizenz
+## Nutzung (mit Server, on-demand)
 
+* Server starten (Windows).
+* Bot verbindet optional `/uplink` (per-Speaker), `/downlink` (Abo), `/control`.
+* Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames an den Bot; Bot spielt nur bei Stille (Gating).
+
+## Roadmap (nur, wenn Server läuft)
+
+* STT/LLM/TTS-Pipelines (ollama lokal, OpenAI für Spezialaufgaben).
+* „Pre-roll“ beim Resume (einige Frames zurückspulen).
+* Backpressure/Flow-Control via `buffer_status`.
+
+
+## Lizenz
 UNLICENSED

@@ -1,0 +1,10 @@
+{
+  "name": "discord-voice-assistant",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "register": "npm -w apps/bot run register",
+    "start:bot": "npm -w apps/bot start",
+    "start:server": "npm -w apps/server start"
+  }
+}

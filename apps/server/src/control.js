@@ -1,37 +1,136 @@
 import { WebSocketServer } from 'ws';
+import { randomUUID } from 'crypto';
 import { log, debug, warn } from './logger.js';
 import { sendTestTone } from './downlink.js';
+import { pickProtocolFor } from './auth.js';
+import { ensureSession, dropSession } from './state.js';
 
-// Einfache Control-WS (JSON). Auth via Sec-WebSocket-Protocol oder Authorization-Header.
-export function initControlWSS(server, { path = '/control', bearer } = {}) {
+const PROTO_VERSION = 1;
+const SERVER_VERSION = '0.1.0';
+const SERVER_ID = randomUUID();
+
+// Default playout/gating params advertised to bots; bots may apply them
+// locally. These mirror the env-documented defaults from the README.
+function serverParams() {
+  return {
+    gateMs:        Number(process.env.GATE_MS        ?? 200),
+    jitterMs:      Number(process.env.JITTER_MS      ?? 120),
+    playoutMs:     Number(process.env.PLAYOUT_MS     ?? 200),
+    playoutMaxMs:  Number(process.env.PLAYOUT_MAX_MS ?? 1500),
+    hbIntervalMs:  15000,
+  };
+}
+
+function send(ws, obj) {
+  if (ws.readyState !== ws.OPEN) return;
+  try { ws.send(JSON.stringify(obj)); } catch (e) { warn('control send failed:', e.message); }
+}
+
+export function initControlWSS({ bearer } = {}) {
   const wss = new WebSocketServer({
-    server, path,
-    verifyClient: (info, cb) => {
-      if (!bearer) return cb(true);
-      const proto = info.req.headers['sec-websocket-protocol'] || '';
-      const auth  = info.req.headers['authorization'] || '';
-      if ((typeof proto === 'string' && proto.includes(bearer)) || (typeof auth === 'string' && auth.includes(bearer))) cb(true);
-      else cb(false, 401, 'Unauthorized');
-    }
+    noServer: true,
+    handleProtocols: pickProtocolFor(bearer),
+    maxPayload: 65536,
+    perMessageDeflate: false,
   });
 
   wss.on('connection', (ws) => {
-    ws.send(JSON.stringify({ type: 'hello', t: Date.now() }));
-    ws.on('message', async (data) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
+    let registered = false;
+    let activeSessionId = null;
+
+    send(ws, { type: 'hello', serverId: SERVER_ID, version: SERVER_VERSION, protoVersion: PROTO_VERSION, t: Date.now() });
+
+    ws.on('message', (data) => {
+      let msg;
+      try { msg = JSON.parse(data.toString()); }
+      catch (e) {
+        warn('control json parse:', e.message, data.toString().slice(0, 120));
+        return;
+      }
+
       try {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === 'ping') {
-          return ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+        switch (msg.type) {
+          case 'register': {
+            if (typeof msg.protoVersion === 'number' && msg.protoVersion !== PROTO_VERSION) {
+              send(ws, { type: 'error', code: 'PROTO_MISMATCH', message: `expected protoVersion ${PROTO_VERSION}` });
+              ws.close(4002, 'PROTO_MISMATCH');
+              return;
+            }
+            registered = true;
+            debug('control: registered bot', msg.botId, 'v', msg.version, 'caps', msg.capabilities);
+            send(ws, { type: 'registered', serverParams: serverParams() });
+            return;
+          }
+          case 'session_start': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED' }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            activeSessionId = BigInt(msg.sessionId);
+            ensureSession(activeSessionId);
+            debug('control: session_start sid', activeSessionId.toString(), 'guild', msg.guildId, 'channel', msg.channelId);
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
+            return;
+          }
+          case 'session_end': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED' }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            const sid = BigInt(msg.sessionId);
+            dropSession(sid);
+            if (activeSessionId === sid) activeSessionId = null;
+            debug('control: session_end sid', sid.toString());
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_end' });
+            return;
+          }
+          case 'ping': {
+            send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
+            return;
+          }
+          case 'play_test_tone': {
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            sendTestTone(BigInt(msg.sessionId)).then(
+              () => send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'play_test_tone' }),
+              (e) => send(ws, { type: 'error', code: 'TEST_TONE_FAILED', message: e.message, cmdId: msg.cmdId }),
+            );
+            return;
+          }
+          // Phase 2/3 stubs: log and ack so the bot can develop against them.
+          case 'say':
+          case 'play':
+          case 'set_params':
+          case 'save_session':
+          case 'stop_playback': {
+            debug('control: stub command', msg.type);
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: false, error: 'NOT_IMPLEMENTED', op: msg.type });
+            return;
+          }
+          default: {
+            send(ws, { type: 'error', code: 'UNKNOWN_TYPE', message: `unknown msg.type=${msg.type}`, cmdId: msg.cmdId });
+            return;
+          }
         }
-        if (msg.type === 'play_test_tone' && typeof msg.sessionId === 'string') {
-          await sendTestTone(BigInt(msg.sessionId));
-          return ws.send(JSON.stringify({ type: 'ok', op: 'play_test_tone' }));
-        }
-        // TODO: say / play / save_session / set_params
-      } catch (e) { warn('control msg err', e.message); }
+      } catch (e) {
+        warn('control dispatch error:', e.message, e.stack);
+        send(ws, { type: 'error', code: 'INTERNAL', message: e.message, cmdId: msg && msg.cmdId });
+      }
     });
+
+    ws.on('close', (code, reason) => {
+      debug('control closed', code, reason && reason.toString());
+    });
+    ws.on('error', (e) => warn('control ws error:', e.message));
   });
 
-  log('control ws ready at', path);
+  log('control ws ready');
   return wss;
 }

@@ -2,12 +2,15 @@ import { WebSocketServer } from 'ws';
 import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { ensureSession } from './state.js';
 import { log, debug } from './logger.js';
-import { OpusEncoder } from '@discordjs/opus';
+import opus from '@discordjs/opus';
+const { OpusEncoder } = opus;
 
 // Downlink-Verteiler: Bots subscriben per Text-JSON auf eine Session
-export function initDownlinkWSS(server, { path = '/downlink' } = {}) {
-  const wss = new WebSocketServer({ server, path });
+export function initDownlinkWSS({} = {}) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 65536, perMessageDeflate: false });
   wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     let sessionId = null;
     ws.on('message', (data, isBinary) => {
       if (isBinary) return; // Downlink empfängt nur Steuer-JSON vom Bot (Subscribe)
@@ -28,7 +31,7 @@ export function initDownlinkWSS(server, { path = '/downlink' } = {}) {
       }
     });
   });
-  log('downlink ws ready at', path);
+  log('downlink ws ready');
   return wss;
 }
 

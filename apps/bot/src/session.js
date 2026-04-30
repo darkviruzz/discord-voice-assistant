@@ -48,6 +48,13 @@ export class SessionManager {
     this.touch();
   }
 
+  // Numeric u64-string sessionId for the wire protocol; bot's local id is a
+  // human-friendly timestamp string, but the server keys sessions by BigInt.
+  wireSessionId() {
+    if (!this.active) return null;
+    return BigInt(this.active.startedAt).toString();
+  }
+
   persist() {
     if (!this.active) return;
     fs.writeFileSync(path.join(this.active.dir, 'session.json'), JSON.stringify(this.active, null, 2));

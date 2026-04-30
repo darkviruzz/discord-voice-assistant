@@ -1,12 +1,21 @@
 import { WebSocketServer } from 'ws';
 import { MAGIC_UPLK, parseFrame } from './protocol.js';
 import { ensureSpeaker } from './state.js';
+import { pickProtocolFor } from './auth.js';
 import { debug, log, warn } from './logger.js';
 
-// Nimmt per-Speaker Uplink-Frames entgegen (Opus oder PCM), kein Re-encode
-export function initUplinkWSS(server, { path = '/uplink' } = {}) {
-  const wss = new WebSocketServer({ server, path });
+// Nimmt per-Speaker Uplink-Frames entgegen (Opus oder PCM), kein Re-encode.
+// Phase 1: WSS exists and is auth-gated, but the bot does not connect yet.
+export function initUplinkWSS({ bearer } = {}) {
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols: pickProtocolFor(bearer),
+    maxPayload: 65536,
+    perMessageDeflate: false,
+  });
   wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     debug('uplink connected');
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;
@@ -17,15 +26,14 @@ export function initUplinkWSS(server, { path = '/uplink' } = {}) {
         sp.codec ??= f.codec;
         sp.frames++;
         sp.lastSeq = f.seq;
-        // Hier könntest du Frames an STT weiterreichen oder auf Datei schreiben.
-        // Minimal: zählen/loggen:
         if ((sp.frames % 100) === 0) debug('speaker frames', f.userId.toString(), sp.frames);
       } catch (e) {
         warn('uplink parse error:', e.message);
       }
     });
     ws.on('close', () => debug('uplink closed'));
+    ws.on('error', (e) => warn('uplink ws error:', e.message));
   });
-  log('uplink ws ready at', path);
+  log('uplink ws ready');
   return wss;
 }

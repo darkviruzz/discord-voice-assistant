@@ -7,6 +7,7 @@ import { log, warn, error, debug } from './logger.js';
 import { SessionManager } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
 import { mixSession } from './mixer.js';
+import * as transport from './transport/index.js';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
@@ -33,6 +34,7 @@ async function recoverOldSessions() {
 client.once('ready', async () => {
   log(`Bot online als ${client.user.tag}`);
   await recoverOldSessions();
+  transport.start({ botId: client.user.id });
 });
 
 client.on('interactionCreate', async (i) => {
@@ -51,6 +53,12 @@ client.on('interactionCreate', async (i) => {
       });
 
       sessions.loadOrStartNew();
+      transport.sessionStart({
+        sessionId: sessions.wireSessionId(),
+        guildId: channel.guild.id,
+        channelId: channel.id,
+        startedAt: sessions.active.startedAt,
+      });
 
       // Receiver aufsetzen
       const receiver = connection.receiver; // VoiceReceiver
@@ -81,6 +89,8 @@ client.on('interactionCreate', async (i) => {
     if (i.commandName === 'leave') {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
+      const wireId = sessions.wireSessionId();
+      if (wireId) transport.sessionEnd(wireId);
       await i.reply({ content: 'Voice-Channel verlassen.', ephemeral: true });
     }
 
@@ -93,6 +103,8 @@ client.on('interactionCreate', async (i) => {
         s.status = 'closed';
         sessions.persist();
         await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, ephemeral: true });
+        const wireId = sessions.wireSessionId();
+        if (wireId) transport.sessionEnd(wireId);
         sessions.active = null;
       } catch (e) {
         error(e);

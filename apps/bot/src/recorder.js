@@ -1,79 +1,71 @@
 import fs from 'fs';
-import net from 'net';
 import path from 'path';
 import { EndBehaviorType } from '@discordjs/voice';
 import prism from 'prism-media';
 import wav from 'wav';
-import { safePath, debug, log, warn } from './logger.js';
+import { safePath, debug, warn } from './logger.js';
 import { nowMs } from './util.js';
+import { sendUplinkFrame } from './transport/index.js';
 
 export class UtteranceRecorder {
   constructor(session, connection, receiver, user, options = {}) {
-    this.session = session; // SessionManager.active
+    this.session    = session;   // SessionManager.active — { startedAt, dir, ... }
     this.connection = connection;
-    this.receiver = receiver;
-    this.user = user; // { id, username }
-    this.silenceMs = options.silenceMs ?? 1000;
+    this.receiver   = receiver;
+    this.user       = user;      // { id: string, username: string }
+    this.silenceMs  = options.silenceMs  ?? 1000;
     this.onChunkDone = options.onChunkDone ?? (() => {});
-
-    // Optional Live-Streaming (PCM) via TCP
-    this.streamTcpHost = process.env.STREAM_TCP_HOST || null;
-    this.streamTcpPort = process.env.STREAM_TCP_PORT || null;
   }
 
   subscribe() {
     const { id: userId } = this.user;
+    const sessionId = BigInt(this.session.startedAt).toString(); // wire format
 
     const opusStream = this.receiver.subscribe(userId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: this.silenceMs },
     });
 
-    const startedAt = nowMs();
+    const startedAt  = nowMs();
     const relStartMs = Math.max(0, startedAt - this.session.startedAt);
 
-    // Dateiname (WAV 48kHz mono PCM 16bit)
-    const base = `${this.user.id}_${startedAt}`;
-    const file = safePath(this.session.dir, 'chunks', `${base}.wav`);
-
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-
-	const decoder = new prism.opus.Decoder({ frameSize: 960, channels: 1, rate: 48000 });
+    const file = safePath(this.session.dir, 'chunks', `${userId}_${startedAt}.wav`);
+    const decoder   = new prism.opus.Decoder({ frameSize: 960, channels: 1, rate: 48000 });
     const wavWriter = new wav.FileWriter(file, { channels: 1, sampleRate: 48000, bitDepth: 16 });
 
-    // Optional: Live-Streaming an TCP
-    let socket = null;
-    if (this.streamTcpHost && this.streamTcpPort) {
-      try {
-        socket = net.createConnection({ host: this.streamTcpHost, port: Number(this.streamTcpPort) });
-        socket.on('error', (e) => warn('TCP stream error:', e.message));
-        debug('TCP stream connected for', this.user.id);
-      } catch (e) { warn('TCP stream connect failed:', e.message); }
-    }
-
-    let totalSamples = 0;
-
-    decoder.on('data', (pcm) => {
-      totalSamples += pcm.length / 2; // 16-bit mono
-      if (socket && socket.writable) {
-        // Rohes PCM s16le, 48kHz mono – STT-Seite muss Format kennen
-        socket.write(pcm);
-      }
+    // Tap raw Opus packets BEFORE the decoder and forward to the server uplink.
+    // `opusStream` is a Readable; adding a `data` listener here does not
+    // conflict with the downstream pipe — both consumers see every packet.
+    opusStream.on('data', (opus) => {
+      sendUplinkFrame({ sessionId, userId, tsMs: Date.now(), opus });
     });
 
-    return new Promise((resolve) => {
+    let totalSamples = 0;
+    decoder.on('data', (pcm) => { totalSamples += pcm.length / 2; });
+
+    return new Promise((resolve, reject) => {
+      function cleanup(err) {
+        try { opusStream.destroy(); } catch {}
+        try { decoder.destroy(); } catch {}
+        try { wavWriter.destroy(); } catch {}
+        if (err) reject(err);
+      }
+
+      opusStream.on('error', (e) => { warn('opusStream error:', e.message); cleanup(e); });
+      decoder.on('error',    (e) => { warn('decoder error:',    e.message); cleanup(e); });
+      wavWriter.on('error',  (e) => { warn('wavWriter error:',  e.message); cleanup(e); });
+
       opusStream.pipe(decoder).pipe(wavWriter);
 
       wavWriter.on('finish', () => {
         const durationMs = Math.round((totalSamples / 48000) * 1000);
         const rec = {
-          userId: this.user.id,
-          username: this.user.username,
-          startMs: relStartMs,
+          userId:     this.user.id,
+          username:   this.user.username,
+          startMs:    relStartMs,
           durationMs,
           file,
         };
         this.onChunkDone(rec);
-        if (socket) socket.end();
         resolve(rec);
       });
     });

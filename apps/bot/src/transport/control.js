@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { randomUUID } from 'crypto';
 import { log, warn, debug } from '../logger.js';
@@ -18,8 +19,9 @@ function backoff(attempt) {
   return jitter(Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * Math.pow(2, attempt)));
 }
 
-export class ControlClient {
+export class ControlClient extends EventEmitter {
   constructor({ baseUrl, bearer, botId, fsm }) {
+    super();
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.bearer = bearer || null;
     this.botId = botId || randomUUID();
@@ -57,6 +59,12 @@ export class ControlClient {
       this.ws = null;
     }
     this.fsm.set(State.DISCONNECTED);
+  }
+
+  ack(cmdId, ok = true, error) {
+    const msg = { type: 'ack', cmdId, ok };
+    if (error) msg.error = error;
+    this._send(msg);
   }
 
   // sessionInfo: { sessionId: string(numeric), guildId, channelId, startedAt }
@@ -191,15 +199,16 @@ export class ControlClient {
         warn('control: server error', msg.code, msg.message || '', 'cmdId=', msg.cmdId);
         return;
       }
-      // Phase 2/3 commands — log only.
+      // Server→bot commands: dispatch to transport/index.js via event.
+      // The listener is expected to call this.ack(cmdId, ok, error?) when done.
       case 'say':
       case 'play':
       case 'play_test_tone':
       case 'set_params':
       case 'save_session':
       case 'stop_playback': {
-        debug('control: server command (Phase 2/3, ignored):', msg.type);
-        this._send({ type: 'ack', cmdId: msg.cmdId, ok: false, error: 'NOT_IMPLEMENTED' });
+        debug('control: server command:', msg.type);
+        this.emit('serverCommand', msg);
         return;
       }
       default:

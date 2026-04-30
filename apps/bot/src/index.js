@@ -59,12 +59,13 @@ client.on('interactionCreate', async (i) => {
         channelId: channel.id,
         startedAt: sessions.active.startedAt,
       });
+      transport.setVoiceConnection(connection);
 
       // Receiver aufsetzen
-      const receiver = connection.receiver; // VoiceReceiver
+      const receiver = connection.receiver;
 
-      // speaking events liefern die Benutzer, die sprechen
       receiver.speaking.on('start', (userId) => {
+        transport.speakingStart(userId);
         if (activeRecordings.has(userId)) {
           debug('already recording, skip start for', userId);
           return;
@@ -83,12 +84,17 @@ client.on('interactionCreate', async (i) => {
         activeRecordings.set(userId, p);
       });
 
+      receiver.speaking.on('end', (userId) => {
+        transport.speakingEnd(userId);
+      });
+
       await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.active.id}).`, ephemeral: true });
     }
 
     if (i.commandName === 'leave') {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
+      transport.clearVoiceConnection();
       const wireId = sessions.wireSessionId();
       if (wireId) transport.sessionEnd(wireId);
       await i.reply({ content: 'Voice-Channel verlassen.', ephemeral: true });
@@ -103,6 +109,7 @@ client.on('interactionCreate', async (i) => {
         s.status = 'closed';
         sessions.persist();
         await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, ephemeral: true });
+        transport.clearVoiceConnection();
         const wireId = sessions.wireSessionId();
         if (wireId) transport.sessionEnd(wireId);
         sessions.active = null;

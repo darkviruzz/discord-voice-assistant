@@ -52,10 +52,34 @@ client.on('interactionCreate', async (i) => {
         selfDeaf: false,
       });
 
+      // @discordjs/voice v0.18: when Discord redirects to a different voice
+      // server mid-handshake (Connecting→Signalling), the library waits for a
+      // fresh VOICE_STATE_UPDATE that Discord never sends automatically.
+      // Re-calling joinVoiceChannel() triggers one, letting the library pair
+      // it with the redirect's VOICE_SERVER_UPDATE and reach Ready.
+      let voiceRedirects = 0;
       connection.on('stateChange', (oldState, newState) => {
         debug('voice:', oldState.status, '->', newState.status);
         if (newState.status === VoiceConnectionStatus.Disconnected) {
           warn('voice: disconnected code=', newState.closeCode ?? '(none)');
+        }
+        if (oldState.status === VoiceConnectionStatus.Connecting &&
+            newState.status === VoiceConnectionStatus.Signalling) {
+          if (++voiceRedirects <= 3) {
+            debug('voice: server redirect — re-signalling (attempt', voiceRedirects, ')');
+            joinVoiceChannel({
+              channelId: channel.id,
+              guildId: channel.guild.id,
+              adapterCreator: channel.guild.voiceAdapterCreator,
+              selfDeaf: false,
+            });
+          } else {
+            warn('voice: too many redirects, destroying connection');
+            connection.destroy();
+          }
+        }
+        if (newState.status === VoiceConnectionStatus.Ready) {
+          voiceRedirects = 0;
         }
       });
       connection.on('error', (e) => warn('voice: connection error:', e.message));

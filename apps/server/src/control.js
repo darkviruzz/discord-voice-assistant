@@ -4,6 +4,7 @@ import { log, debug, warn } from './logger.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
+import { runPipeline } from './pipeline.js';
 
 const PROTO_VERSION = 1;
 const SERVER_VERSION = '0.1.0';
@@ -124,6 +125,20 @@ export function initControlWSS({ bearer } = {}) {
             }
             debug('control: routed', msg.type, 'to', forwarded, 'bot(s)');
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: msg.type });
+            return;
+          }
+          case 'utterance_end': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED' }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            const sid = BigInt(msg.sessionId);
+            const uid = BigInt(msg.userId ?? '0');
+            log('control: utterance_end sid=', sid.toString(), 'userId=', uid.toString(), 'durationMs=', msg.durationMs);
+            // Fire-and-forget — pipeline errors are logged internally.
+            runPipeline(sid, uid).catch((e) => warn('pipeline error:', e.message));
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'utterance_end' });
             return;
           }
           // Phase 2/3 stubs: log and ack so the bot can develop against them.

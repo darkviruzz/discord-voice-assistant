@@ -96,6 +96,12 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
 }
 
+export function sendUtteranceEnd({ sessionId, userId, durationMs }) {
+  if (!_instance) return;
+  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs }); }
+  catch (e) { warn('transport.sendUtteranceEnd:', e.message); }
+}
+
 export function setVoiceConnection(conn) {
   if (!_instance) return;
   try { _instance.downlink.setVoiceConnection(conn); }

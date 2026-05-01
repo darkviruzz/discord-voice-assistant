@@ -5,7 +5,7 @@ import prism from 'prism-media';
 import wav from 'wav';
 import { safePath, debug, warn } from './logger.js';
 import { nowMs } from './util.js';
-import { sendUplinkFrame } from './transport/index.js';
+import { sendUplinkFrame, sendUtteranceEnd } from './transport/index.js';
 
 export class UtteranceRecorder {
   constructor(session, connection, receiver, user, options = {}) {
@@ -68,6 +68,8 @@ export class UtteranceRecorder {
           file,
         };
         this.onChunkDone(rec);
+        sendUtteranceEnd({ sessionId, userId, durationMs });
+        debug('recorder: utterance_end sent userId=', userId, 'durationMs=', durationMs);
         resolve(rec);
       });
     });

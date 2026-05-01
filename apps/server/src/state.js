@@ -6,7 +6,12 @@ export const sessions = new Map();
 export function ensureSession(sessionId) {
   const sid = BigInt(sessionId);
   if (!sessions.has(sid)) {
-    sessions.set(sid, { speakers: new Map(), downlinks: new Set(), createdAt: Date.now() });
+    sessions.set(sid, {
+      speakers: new Map(),
+      downlinks: new Set(),
+      conversationHistory: [],   // { role, content }[] for LLM context
+      createdAt: Date.now(),
+    });
     debug('new session', sid.toString());
   }
   return sessions.get(sid);

@@ -80,6 +80,12 @@ export class ControlClient extends EventEmitter {
     this._sendIfReady({ type: 'session_end', cmdId: randomUUID(), sessionId });
   }
 
+  // Notify the server that a speaker's utterance has finished.
+  // { sessionId: string, userId: string, durationMs: number }
+  sendUtteranceEnd({ sessionId, userId, durationMs }) {
+    this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs });
+  }
+
   _sendIfReady(obj) {
     if (!this.fsm.is(State.READY)) {
       debug('control: drop send (not ready)', obj.type);

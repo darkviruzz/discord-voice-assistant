@@ -4,6 +4,19 @@ import { ensureSpeaker, sessions } from './state.js';
 import { pickProtocolFor } from './auth.js';
 import { debug, log, warn } from './logger.js';
 
+const RING_MAX = 300; // max buffered Opus frames per speaker (~6 s at 50 fps)
+
+// Drain and return all buffered Opus frames for a speaker, then clear the buffer.
+// sessionId and userId may be string or BigInt.
+export function drainBuffer(sessionId, userId) {
+  const s = sessions.get(BigInt(sessionId));
+  if (!s) return [];
+  const sp = s.speakers.get(BigInt(userId));
+  if (!sp || !sp.opusBuffer) return [];
+  const frames = sp.opusBuffer.splice(0);
+  return frames;
+}
+
 export function initUplinkWSS({ bearer } = {}) {
   const wss = new WebSocketServer({
     noServer: true,
@@ -31,6 +44,10 @@ export function initUplinkWSS({ bearer } = {}) {
         sp.codec  ??= f.codec;
         sp.frames++;
         sp.lastSeq = f.seq;
+        // Buffer raw Opus payload for pipeline processing.
+        if (!sp.opusBuffer) sp.opusBuffer = [];
+        sp.opusBuffer.push(Buffer.from(f.payload));
+        if (sp.opusBuffer.length > RING_MAX) sp.opusBuffer.shift(); // drop oldest
         // Remember the first session/user this connection contributed to.
         if (!ownedSession) {
           ownedSession = f.sessionId;

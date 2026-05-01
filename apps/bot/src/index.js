@@ -2,7 +2,7 @@ import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
 import { Client, GatewayIntentBits, Partials, MessageFlags } from 'discord.js';
-import { joinVoiceChannel, getVoiceConnection, VoiceReceiver } from '@discordjs/voice';
+import { joinVoiceChannel, getVoiceConnection, VoiceReceiver, VoiceConnectionStatus } from '@discordjs/voice';
 import { log, warn, error, debug } from './logger.js';
 import { SessionManager } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
@@ -50,6 +50,13 @@ client.on('interactionCreate', async (i) => {
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
         selfDeaf: false,
+      });
+
+      connection.on('stateChange', (oldState, newState) => {
+        debug('voice:', oldState.status, '->', newState.status);
+        if (newState.status === VoiceConnectionStatus.Disconnected) {
+          warn('voice: disconnected code=', newState.closeCode ?? '(none)');
+        }
       });
 
       sessions.loadOrStartNew();

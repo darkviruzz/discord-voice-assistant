@@ -9,6 +9,9 @@ const PROTO_VERSION = 1;
 const SERVER_VERSION = '0.1.0';
 const SERVER_ID = randomUUID();
 
+// Registered bot connections — used to route server→bot commands.
+const botConnections = new Set();
+
 // Default playout/gating params advertised to bots; bots may apply them
 // locally. These mirror the env-documented defaults from the README.
 function serverParams() {
@@ -60,7 +63,8 @@ export function initControlWSS({ bearer } = {}) {
               return;
             }
             registered = true;
-            debug('control: registered bot', msg.botId, 'v', msg.version, 'caps', msg.capabilities);
+            botConnections.add(ws);
+            log('control: bot registered botId=', msg.botId, 'version=', msg.version);
             send(ws, { type: 'registered', serverParams: serverParams() });
             return;
           }
@@ -72,7 +76,7 @@ export function initControlWSS({ bearer } = {}) {
             }
             activeSessionId = BigInt(msg.sessionId);
             ensureSession(activeSessionId);
-            debug('control: session_start sid', activeSessionId.toString(), 'guild', msg.guildId, 'channel', msg.channelId);
+            log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }
@@ -85,7 +89,7 @@ export function initControlWSS({ bearer } = {}) {
             const sid = BigInt(msg.sessionId);
             dropSession(sid);
             if (activeSessionId === sid) activeSessionId = null;
-            debug('control: session_end sid', sid.toString());
+            log('control: session_end sid=', sid.toString());
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_end' });
             return;
           }
@@ -104,12 +108,23 @@ export function initControlWSS({ bearer } = {}) {
             );
             return;
           }
+          case 'set_params':
+          case 'stop_playback': {
+            let forwarded = 0;
+            for (const botWs of botConnections) {
+              if (botWs !== ws && botWs.readyState === 1 /* OPEN */) {
+                send(botWs, msg);
+                forwarded++;
+              }
+            }
+            debug('control: routed', msg.type, 'to', forwarded, 'bot(s)');
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: msg.type });
+            return;
+          }
           // Phase 2/3 stubs: log and ack so the bot can develop against them.
           case 'say':
           case 'play':
-          case 'set_params':
-          case 'save_session':
-          case 'stop_playback': {
+          case 'save_session': {
             debug('control: stub command', msg.type);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: false, error: 'NOT_IMPLEMENTED', op: msg.type });
             return;
@@ -126,6 +141,7 @@ export function initControlWSS({ bearer } = {}) {
     });
 
     ws.on('close', (code, reason) => {
+      botConnections.delete(ws);
       debug('control closed', code, reason && reason.toString());
     });
     ws.on('error', (e) => warn('control ws error:', e.message));

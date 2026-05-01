@@ -32,7 +32,11 @@ export function initUplinkWSS({ bearer } = {}) {
         sp.frames++;
         sp.lastSeq = f.seq;
         // Remember the first session/user this connection contributed to.
-        if (!ownedSession) { ownedSession = f.sessionId; ownedUser = f.userId; }
+        if (!ownedSession) {
+          ownedSession = f.sessionId;
+          ownedUser    = f.userId;
+          log('uplink: first frame userId=', f.userId.toString(), 'sessionId=', f.sessionId.toString());
+        }
         if ((sp.frames % 100) === 0) debug('speaker frames', f.userId.toString(), sp.frames);
       } catch (e) {
         warn('uplink parse error:', e.message);

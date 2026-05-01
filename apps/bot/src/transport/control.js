@@ -111,6 +111,16 @@ export class ControlClient extends EventEmitter {
     }
     this.ws = ws;
 
+    // Bail out quickly when the server is unreachable so backoff cycles fast.
+    const connectTimeout = setTimeout(() => {
+      if (ws.readyState === WebSocket.CONNECTING) {
+        debug('control: connect timeout, terminating');
+        ws.terminate();
+      }
+    }, 8000);
+    ws.once('open',  () => clearTimeout(connectTimeout));
+    ws.once('close', () => clearTimeout(connectTimeout));
+
     ws.on('open', () => {
       debug('control: socket open, awaiting hello');
       this.fsm.set(State.REGISTERING);
@@ -147,6 +157,7 @@ export class ControlClient extends EventEmitter {
     });
 
     ws.on('error', (e) => {
+      if (/401|unauthorized/i.test(e.message)) warn('control: AUTH_FAILED (bad bearer)');
       // 'close' will follow; just log here.
       debug('control: ws error:', e.message);
     });

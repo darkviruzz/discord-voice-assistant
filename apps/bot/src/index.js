@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, MessageFlags } from 'discord.js';
 import { joinVoiceChannel, getVoiceConnection, VoiceReceiver } from '@discordjs/voice';
 import { log, warn, error, debug } from './logger.js';
 import { SessionManager } from './session.js';
@@ -31,7 +31,7 @@ async function recoverOldSessions() {
   }
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   log(`Bot online als ${client.user.tag}`);
   await recoverOldSessions();
   transport.start({ botId: client.user.id });
@@ -43,13 +43,13 @@ client.on('interactionCreate', async (i) => {
     if (i.commandName === 'join') {
       const member = await i.guild.members.fetch(i.user.id);
       const channel = member.voice.channel;
-      if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', ephemeral: true });
+      if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });
 
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
-        selfDeaf: true, // wir hören nicht zu
+        selfDeaf: false,
       });
 
       sessions.loadOrStartNew();
@@ -88,7 +88,7 @@ client.on('interactionCreate', async (i) => {
         transport.speakingEnd(userId);
       });
 
-      await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.active.id}).`, ephemeral: true });
+      await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).`, flags: MessageFlags.Ephemeral });
     }
 
     if (i.commandName === 'leave') {
@@ -97,25 +97,25 @@ client.on('interactionCreate', async (i) => {
       transport.clearVoiceConnection();
       const wireId = sessions.wireSessionId();
       if (wireId) transport.sessionEnd(wireId);
-      await i.reply({ content: 'Voice-Channel verlassen.', ephemeral: true });
+      await i.reply({ content: 'Voice-Channel verlassen.', flags: MessageFlags.Ephemeral });
     }
 
     if (i.commandName === 'save-session') {
-      if (!sessions.active) return i.reply({ content: 'Keine aktive Session.', ephemeral: true });
+      if (!sessions.active) return i.reply({ content: 'Keine aktive Session.', flags: MessageFlags.Ephemeral });
       const s = sessions.active;
-      await i.reply({ content: 'Finalisiere Session … das kann je nach Länge etwas dauern.', ephemeral: true });
+      await i.reply({ content: 'Finalisiere Session … das kann je nach Länge etwas dauern.', flags: MessageFlags.Ephemeral });
       try {
         await mixSession(s.dir, 'session_mix.ogg', s.timeline);
         s.status = 'closed';
         sessions.persist();
-        await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, ephemeral: true });
+        await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, flags: MessageFlags.Ephemeral });
         transport.clearVoiceConnection();
         const wireId = sessions.wireSessionId();
         if (wireId) transport.sessionEnd(wireId);
         sessions.active = null;
       } catch (e) {
         error(e);
-        await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', ephemeral: true });
+        await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', flags: MessageFlags.Ephemeral });
       }
     }
   } catch (e) {

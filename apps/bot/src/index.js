@@ -65,6 +65,7 @@ client.on('interactionCreate', async (i) => {
       const receiver = connection.receiver;
 
       receiver.speaking.on('start', (userId) => {
+        debug('speaking: start userId=', userId);
         transport.speakingStart(userId);
         if (activeRecordings.has(userId)) {
           debug('already recording, skip start for', userId);

@@ -35,7 +35,9 @@ export class UtteranceRecorder {
     // Tap raw Opus packets BEFORE the decoder and forward to the server uplink.
     // `opusStream` is a Readable; adding a `data` listener here does not
     // conflict with the downstream pipe — both consumers see every packet.
+    let uplinkFrames = 0;
     opusStream.on('data', (opus) => {
+      if (++uplinkFrames === 1) debug('recorder: first opus frame userId=', userId, 'bytes=', opus.length);
       sendUplinkFrame({ sessionId, userId, tsMs: Date.now(), opus });
     });
 

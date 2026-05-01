@@ -97,6 +97,11 @@ export function initControlWSS({ bearer } = {}) {
             send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
             return;
           }
+          case 'ack': {
+            // Bot acknowledges a server→bot command (e.g. set_params routed from a controller).
+            debug('control: bot ack', msg.cmdId, msg.ok);
+            return;
+          }
           case 'play_test_tone': {
             if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
               send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });

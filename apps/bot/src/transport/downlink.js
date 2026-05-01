@@ -114,11 +114,13 @@ export class DownlinkClient {
       this._startPlayback();
     });
 
+    let downlinkFrames = 0;
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;
       try {
         const f = parseFrame(Buffer.from(data));
         if (!f.magic.equals(MAGIC_DNLK)) return;
+        if (++downlinkFrames === 1) debug('downlink: first frame received from server');
         this._jitter.add(f.payload, f.tsMs);
       } catch (e) {
         warn('downlink: parse error:', e.message);

@@ -42,7 +42,10 @@ export class UplinkClient {
   // Sends one raw Opus packet. sessionId and userId are strings.
   sendFrame({ sessionId, userId, tsMs, opus }) {
     const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      debug('uplink: frame dropped (ws state=', ws ? ws.readyState : 'null', ')');
+      return;
+    }
     const seq = this.seqs.get(userId) ?? 0;
     this.seqs.set(userId, (seq + 1) >>> 0); // wrap at u32
     const pkt = buildFrame({

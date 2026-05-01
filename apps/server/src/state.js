@@ -20,3 +20,10 @@ export function ensureSpeaker(sessionId, userId) {
   }
   return s.speakers.get(uid);
 }
+
+export function dropSession(sessionId) {
+  const sid = BigInt(sessionId);
+  const had = sessions.delete(sid);
+  if (had) debug('drop session', sid.toString());
+  return had;
+}

@@ -2,24 +2,32 @@ import { WebSocketServer } from 'ws';
 import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { ensureSession } from './state.js';
 import { log, debug } from './logger.js';
-import { OpusEncoder } from '@discordjs/opus';
+import opus from '@discordjs/opus';
+const { OpusEncoder } = opus;
 
 // Downlink-Verteiler: Bots subscriben per Text-JSON auf eine Session
-export function initDownlinkWSS(server, { path = '/downlink' } = {}) {
-  const wss = new WebSocketServer({ server, path });
+export function initDownlinkWSS({} = {}) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 65536, perMessageDeflate: false });
   wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     let sessionId = null;
     ws.on('message', (data, isBinary) => {
       if (isBinary) return; // Downlink empfängt nur Steuer-JSON vom Bot (Subscribe)
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.subscribe && typeof msg.sessionId === 'string') {
+        if (msg.subscribe && typeof msg.sessionId === 'string' && /^\d+$/.test(msg.sessionId)) {
+          // Remove from any previous session before re-subscribing.
+          if (sessionId) {
+            const prev = ensureSession(sessionId);
+            prev.downlinks.delete(ws);
+          }
           sessionId = BigInt(msg.sessionId);
           const s = ensureSession(sessionId);
           s.downlinks.add(ws);
           debug('downlink subscribed', sessionId.toString());
         }
-      } catch {}
+      } catch (e) { debug('downlink msg parse error:', e.message); }
     });
     ws.on('close', () => {
       if (sessionId) {
@@ -28,7 +36,7 @@ export function initDownlinkWSS(server, { path = '/downlink' } = {}) {
       }
     });
   });
-  log('downlink ws ready at', path);
+  log('downlink ws ready');
   return wss;
 }
 
@@ -49,14 +57,16 @@ export async function sendTestTone(sessionId) {
     }
     frames.push(Buffer.from(enc.encode(pcm)));
   }
-  let seq = 0; const ts0 = Date.now();
+  const ts0 = Date.now();
   for (const ws of s.downlinks) {
+    if (ws.readyState !== 1) continue; // skip closed/closing sockets
+    let seq = 0;
     for (let i = 0; i < frames.length; i++) {
       const pkt = buildFrame({
         magic: MAGIC_DNLK, codec: 'opus',
-        sessionId, userId: 0n, seq: seq++, tsMs: ts0 + i * 20, payload: frames[i]
+        sessionId, userId: 0n, seq: seq++, tsMs: ts0 + i * 20, payload: frames[i],
       });
-      ws.send(pkt, { binary: true });
+      try { ws.send(pkt, { binary: true }); } catch {}
     }
   }
   debug('test tone sent to session', sessionId.toString());

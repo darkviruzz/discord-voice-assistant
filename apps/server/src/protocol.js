@@ -22,11 +22,19 @@ export function buildFrame({ magic, codec, sessionId, userId, seq, tsMs, payload
   return Buffer.concat([hdr, payload]);
 }
 
+// Header is fixed-size: 4+1+1+2+8+8+4+8+2 = 38 bytes.
+const HEADER_SIZE = 38;
+const MAX_PAYLOAD = 4000; // Opus 120ms @ 510kbps ≈ 7650 bits, 20ms frames are far smaller.
+
 export function parseFrame(buf) {
+  if (buf.length < HEADER_SIZE) throw new Error(`frame too short: ${buf.length} < ${HEADER_SIZE}`);
   let o = 0;
   const magic = buf.subarray(0, 4); o += 4;
+  if (!magic.equals(MAGIC_UPLK) && !magic.equals(MAGIC_DNLK)) {
+    throw new Error(`bad magic: ${magic.toString('hex')}`);
+  }
   const ver = buf.readUInt8(o); o += 1;
-  if (ver !== VER) throw new Error('version mismatch');
+  if (ver !== VER) throw new Error(`version mismatch: ${ver} != ${VER}`);
   const flags = buf.readUInt8(o); o += 1;
   o += 2; // rsv
   const sessionId = readU64(buf, o); o += 8;
@@ -34,6 +42,8 @@ export function parseFrame(buf) {
   const seq = buf.readUInt32BE(o); o += 4;
   const tsMs = Number(readU64(buf, o)); o += 8;
   const len = buf.readUInt16BE(o); o += 2;
+  if (len > MAX_PAYLOAD) throw new Error(`payload too large: ${len} > ${MAX_PAYLOAD}`);
+  if (buf.length < o + len) throw new Error(`payload truncated: have ${buf.length - o} need ${len}`);
   const payload = buf.subarray(o, o + len);
   const codec = (flags & 1) ? 'opus' : 'pcm';
   return { magic, codec, sessionId, userId, seq, tsMs, payload };

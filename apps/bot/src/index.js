@@ -1,12 +1,18 @@
 import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
-import { joinVoiceChannel, getVoiceConnection, VoiceReceiver } from '@discordjs/voice';
+import { Client, GatewayIntentBits, Partials, MessageFlags } from 'discord.js';
+import {
+  joinVoiceChannel,
+  getVoiceConnection,
+  entersState,
+  VoiceConnectionStatus,
+} from '@discordjs/voice';
 import { log, warn, error, debug } from './logger.js';
 import { SessionManager } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
 import { mixSession } from './mixer.js';
+import * as transport from './transport/index.js';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
@@ -30,33 +36,67 @@ async function recoverOldSessions() {
   }
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   log(`Bot online als ${client.user.tag}`);
   await recoverOldSessions();
+  transport.start({ botId: client.user.id });
 });
 
 client.on('interactionCreate', async (i) => {
   try {
     if (!i.isChatInputCommand()) return;
+
     if (i.commandName === 'join') {
       const member = await i.guild.members.fetch(i.user.id);
       const channel = member.voice.channel;
-      if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', ephemeral: true });
+      if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });
 
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
-        selfDeaf: true, // wir hören nicht zu
+        selfDeaf: false,
       });
 
+      // Official recommended disconnect handler: distinguish a channel redirect
+      // (recovers within 5 s) from a real disconnect that needs cleanup.
+      connection.on(VoiceConnectionStatus.Disconnected, async () => {
+        try {
+          await Promise.race([
+            entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+          ]);
+          // Reconnecting to a new voice server — nothing to do.
+        } catch {
+          // Did not recover — real disconnect.
+          warn('voice: real disconnect, destroying connection');
+          try { connection.destroy(); } catch {}
+        }
+      });
+
+      connection.on('stateChange', (oldState, newState) => {
+        debug('voice:', oldState.status, '->', newState.status);
+        if (newState.status === VoiceConnectionStatus.Ready) {
+          log('voice: ready — receiver active');
+        }
+      });
+
+      connection.on('error', (e) => warn('voice: connection error:', e.message));
+
       sessions.loadOrStartNew();
+      transport.sessionStart({
+        sessionId: sessions.wireSessionId(),
+        guildId: channel.guild.id,
+        channelId: channel.id,
+        startedAt: sessions.active.startedAt,
+      });
+      transport.setVoiceConnection(connection);
 
-      // Receiver aufsetzen
-      const receiver = connection.receiver; // VoiceReceiver
+      const receiver = connection.receiver;
 
-      // speaking events liefern die Benutzer, die sprechen
       receiver.speaking.on('start', (userId) => {
+        debug('speaking: start userId=', userId);
+        transport.speakingStart(userId);
         if (activeRecordings.has(userId)) {
           debug('already recording, skip start for', userId);
           return;
@@ -75,28 +115,38 @@ client.on('interactionCreate', async (i) => {
         activeRecordings.set(userId, p);
       });
 
-      await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.active.id}).`, ephemeral: true });
+      receiver.speaking.on('end', (userId) => {
+        transport.speakingEnd(userId);
+      });
+
+      await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).`, flags: MessageFlags.Ephemeral });
     }
 
     if (i.commandName === 'leave') {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
-      await i.reply({ content: 'Voice-Channel verlassen.', ephemeral: true });
+      transport.clearVoiceConnection();
+      const wireId = sessions.wireSessionId();
+      if (wireId) transport.sessionEnd(wireId);
+      await i.reply({ content: 'Voice-Channel verlassen.', flags: MessageFlags.Ephemeral });
     }
 
     if (i.commandName === 'save-session') {
-      if (!sessions.active) return i.reply({ content: 'Keine aktive Session.', ephemeral: true });
+      if (!sessions.active) return i.reply({ content: 'Keine aktive Session.', flags: MessageFlags.Ephemeral });
       const s = sessions.active;
-      await i.reply({ content: 'Finalisiere Session … das kann je nach Länge etwas dauern.', ephemeral: true });
+      await i.reply({ content: 'Finalisiere Session … das kann je nach Länge etwas dauern.', flags: MessageFlags.Ephemeral });
       try {
         await mixSession(s.dir, 'session_mix.ogg', s.timeline);
         s.status = 'closed';
         sessions.persist();
-        await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, ephemeral: true });
+        await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, flags: MessageFlags.Ephemeral });
+        transport.clearVoiceConnection();
+        const wireId = sessions.wireSessionId();
+        if (wireId) transport.sessionEnd(wireId);
         sessions.active = null;
       } catch (e) {
         error(e);
-        await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', ephemeral: true });
+        await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', flags: MessageFlags.Ephemeral });
       }
     }
   } catch (e) {

@@ -58,6 +58,7 @@ client.on('interactionCreate', async (i) => {
           warn('voice: disconnected code=', newState.closeCode ?? '(none)');
         }
       });
+      connection.on('error', (e) => warn('voice: connection error:', e.message));
 
       sessions.loadOrStartNew();
       transport.sessionStart({

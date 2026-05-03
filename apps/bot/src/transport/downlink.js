@@ -69,7 +69,9 @@ export class DownlinkClient {
         const needed  = this._nextGateMs ?? this.gateMs;
         const elapsed = Date.now() - this._lastSpeakEnd;
         if (elapsed >= needed) {
+          const wasInterrupted = this._nextGateMs !== null;
           this._nextGateMs = null; // consumed
+          if (wasInterrupted) this._jitter.rewind(1000);
           return true;
         }
         return false;

@@ -3,7 +3,8 @@
 
 export class JitterBuffer {
   constructor() {
-    this._frames = []; // { opus: Buffer, tsMs: number }[]
+    this._frames  = []; // { opus: Buffer, tsMs: number }[]
+    this._history = []; // last 50 played frames (~1000 ms) for rewind
   }
 
   get size() { return this._frames.length; }
@@ -19,10 +20,27 @@ export class JitterBuffer {
     while (this._frames.length > 0 && this._frames[0].tsMs < cutoff) {
       this._frames.shift();
     }
-    return this._frames.length > 0 ? this._frames.shift().opus : null;
+    if (this._frames.length === 0) return null;
+    const frame = this._frames.shift();
+    // Keep last 50 frames (~1000 ms) for rewind after interruptions.
+    this._history.push(frame);
+    if (this._history.length > 50) this._history.shift();
+    return frame.opus;
+  }
+
+  // Re-insert the last `ms` of played frames at the front of the queue.
+  // Frames get fresh timestamps so they are not dropped as stale.
+  rewind(ms = 1000) {
+    const count = Math.min(Math.ceil(ms / 20), this._history.length);
+    if (count === 0) return;
+    const slice = this._history.slice(-count);
+    const now   = Date.now();
+    const fresh = slice.map((f, i) => ({ opus: f.opus, tsMs: now - (count - 1 - i) * 20 }));
+    this._frames.unshift(...fresh);
   }
 
   clear() {
-    this._frames = [];
+    this._frames  = [];
+    this._history = [];
   }
 }

@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs';
 import { log, debug } from './logger.js';
 
 // Speaker IDs for de_DE-thorsten_emotional-medium.onnx
@@ -22,6 +23,17 @@ const DEFAULT_SYSTEM = [
   '',
   'Beispiel: {"text":"Baron Kelthur herrschte mit eiserner Faust.","speaker_id":4,"model":"high"}',
 ].join('\n');
+
+// Load system prompt once at startup.
+// Priority: SYSTEM_PROMPT_FILE (path to text file) > SYSTEM_PROMPT (inline) > DEFAULT_SYSTEM
+const LOADED_SYSTEM = (() => {
+  const file = process.env.SYSTEM_PROMPT_FILE;
+  if (file) {
+    try { return readFileSync(file, 'utf8').trim(); }
+    catch (e) { console.error(`llm: cannot read SYSTEM_PROMPT_FILE "${file}":`, e.message); }
+  }
+  return process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
+})();
 
 // Parse Ollama's raw output. Returns { text, speakerId, model }.
 // Handles: plain JSON, JSON inside markdown fences, plain text fallback.
@@ -49,7 +61,7 @@ function parseResponse(raw) {
 export async function chat(history, query) {
   const base     = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
   const model    = process.env.OLLAMA_MODEL ?? 'llama3';
-  const system   = process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
+  const system   = LOADED_SYSTEM;
   const maxTurns = Number(process.env.HISTORY_TURNS ?? 6);
 
   const recentHistory = history.slice(-(maxTurns * 2));

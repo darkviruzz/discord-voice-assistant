@@ -29,12 +29,17 @@ export class JitterBuffer {
   }
 
   // Re-insert the last `ms` of played frames at the front of the queue.
-  // Frames get fresh timestamps so they are not dropped as stale.
+  // Existing queued frames are re-timestamped so they are not dropped as stale
+  // while the history plays back.
   rewind(ms = 1000) {
     const count = Math.min(Math.ceil(ms / 20), this._history.length);
     if (count === 0) return;
     const slice = this._history.slice(-count);
     const now   = Date.now();
+    // Push existing queued frames into the future so they survive the replay window.
+    for (let i = 0; i < this._frames.length; i++) {
+      this._frames[i] = { opus: this._frames[i].opus, tsMs: now + (count + i) * 20 };
+    }
     const fresh = slice.map((f, i) => ({ opus: f.opus, tsMs: now - (count - 1 - i) * 20 }));
     this._frames.unshift(...fresh);
   }

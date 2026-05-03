@@ -61,6 +61,9 @@ export class DownlinkClient {
     this._speakTimers    = new Map(); // userId → setTimeout handle
     // Gate duration to use after the next silence (null = use gateMs).
     this._nextGateMs     = null;
+    // True when the jitter buffer was non-empty at the start of the current interruption.
+    // Prevents rewind after the bot has already finished speaking.
+    this._interruptedWhilePlaying = false;
 
     // Gating interface passed to PlaybackStream.
     this._gating = {
@@ -71,7 +74,10 @@ export class DownlinkClient {
         if (elapsed >= needed) {
           const wasInterrupted = this._nextGateMs !== null;
           this._nextGateMs = null; // consumed
-          if (wasInterrupted) this._jitter.rewind(1000);
+          if (wasInterrupted && this._interruptedWhilePlaying) {
+            this._jitter.rewind(1000);
+            this._interruptedWhilePlaying = false;
+          }
           return true;
         }
         return false;
@@ -166,6 +172,7 @@ export class DownlinkClient {
       this._playStream = null;
     }
     this._jitter.clear();
+    this._interruptedWhilePlaying = false;
     this._sessionId = null;
   }
 
@@ -186,10 +193,12 @@ export class DownlinkClient {
 
   speakingStart(userId) {
     if (this._speakTimers.has(userId)) return; // already counting
+    // Capture playback state now; the buffer may drain before the timer fires.
+    const wasPlaying = this._jitter.size > 0;
     const timer = setTimeout(() => {
       this._speakTimers.delete(userId);
-      // Only close gate if still speaking after interruptMinMs.
       this._activeSpeakers.add(userId);
+      this._interruptedWhilePlaying = wasPlaying;
     }, this.interruptMinMs);
     this._speakTimers.set(userId, timer);
   }

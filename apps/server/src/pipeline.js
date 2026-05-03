@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { appendFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
 import { sessions } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
@@ -119,6 +121,63 @@ function pcm48kToOpusFrames(pcm48k) {
   return frames;
 }
 
+// ── Long-audio transcription helpers ────────────────────────────────────────
+
+// 15 s chunks with 2 s overlap (step = 13 s) at 48 kHz int16LE.
+const CHUNK_SAMPLES   = 48000 * 15; // 720 000 samples
+const OVERLAP_SAMPLES = 48000 *  2; //  96 000 samples
+const STEP_SAMPLES    = CHUNK_SAMPLES - OVERLAP_SAMPLES;
+
+function chunkPcm(pcm) {
+  if (pcm.length / 2 <= CHUNK_SAMPLES) return [pcm];
+  const chunks = [];
+  for (let off = 0; off < pcm.length / 2; off += STEP_SAMPLES) {
+    const end = Math.min(off + CHUNK_SAMPLES, pcm.length / 2);
+    chunks.push(pcm.subarray(off * 2, end * 2));
+    if (end >= pcm.length / 2) break;
+  }
+  return chunks;
+}
+
+// Remove duplicated overlap between two consecutive transcript strings (word-level).
+function stitchTwo(t1, t2) {
+  const w1 = t1.trim().split(/\s+/);
+  const w2 = t2.trim().split(/\s+/);
+  for (let len = Math.min(w1.length, w2.length, 20); len >= 2; len--) {
+    if (w1.slice(-len).join(' ').toLowerCase() === w2.slice(0, len).join(' ').toLowerCase()) {
+      return w1.join(' ') + ' ' + w2.slice(len).join(' ');
+    }
+  }
+  return t1.trim() + ' ' + t2.trim();
+}
+
+// Transcribe PCM, splitting into 15 s / 2 s-overlap chunks when audio is long.
+async function transcribeLong(pcm48k) {
+  const chunks = chunkPcm(pcm48k);
+  if (chunks.length === 1) return transcribe(pcmToWav(pcm48k));
+  log(`pipeline: long audio ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} chunks`);
+  const parts = [];
+  for (const chunk of chunks) {
+    const t = await transcribe(pcmToWav(chunk));
+    if (t) parts.push(t);
+  }
+  return parts.length === 0 ? '' : parts.reduce(stitchTwo);
+}
+
+// Append one transcript line to a per-session JSONL log on disk.
+function logTranscript(sessionId, userId, text) {
+  const dir = (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
+  try {
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(
+      join(dir, `session_${sessionId}.jsonl`),
+      JSON.stringify({ tsMs: Date.now(), userId: userId.toString(), text }) + '\n',
+    );
+  } catch (e) {
+    warn('pipeline: transcript log error:', e.message);
+  }
+}
+
 // Push Opus frames to every downlink subscriber of a session.
 function sendOpusToSession(sessionId, opusFrames) {
   const s = sessions.get(BigInt(sessionId));
@@ -169,14 +228,13 @@ export async function runPipeline(sessionId, userId) {
     }
     debug('pipeline: decoding', opusBuffers.length, 'opus frames for', key);
 
-    // 2. Decode Opus → WAV (48 kHz mono, ready for Whisper).
-    const pcm48k  = opusFramesToPcm(opusBuffers);
-    const wavBuf  = pcmToWav(pcm48k);
+    // 2. Decode Opus → 48 kHz mono PCM.
+    const pcm48k = opusFramesToPcm(opusBuffers);
 
-    // 3. STT.
+    // 3. STT — chunked for long audio (15 s slices, 2 s overlap).
     let transcript;
     try {
-      transcript = await transcribe(wavBuf);
+      transcript = await transcribeLong(pcm48k);
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;
@@ -186,6 +244,9 @@ export async function runPipeline(sessionId, userId) {
       debug('pipeline: empty transcript, skipping');
       return;
     }
+
+    // Log every utterance to disk (regardless of wake word).
+    logTranscript(sessionId, userId, transcript);
 
     // 4. Read wake-word config.
     const wakeWord   = process.env.WAKE_WORD         ?? 'Rabenauge';

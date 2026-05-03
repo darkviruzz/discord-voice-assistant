@@ -123,45 +123,72 @@ function pcm48kToOpusFrames(pcm48k) {
 
 // ── Long-audio transcription helpers ────────────────────────────────────────
 
-// 15 s chunks with 2 s overlap (step = 13 s) at 48 kHz int16LE.
-const CHUNK_SAMPLES   = 48000 * 15; // 720 000 samples
-const OVERLAP_SAMPLES = 48000 *  2; //  96 000 samples
-const STEP_SAMPLES    = CHUNK_SAMPLES - OVERLAP_SAMPLES;
+const FRAME          = 960;        // 20 ms @ 48 kHz
+const SILENCE_FRAMES = 15;         // 300 ms continuous silence → split point
+const MIN_CHUNK      = 48000 * 10; // 10 s minimum speech before a split
+const MAX_CHUNK      = 48000 * 30; // 30 s hard cap
 
-function chunkPcm(pcm) {
-  if (pcm.length / 2 <= CHUNK_SAMPLES) return [pcm];
-  const chunks = [];
-  for (let off = 0; off < pcm.length / 2; off += STEP_SAMPLES) {
-    const end = Math.min(off + CHUNK_SAMPLES, pcm.length / 2);
-    chunks.push(pcm.subarray(off * 2, end * 2));
-    if (end >= pcm.length / 2) break;
+function frameRms(pcm, sampleOffset) {
+  let sum = 0;
+  for (let i = 0; i < FRAME; i++) {
+    const s = pcm.readInt16LE((sampleOffset + i) * 2);
+    sum += s * s;
   }
-  return chunks;
+  return Math.sqrt(sum / FRAME);
 }
 
-// Remove duplicated overlap between two consecutive transcript strings (word-level).
-function stitchTwo(t1, t2) {
-  const w1 = t1.trim().split(/\s+/);
-  const w2 = t2.trim().split(/\s+/);
-  for (let len = Math.min(w1.length, w2.length, 20); len >= 2; len--) {
-    if (w1.slice(-len).join(' ').toLowerCase() === w2.slice(0, len).join(' ').toLowerCase()) {
-      return w1.join(' ') + ' ' + w2.slice(len).join(' ');
+// Split PCM at natural pauses (≥ 300 ms RMS silence).
+// Silence is discarded; each chunk starts at the first speech frame after a pause.
+function splitAtSilence(pcm) {
+  const totalSamples = pcm.length / 2;
+  if (totalSamples <= MAX_CHUNK) return [pcm];
+  const thresh  = Number(process.env.STT_SILENCE_THRESH ?? 300);
+  const chunks  = [];
+  let chunkStart   = 0;
+  let silenceStart = -1;
+  let silenceFrames = 0;
+
+  for (let off = 0; off + FRAME <= totalSamples; off += FRAME) {
+    const rms = frameRms(pcm, off);
+
+    if (rms < thresh) {
+      if (silenceStart < 0) silenceStart = off;
+      silenceFrames++;
+    } else {
+      if (silenceFrames >= SILENCE_FRAMES && (silenceStart - chunkStart) >= MIN_CHUNK) {
+        chunks.push(pcm.subarray(chunkStart * 2, silenceStart * 2));
+        chunkStart = off; // skip silence, new chunk starts at this speech frame
+      }
+      silenceStart = -1;
+      silenceFrames = 0;
+    }
+
+    // Hard cap: force split if chunk grows beyond MAX_CHUNK
+    if ((off + FRAME - chunkStart) >= MAX_CHUNK) {
+      const splitAt = silenceStart > chunkStart ? silenceStart : off + FRAME;
+      chunks.push(pcm.subarray(chunkStart * 2, splitAt * 2));
+      chunkStart    = splitAt;
+      silenceStart  = -1;
+      silenceFrames = 0;
     }
   }
-  return t1.trim() + ' ' + t2.trim();
+
+  if (chunkStart * 2 < pcm.length) chunks.push(pcm.subarray(chunkStart * 2));
+  return chunks.length > 0 ? chunks : [pcm];
 }
 
-// Transcribe PCM, splitting into 15 s / 2 s-overlap chunks when audio is long.
-async function transcribeLong(pcm48k) {
-  const chunks = chunkPcm(pcm48k);
-  if (chunks.length === 1) return transcribe(pcmToWav(pcm48k));
-  log(`pipeline: long audio ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} chunks`);
+// Transcribe PCM split at silence boundaries. Returns one string per chunk.
+async function transcribeChunked(pcm48k) {
+  const chunks = splitAtSilence(pcm48k);
+  if (chunks.length > 1) {
+    log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
+  }
   const parts = [];
   for (const chunk of chunks) {
     const t = await transcribe(pcmToWav(chunk));
     if (t) parts.push(t);
   }
-  return parts.length === 0 ? '' : parts.reduce(stitchTwo);
+  return parts;
 }
 
 // Append one transcript line to a per-session JSONL log on disk.
@@ -231,60 +258,71 @@ export async function runPipeline(sessionId, userId) {
     // 2. Decode Opus → 48 kHz mono PCM.
     const pcm48k = opusFramesToPcm(opusBuffers);
 
-    // 3. STT — chunked for long audio (15 s slices, 2 s overlap).
-    let transcript;
+    // 3. STT — split at silence boundaries, transcribe each chunk independently.
+    let transcripts;
     try {
-      transcript = await transcribeLong(pcm48k);
+      transcripts = await transcribeChunked(pcm48k);
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;
     }
 
-    if (!transcript) {
+    if (transcripts.length === 0) {
       debug('pipeline: empty transcript, skipping');
       return;
     }
 
-    // Log every utterance to disk (regardless of wake word).
-    logTranscript(sessionId, userId, transcript);
+    // Log the full utterance (all chunks joined) to disk.
+    logTranscript(sessionId, userId, transcripts.join(' '));
 
     // 4. Read wake-word config.
-    const wakeWord   = process.env.WAKE_WORD         ?? 'Rabenauge';
-    const fuzzy      = (process.env.WAKE_WORD_FUZZY  ?? 'true') !== 'false';
-    const maxPos     = Number(process.env.WAKE_WORD_POSITION ?? 3); // 0=anywhere, N=within first N words
+    const wakeWord = process.env.WAKE_WORD        ?? 'Rabenauge';
+    const fuzzy    = (process.env.WAKE_WORD_FUZZY ?? 'true') !== 'false';
+    const maxPos   = Number(process.env.WAKE_WORD_POSITION ?? 3);
 
-    // 5. Stop-command check (works with or without wake word).
-    //    "Rabenauge, stopp" → wake word found, query is stop.
-    //    "Halte ein" (≤5 words, no wake word) → standalone stop.
-    const wakeResult  = detectWakeWord(transcript, wakeWord, fuzzy, maxPos);
-    const wordCount   = transcript.trim().split(/\s+/).length;
-    const isStop      = (wakeResult.detected && isStopCommand(wakeResult.query)) ||
-                        (!wakeResult.detected && wordCount <= 5 && isStopCommand(transcript));
+    // 5 & 6. Scan each chunk independently for stop / wake-word.
+    //        Wake-word position resets at each chunk boundary (natural pause = new sentence start).
+    let wakeResult = null;
+    let transcript = null; // the chunk that triggered the wake word
 
-    if (isStop) {
-      broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+    for (const chunk of transcripts) {
+      const wordCount = chunk.trim().split(/\s+/).length;
+      const wr        = detectWakeWord(chunk, wakeWord, fuzzy, maxPos);
 
-      const session = sessions.get(BigInt(sessionId));
-      if (session) {
-        const interrupted = lastResponses.get(String(sessionId));
-        session.conversationHistory.push({
-          role: 'system',
-          content: interrupted
-            ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
-            : 'Der Sprecher hat die Wiedergabe gestoppt.',
+      // Stop-command check (works with or without wake word).
+      const isStop = (wr.detected && isStopCommand(wr.query)) ||
+                     (!wr.detected && wordCount <= 5 && isStopCommand(chunk));
+
+      if (isStop) {
+        broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+
+        const session = sessions.get(BigInt(sessionId));
+        if (session) {
+          const interrupted = lastResponses.get(String(sessionId));
+          session.conversationHistory.push({
+            role: 'system',
+            content: interrupted
+              ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
+              : 'Der Sprecher hat die Wiedergabe gestoppt.',
+          });
+        }
+
+        broadcastToAllBots({
+          type: 'chat_message', cmdId: randomUUID(),
+          question: chunk, isStop: true,
         });
+        log('pipeline: stop command detected, playback cleared');
+        return;
       }
 
-      broadcastToAllBots({
-        type: 'chat_message', cmdId: randomUUID(),
-        question: transcript, isStop: true,
-      });
-      log('pipeline: stop command detected, playback cleared');
-      return;
+      if (wr.detected) {
+        wakeResult = wr;
+        transcript = chunk;
+        break; // first wake-word hit wins
+      }
     }
 
-    // 6. Wake-word check.
-    if (!wakeResult.detected) {
+    if (!wakeResult) {
       log('pipeline: no wake word in transcript, ignoring');
       return;
     }

@@ -143,6 +143,9 @@ WAKE_WORD_POSITION=3
 | `WAKE_WORD` | `Rabenauge` | Aktivierungswort. Der Bot verarbeitet eine Aussage nur, wenn dieses Wort erkannt wird. Groß-/Kleinschreibung wird ignoriert. |
 | `WAKE_WORD_FUZZY` | `true` | Fuzzy-Matching mit Levenshtein-Distanz ≤ 2. Erkennt Vertipper und Aussprache-Varianten (z. B. „Rabenaugen", „Rabenoge"). Auf `false` setzen für exaktes Matching. |
 | `WAKE_WORD_POSITION` | `3` | Maximale Wortposition des Wake-Words im Transkript. `3` = Wake-Word muss in den ersten 3 Wörtern stehen. `0` = überall im Satz erlaubt. Verhindert False-Positives wenn das Wake-Word mitten in einer Aussage vorkommt. |
+| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+
+> **TODO — Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Das Entfernen des früheren 6-Sekunden-Ringbuffers hat die Transkriptions-Erkennung bereits deutlich verbessert. Falls lange Fragen trotzdem abgeschnitten werden: `DEBUG=1` setzen und die Meldung `pipeline: Xs → N silence-split chunks` im Serverlog beobachten. Erscheint keine Aufteilungs-Meldung bei einer >30-Sekunden-Aufnahme, ist der Schwellwert zu niedrig (zu viel Hintergraudrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
 
 ### Piper Speaker-IDs (de_DE-thorsten_emotional-medium)
 

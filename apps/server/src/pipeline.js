@@ -123,10 +123,11 @@ function pcm48kToOpusFrames(pcm48k) {
 
 // ── Long-audio transcription helpers ────────────────────────────────────────
 
-const FRAME          = 960;        // 20 ms @ 48 kHz
-const SILENCE_FRAMES = 15;         // 300 ms continuous silence → split point
-const MIN_CHUNK      = 48000 * 10; // 10 s minimum speech before a split
-const MAX_CHUNK      = 48000 * 30; // 30 s hard cap
+const FRAME           = 960;        // 20 ms @ 48 kHz
+const SILENCE_FRAMES  = 15;         // 300 ms continuous silence → split candidate
+const MIN_CHUNK       = 48000 * 10; // 10 s minimum speech before a natural split
+const MAX_CHUNK       = 48000 * 30; // 30 s hard cap
+const OVERLAP_SAMPLES = 48000 *  2; // 2 s overlap used only in the no-silence fallback
 
 function frameRms(pcm, sampleOffset) {
   let sum = 0;
@@ -138,15 +139,23 @@ function frameRms(pcm, sampleOffset) {
 }
 
 // Split PCM at natural pauses (≥ 300 ms RMS silence).
-// Silence is discarded; each chunk starts at the first speech frame after a pause.
+// Returns { pcm: Buffer, hasOverlap: boolean }[].
+//   hasOverlap=false — clean silence split (silence discarded).
+//   hasOverlap=true  — forced split with 2 s overlap; stitchOverlap() should merge with previous.
 function splitAtSilence(pcm) {
   const totalSamples = pcm.length / 2;
-  if (totalSamples <= MAX_CHUNK) return [pcm];
-  const thresh  = Number(process.env.STT_SILENCE_THRESH ?? 300);
-  const chunks  = [];
-  let chunkStart   = 0;
-  let silenceStart = -1;
+  if (totalSamples <= MAX_CHUNK) return [{ pcm, hasOverlap: false }];
+
+  const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
+  const chunks = [];
+  let chunkStart    = 0;
+  let silenceStart  = -1;
   let silenceFrames = 0;
+  // Best (longest) silence region seen in the current chunk window.
+  let bestSilStart  = -1;
+  let bestSilEnd    = -1;
+  let bestSilDur    = 0;
+  let nextHasOverlap = false;
 
   for (let off = 0; off + FRAME <= totalSamples; off += FRAME) {
     const rms = frameRms(pcm, off);
@@ -155,38 +164,82 @@ function splitAtSilence(pcm) {
       if (silenceStart < 0) silenceStart = off;
       silenceFrames++;
     } else {
-      if (silenceFrames >= SILENCE_FRAMES && (silenceStart - chunkStart) >= MIN_CHUNK) {
-        chunks.push(pcm.subarray(chunkStart * 2, silenceStart * 2));
-        chunkStart = off; // skip silence, new chunk starts at this speech frame
+      // Speech frame — silence region just ended (if any).
+      if (silenceFrames >= SILENCE_FRAMES) {
+        // Track the longest silence seen for the current chunk.
+        if (silenceFrames > bestSilDur) {
+          bestSilStart = silenceStart;
+          bestSilEnd   = off;
+          bestSilDur   = silenceFrames;
+        }
+        // Natural split: enough speech before this silence.
+        if ((silenceStart - chunkStart) >= MIN_CHUNK) {
+          chunks.push({ pcm: pcm.subarray(chunkStart * 2, silenceStart * 2), hasOverlap: nextHasOverlap });
+          nextHasOverlap = false;
+          chunkStart     = off;
+          bestSilStart   = -1; bestSilEnd = -1; bestSilDur = 0;
+        }
       }
-      silenceStart = -1;
-      silenceFrames = 0;
-    }
-
-    // Hard cap: force split if chunk grows beyond MAX_CHUNK
-    if ((off + FRAME - chunkStart) >= MAX_CHUNK) {
-      const splitAt = silenceStart > chunkStart ? silenceStart : off + FRAME;
-      chunks.push(pcm.subarray(chunkStart * 2, splitAt * 2));
-      chunkStart    = splitAt;
       silenceStart  = -1;
       silenceFrames = 0;
     }
+
+    // Hard cap: chunk has grown to MAX_CHUNK.
+    if ((off + FRAME - chunkStart) >= MAX_CHUNK) {
+      if (bestSilStart >= 0) {
+        // Split at the longest silence found — best boundary available.
+        chunks.push({ pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2), hasOverlap: nextHasOverlap });
+        nextHasOverlap = false;
+        chunkStart     = bestSilEnd; // skip silence
+      } else {
+        // No qualifying silence at all — forced split with 2 s overlap.
+        const splitAt = off + FRAME;
+        chunks.push({ pcm: pcm.subarray(chunkStart * 2, splitAt * 2), hasOverlap: nextHasOverlap });
+        nextHasOverlap = true; // next chunk carries the overlap flag
+        chunkStart     = Math.max(0, splitAt - OVERLAP_SAMPLES);
+      }
+      silenceStart = -1; silenceFrames = 0;
+      bestSilStart = -1; bestSilEnd    = -1; bestSilDur = 0;
+    }
   }
 
-  if (chunkStart * 2 < pcm.length) chunks.push(pcm.subarray(chunkStart * 2));
-  return chunks.length > 0 ? chunks : [pcm];
+  if (chunkStart * 2 < pcm.length) {
+    chunks.push({ pcm: pcm.subarray(chunkStart * 2), hasOverlap: nextHasOverlap });
+  }
+  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false }];
 }
 
-// Transcribe PCM split at silence boundaries. Returns one string per chunk.
+// Soft word-boundary deduplication for the 2 s overlap fallback.
+// Tries 3→1 word matches at the end of t1 / start of t2.
+// On match: removes duplicated words from start of t2.
+// On no match: keeps all words (avoids creating artifacts).
+function stitchOverlap(t1, t2) {
+  const w1 = t1.trim().split(/\s+/);
+  const w2 = t2.trim().split(/\s+/);
+  for (let len = 3; len >= 1; len--) {
+    if (w1.length >= len && w2.length >= len &&
+        w1.slice(-len).join(' ').toLowerCase() === w2.slice(0, len).join(' ').toLowerCase()) {
+      return w1.join(' ') + ' ' + w2.slice(len).join(' ');
+    }
+  }
+  return t1.trim() + ' ' + t2.trim();
+}
+
+// Transcribe PCM split at silence boundaries. Returns one string per logical chunk.
 async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
   if (chunks.length > 1) {
     log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
   }
   const parts = [];
-  for (const chunk of chunks) {
-    const t = await transcribe(pcmToWav(chunk));
-    if (t) parts.push(t);
+  for (const { pcm, hasOverlap } of chunks) {
+    const t = await transcribe(pcmToWav(pcm));
+    if (!t) continue;
+    if (hasOverlap && parts.length > 0) {
+      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], t);
+    } else {
+      parts.push(t);
+    }
   }
   return parts;
 }

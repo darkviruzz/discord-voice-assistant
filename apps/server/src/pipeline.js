@@ -8,12 +8,12 @@ import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { log, warn, debug } from './logger.js';
 import opus from '@discordjs/opus';
 
-const { OpusEncoder, OpusDecoder } = opus;
+const { OpusEncoder } = opus;
 
 // ── Audio helpers ────────────────────────────────────────────────────────────
 
 function opusFramesToPcm(opusBuffers) {
-  const dec = new OpusDecoder(48000, 1);
+  const dec = new OpusEncoder(48000, 1);
   return Buffer.concat(opusBuffers.map(b => dec.decode(b)));
 }
 

@@ -46,17 +46,34 @@ export class DownlinkClient {
     this.url    = `${baseUrl}/downlink`;
     this.bearer = bearer || null;
 
-    this.gateMs       = params.gateMs       ?? 200;
-    this.playoutMaxMs = params.playoutMaxMs ?? 1500;
+    this.gateMs         = params.gateMs         ?? 80;
+    this.playoutMaxMs   = params.playoutMaxMs    ?? 1500;
+    // Minimum continuous speaking time before the gate closes.
+    // Sounds shorter than this (laughs, coughs) will not interrupt playback.
+    this.interruptMinMs = params.interruptMinMs  ?? 400;
+    // After a real interruption ends, wait this long before resuming.
+    this.resumeGateMs   = params.resumeGateMs    ?? 900;
 
-    this._jitter     = new JitterBuffer();
+    this._jitter         = new JitterBuffer();
     this._activeSpeakers = new Set();
-    this._lastSpeakEnd   = 0; // timestamp when activeSpeakers last became empty
+    this._lastSpeakEnd   = 0;
+    // Pending timers before a speaking event is treated as a real interruption.
+    this._speakTimers    = new Map(); // userId → setTimeout handle
+    // Gate duration to use after the next silence (null = use gateMs).
+    this._nextGateMs     = null;
 
-    // Gating interface passed to PlaybackStream. Uses arrow functions so
-    // `this` always refers to the DownlinkClient instance.
+    // Gating interface passed to PlaybackStream.
     this._gating = {
-      isOpen:         () => this._activeSpeakers.size === 0 && (Date.now() - this._lastSpeakEnd) >= this.gateMs,
+      isOpen: () => {
+        if (this._activeSpeakers.size > 0) return false;
+        const needed  = this._nextGateMs ?? this.gateMs;
+        const elapsed = Date.now() - this._lastSpeakEnd;
+        if (elapsed >= needed) {
+          this._nextGateMs = null; // consumed
+          return true;
+        }
+        return false;
+      },
       get playoutMaxMs() { return 1500; }, // placeholder — overridden below
     };
     Object.defineProperty(this._gating, 'playoutMaxMs', { get: () => this.playoutMaxMs, configurable: true });
@@ -166,20 +183,36 @@ export class DownlinkClient {
   }
 
   speakingStart(userId) {
-    this._activeSpeakers.add(userId);
+    if (this._speakTimers.has(userId)) return; // already counting
+    const timer = setTimeout(() => {
+      this._speakTimers.delete(userId);
+      // Only close gate if still speaking after interruptMinMs.
+      this._activeSpeakers.add(userId);
+    }, this.interruptMinMs);
+    this._speakTimers.set(userId, timer);
   }
 
   speakingEnd(userId) {
+    const timer = this._speakTimers.get(userId);
+    if (timer) {
+      // Speech ended before the threshold — treat as noise, ignore.
+      clearTimeout(timer);
+      this._speakTimers.delete(userId);
+      return;
+    }
     this._activeSpeakers.delete(userId);
     if (this._activeSpeakers.size === 0) {
       this._lastSpeakEnd = Date.now();
+      this._nextGateMs   = this.resumeGateMs; // real interruption — use long gap
     }
   }
 
-  setParams({ gateMs, playoutMaxMs }) {
-    if (typeof gateMs === 'number')       this.gateMs       = gateMs;
-    if (typeof playoutMaxMs === 'number') this.playoutMaxMs = playoutMaxMs;
-    debug('downlink: params updated', { gateMs: this.gateMs, playoutMaxMs: this.playoutMaxMs });
+  setParams({ gateMs, playoutMaxMs, interruptMinMs, resumeGateMs }) {
+    if (typeof gateMs         === 'number') this.gateMs         = gateMs;
+    if (typeof playoutMaxMs   === 'number') this.playoutMaxMs   = playoutMaxMs;
+    if (typeof interruptMinMs === 'number') this.interruptMinMs = interruptMinMs;
+    if (typeof resumeGateMs   === 'number') this.resumeGateMs   = resumeGateMs;
+    debug('downlink: params updated', { gateMs: this.gateMs, playoutMaxMs: this.playoutMaxMs, interruptMinMs: this.interruptMinMs, resumeGateMs: this.resumeGateMs });
   }
 
   stopPlayback() {

@@ -246,21 +246,23 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    // Persist turn to history.
-    session.conversationHistory.push({ role: 'user',      content: query    });
-    session.conversationHistory.push({ role: 'assistant', content: response });
-    lastResponses.set(String(sessionId), response);
+    const { text: responseText, speakerId, model: ttsModel } = response;
 
-    // Always send the Q&A to the Discord text channel — even if audio fails.
+    // Persist turn to history using the spoken text (not raw JSON).
+    session.conversationHistory.push({ role: 'user',      content: query        });
+    session.conversationHistory.push({ role: 'assistant', content: responseText });
+    lastResponses.set(String(sessionId), responseText);
+
+    // Always send the Q&A to the Discord text channel.
     broadcastToAllBots({
       type: 'chat_message', cmdId: randomUUID(),
-      question: transcript, answer: response, isStop: false,
+      question: transcript, answer: responseText, isStop: false,
     });
 
     // 8. TTS.
     let wavAudio;
     try {
-      wavAudio = await synthesize(response);
+      wavAudio = await synthesize(responseText, { model: ttsModel, speakerId });
     } catch (e) {
       warn('pipeline: tts error:', e.message);
       return;

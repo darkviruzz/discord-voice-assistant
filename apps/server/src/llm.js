@@ -1,16 +1,50 @@
-import { log } from './logger.js';
+import { log, debug } from './logger.js';
 
+// Speaker IDs for de_DE-thorsten_emotional-medium.onnx
+// 0=Fröhlich 1=Wütend 2=Angewidert 3=Betrunken
+// 4=Neutral  5=Schläfrig 6=Überrascht 7=Flüsternd
 const DEFAULT_SYSTEM = [
   'Du bist Rabenauge, ein Assistent für eine Pen-and-Paper-Runde.',
-  'Deine Antworten werden direkt vorgelesen. Deshalb:',
+  'Deine Antworten werden direkt vorgelesen.',
+  '',
+  'Antworte IMMER als JSON-Objekt mit exakt diesen Feldern:',
+  '  "text"      : deine gesprochene Antwort (Pflicht)',
+  '  "speaker_id": Zahl 0-7 passend zur Stimmung (Standard: 4)',
+  '                0=Fröhlich 1=Wütend 2=Angewidert 3=Betrunken',
+  '                4=Neutral  5=Schläfrig 6=Überrascht 7=Flüsternd',
+  '  "model"     : "emotional" (Standard) oder "high" für sachliche Fakten',
+  '',
+  'Regeln für "text":',
   '- Kein Markdown, keine Tabellen, keine Aufzählungszeichen.',
-  '- Schreibe in vollständigen, natürlichen Sätzen.',
-  '- Mindestens 3 Wörter pro Antwort, aber kurz und prägnant — kein Monolog.',
-  '- Keine leeren Einstiegsfloskeln wie "Natürlich!", "Gerne!", "Sicher!" oder "Klar!".',
-  '- Antworte immer auf Deutsch.',
+  '- Vollständige, natürliche Sätze. Mindestens 3 Wörter.',
+  '- Keine leeren Einstiegsfloskeln ("Natürlich!", "Gerne!", "Sicher!").',
+  '- Immer auf Deutsch.',
+  '',
+  'Beispiel: {"text":"Baron Kelthur herrschte mit eiserner Faust.","speaker_id":4,"model":"high"}',
 ].join('\n');
 
-// Send a query to Ollama and return the response text.
+// Parse Ollama's raw output. Returns { text, speakerId, model }.
+// Handles: plain JSON, JSON inside markdown fences, plain text fallback.
+function parseResponse(raw) {
+  const stripped = raw.trim()
+    .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/,  '');
+  try {
+    const obj = JSON.parse(stripped);
+    if (typeof obj.text === 'string' && obj.text.trim()) {
+      return {
+        text:      obj.text.trim(),
+        speakerId: Number.isInteger(obj.speaker_id)
+          ? Math.max(0, Math.min(7, obj.speaker_id)) : 4,
+        model:     obj.model === 'high' ? 'high' : 'emotional',
+      };
+    }
+  } catch {}
+  // Plain-text fallback — neutral emotional voice.
+  debug('llm: response was not JSON, using plain text fallback');
+  return { text: raw.trim(), speakerId: 4, model: 'emotional' };
+}
+
+// Send a query to Ollama. Returns { text, speakerId, model }.
 // `history` is an array of { role, content } objects (mutable — caller manages it).
 export async function chat(history, query) {
   const base     = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
@@ -18,9 +52,7 @@ export async function chat(history, query) {
   const system   = process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
   const maxTurns = Number(process.env.HISTORY_TURNS ?? 6);
 
-  // Keep at most maxTurns × 2 messages (user + assistant pairs).
   const recentHistory = history.slice(-(maxTurns * 2));
-
   const messages = [
     { role: 'system', content: system },
     ...recentHistory,
@@ -42,8 +74,9 @@ export async function chat(history, query) {
     throw new Error(`llm: HTTP ${res.status}: ${body.slice(0, 200)}`);
   }
 
-  const data = await res.json();
-  const text = (data.message?.content ?? '').trim();
-  log('llm: response=', JSON.stringify(text));
-  return text;
+  const data   = await res.json();
+  const raw    = (data.message?.content ?? '').trim();
+  const result = parseResponse(raw);
+  log('llm: response=', JSON.stringify(result));
+  return result;
 }

@@ -26,8 +26,10 @@ export function start({ botId } = {}) {
   }
   const bearer = process.env.CONTROL_BEARER || null;
   const params = {
-    gateMs:       Number(process.env.GATE_MS        ?? 80),
-    playoutMaxMs: Number(process.env.PLAYOUT_MAX_MS ?? 1500),
+    gateMs:         Number(process.env.GATE_MS           ?? 80),
+    playoutMaxMs:   Number(process.env.PLAYOUT_MAX_MS    ?? 1500),
+    interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 400),
+    resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 900),
   };
 
   const fsm      = new TransportState();

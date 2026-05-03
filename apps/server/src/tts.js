@@ -1,38 +1,41 @@
 import { log } from './logger.js';
 
 // Synthesize `text` and return a WAV Buffer (PCM, any sample rate).
-// The pipeline will handle resampling to 48 kHz before Opus encoding.
-export async function synthesize(text) {
+// `opts.model`:     'emotional' | 'high'  (Piper Thorsten models)
+// `opts.speakerId`: 0-7  (only relevant for 'emotional')
+//   0=Fröhlich  1=Wütend    2=Angewidert  3=Betrunken
+//   4=Neutral   5=Schläfrig 6=Überrascht  7=Flüsternd
+export async function synthesize(text, { model = 'emotional', speakerId = 4 } = {}) {
   const provider = (process.env.TTS_PROVIDER ?? 'piper').toLowerCase();
   if (provider === 'elevenlabs') return synthElevenLabs(text);
-  return synthLocal(text);
+  return synthLocal(text, model, speakerId);
 }
 
-// Generic local TTS server — works for Piper and KokoroTTS HTTP servers.
-// Both typically expose POST /synthesize → WAV body.
-async function synthLocal(text) {
+// Generic local TTS server (Piper / KokoroTTS).  POST /synthesize → WAV body.
+async function synthLocal(text, model, speakerId) {
   const base = (process.env.TTS_URL ?? 'http://localhost:5000').replace(/\/+$/, '');
+  const body = { text, model, speaker_id: speakerId };
+
   let res;
   try {
     res = await fetch(`${base}/synthesize`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ text }),
+      body:    JSON.stringify(body),
     });
   } catch (e) {
     throw new Error(`tts: connection failed: ${e.message}`);
   }
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`tts: HTTP ${res.status}: ${body.slice(0, 200)}`);
+    const rb = await res.text().catch(() => '');
+    throw new Error(`tts: HTTP ${res.status}: ${rb.slice(0, 200)}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  log('tts: audio', buf.length, 'bytes');
+  log('tts: audio', buf.length, 'bytes', `(model=${model} speaker=${speakerId})`);
   return buf;
 }
 
-// ElevenLabs — requests PCM 24 kHz so the pipeline can treat it as raw PCM.
-// We prepend a WAV header to match what synthLocal returns.
+// ElevenLabs — requests PCM 24 kHz; we prepend a WAV header.
 async function synthElevenLabs(text) {
   const apiKey  = process.env.ELEVENLABS_API_KEY;
   const voiceId = process.env.ELEVENLABS_VOICE_ID ?? 'EXAVITQu4vr4xnSDxMaL';
@@ -53,8 +56,8 @@ async function synthElevenLabs(text) {
     throw new Error(`tts: elevenlabs connection failed: ${e.message}`);
   }
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`tts: elevenlabs HTTP ${res.status}: ${body.slice(0, 200)}`);
+    const rb = await res.text().catch(() => '');
+    throw new Error(`tts: elevenlabs HTTP ${res.status}: ${rb.slice(0, 200)}`);
   }
 
   const pcm = Buffer.from(await res.arrayBuffer());
@@ -66,18 +69,12 @@ function wrapInWav(pcm, sampleRate, channels, bitDepth) {
   const byteRate   = sampleRate * channels * (bitDepth / 8);
   const blockAlign = channels * (bitDepth / 8);
   const hdr = Buffer.alloc(44);
-  hdr.write('RIFF', 0);
-  hdr.writeUInt32LE(36 + pcm.length, 4);
-  hdr.write('WAVE', 8);
-  hdr.write('fmt ', 12);
-  hdr.writeUInt32LE(16, 16);
-  hdr.writeUInt16LE(1,          20); // PCM
-  hdr.writeUInt16LE(channels,   22);
-  hdr.writeUInt32LE(sampleRate, 24);
-  hdr.writeUInt32LE(byteRate,   28);
-  hdr.writeUInt16LE(blockAlign, 32);
-  hdr.writeUInt16LE(bitDepth,   34);
-  hdr.write('data', 36);
-  hdr.writeUInt32LE(pcm.length, 40);
+  hdr.write('RIFF', 0);        hdr.writeUInt32LE(36 + pcm.length, 4);
+  hdr.write('WAVE', 8);        hdr.write('fmt ', 12);
+  hdr.writeUInt32LE(16, 16);   hdr.writeUInt16LE(1,          20);
+  hdr.writeUInt16LE(channels,  22); hdr.writeUInt32LE(sampleRate, 24);
+  hdr.writeUInt32LE(byteRate,  28); hdr.writeUInt16LE(blockAlign, 32);
+  hdr.writeUInt16LE(bitDepth,  34);
+  hdr.write('data', 36);       hdr.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([hdr, pcm]);
 }

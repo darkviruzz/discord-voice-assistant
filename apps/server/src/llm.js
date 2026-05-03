@@ -1,13 +1,21 @@
 import { log } from './logger.js';
 
-const DEFAULT_SYSTEM = 'Du bist Rabenauge, ein hilfreicher Assistent für eine Pen-and-Paper-Runde. Antworte kurz und prägnant auf Deutsch.';
+const DEFAULT_SYSTEM = [
+  'Du bist Rabenauge, ein Assistent für eine Pen-and-Paper-Runde.',
+  'Deine Antworten werden direkt vorgelesen. Deshalb:',
+  '- Kein Markdown, keine Tabellen, keine Aufzählungszeichen.',
+  '- Schreibe in vollständigen, natürlichen Sätzen.',
+  '- Mindestens 3 Wörter pro Antwort, aber kurz und prägnant — kein Monolog.',
+  '- Keine leeren Einstiegsfloskeln wie "Natürlich!", "Gerne!", "Sicher!" oder "Klar!".',
+  '- Antworte immer auf Deutsch.',
+].join('\n');
 
 // Send a query to Ollama and return the response text.
 // `history` is an array of { role, content } objects (mutable — caller manages it).
 export async function chat(history, query) {
-  const base    = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
-  const model   = process.env.OLLAMA_MODEL ?? 'llama3';
-  const system  = process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
+  const base     = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
+  const model    = process.env.OLLAMA_MODEL ?? 'llama3';
+  const system   = process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
   const maxTurns = Number(process.env.HISTORY_TURNS ?? 6);
 
   // Keep at most maxTurns × 2 messages (user + assistant pairs).

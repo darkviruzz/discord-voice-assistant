@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { sessions } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
@@ -6,9 +7,19 @@ import { chat } from './llm.js';
 import { synthesize } from './tts.js';
 import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { log, warn, debug } from './logger.js';
+import { broadcastToAllBots } from './broadcast.js';
 import opus from '@discordjs/opus';
 
 const { OpusEncoder } = opus;
+
+// ── Stop-command detection ───────────────────────────────────────────────────
+
+// Matches German stop commands, with or without the wake word in front.
+const STOP_RE = /\b(stopp?|aufhören|halt(e)?\s*(ein|an)?|abbrechen|beenden)\b/i;
+
+function isStopCommand(text) {
+  return STOP_RE.test(text);
+}
 
 // ── Audio helpers ────────────────────────────────────────────────────────────
 
@@ -131,10 +142,15 @@ function sendOpusToSession(sessionId, opusFrames) {
   log('pipeline: sent', opusFrames.length, 'opus frames to session', sessionId.toString());
 }
 
-// ── Main pipeline ────────────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────────
 
 // Prevent simultaneous pipeline runs per session (avoids LLM/GPU contention).
 const activePipelines = new Set();
+
+// Last LLM response per session — used to add interrupt context to history.
+const lastResponses = new Map(); // sessionId(string) → response text
+
+// ── Main pipeline ────────────────────────────────────────────────────────────
 
 export async function runPipeline(sessionId, userId) {
   const key = `${sessionId}:${userId}`;
@@ -171,18 +187,51 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    // 4. Wake word check.
-    const wakeWord = process.env.WAKE_WORD ?? 'Rabenauge';
-    const fuzzy    = (process.env.WAKE_WORD_FUZZY ?? 'true') !== 'false';
-    const { detected, query } = detectWakeWord(transcript, wakeWord, fuzzy);
+    // 4. Read wake-word config.
+    const wakeWord   = process.env.WAKE_WORD         ?? 'Rabenauge';
+    const fuzzy      = (process.env.WAKE_WORD_FUZZY  ?? 'true') !== 'false';
+    const maxPos     = Number(process.env.WAKE_WORD_POSITION ?? 3); // 0=anywhere, N=within first N words
 
-    if (!detected) {
+    // 5. Stop-command check (works with or without wake word).
+    //    "Rabenauge, stopp" → wake word found, query is stop.
+    //    "Halte ein" (≤5 words, no wake word) → standalone stop.
+    const wakeResult  = detectWakeWord(transcript, wakeWord, fuzzy, maxPos);
+    const wordCount   = transcript.trim().split(/\s+/).length;
+    const isStop      = (wakeResult.detected && isStopCommand(wakeResult.query)) ||
+                        (!wakeResult.detected && wordCount <= 5 && isStopCommand(transcript));
+
+    if (isStop) {
+      broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+
+      const session = sessions.get(BigInt(sessionId));
+      if (session) {
+        const interrupted = lastResponses.get(String(sessionId));
+        session.conversationHistory.push({
+          role: 'system',
+          content: interrupted
+            ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
+            : 'Der Sprecher hat die Wiedergabe gestoppt.',
+        });
+      }
+
+      broadcastToAllBots({
+        type: 'chat_message', cmdId: randomUUID(),
+        question: transcript, isStop: true,
+      });
+      log('pipeline: stop command detected, playback cleared');
+      return;
+    }
+
+    // 6. Wake-word check.
+    if (!wakeResult.detected) {
       log('pipeline: no wake word in transcript, ignoring');
       return;
     }
+
+    const { query } = wakeResult;
     log('pipeline: wake word detected, query=', JSON.stringify(query));
 
-    // 5. LLM.
+    // 7. LLM.
     const session = sessions.get(BigInt(sessionId));
     if (!session) {
       warn('pipeline: session not found', sessionId.toString());
@@ -200,8 +249,15 @@ export async function runPipeline(sessionId, userId) {
     // Persist turn to history.
     session.conversationHistory.push({ role: 'user',      content: query    });
     session.conversationHistory.push({ role: 'assistant', content: response });
+    lastResponses.set(String(sessionId), response);
 
-    // 6. TTS.
+    // Always send the Q&A to the Discord text channel — even if audio fails.
+    broadcastToAllBots({
+      type: 'chat_message', cmdId: randomUUID(),
+      question: transcript, answer: response, isStop: false,
+    });
+
+    // 8. TTS.
     let wavAudio;
     try {
       wavAudio = await synthesize(response);
@@ -210,7 +266,7 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    // 7. Parse TTS WAV → mono 48 kHz PCM.
+    // 9. Parse TTS WAV → mono 48 kHz PCM.
     let pcmOut;
     try {
       const { pcm, sampleRate, channels } = parseWav(wavAudio);
@@ -221,7 +277,7 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    // 8. Encode to Opus and push to downlink.
+    // 10. Encode to Opus and push to downlink.
     const opusOut = pcm48kToOpusFrames(pcmOut);
     sendOpusToSession(sessionId, opusOut);
   } finally {

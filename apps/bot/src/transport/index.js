@@ -5,6 +5,11 @@ import { DownlinkClient } from './downlink.js';
 import { log, warn, debug } from '../logger.js';
 
 let _instance = null;
+let _chatMessageCallback = null;
+
+export function onChatMessage(cb) {
+  _chatMessageCallback = cb;
+}
 
 function deriveBaseUrl() {
   if (process.env.SERVER_BASE_URL) return process.env.SERVER_BASE_URL.replace(/\/+$/, '');
@@ -21,7 +26,7 @@ export function start({ botId } = {}) {
   }
   const bearer = process.env.CONTROL_BEARER || null;
   const params = {
-    gateMs:       Number(process.env.GATE_MS        ?? 200),
+    gateMs:       Number(process.env.GATE_MS        ?? 80),
     playoutMaxMs: Number(process.env.PLAYOUT_MAX_MS ?? 1500),
   };
 
@@ -60,6 +65,10 @@ export function start({ botId } = {}) {
         break;
       case 'stop_playback':
         downlink.stopPlayback();
+        control.ack(msg.cmdId, true);
+        break;
+      case 'chat_message':
+        if (_chatMessageCallback) _chatMessageCallback(msg);
         control.ack(msg.cmdId, true);
         break;
       default:

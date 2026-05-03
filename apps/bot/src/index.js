@@ -21,6 +21,7 @@ const client = new Client({
 
 const sessions = new SessionManager();
 const activeRecordings = new Map();
+let _textChannel = null;
 
 async function recoverOldSessions() {
   const stale = SessionManager.tryAutoFinalizeOld();
@@ -40,6 +41,17 @@ client.once('clientReady', async () => {
   log(`Bot online als ${client.user.tag}`);
   await recoverOldSessions();
   transport.start({ botId: client.user.id });
+
+  transport.onChatMessage((msg) => {
+    if (!_textChannel) return;
+    let text;
+    if (msg.isStop) {
+      text = `**[Spieler]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
+    } else {
+      text = `**[Spieler]** ${msg.question}\n**[Rabenauge]** ${msg.answer ?? ''}`;
+    }
+    _textChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
+  });
 });
 
 client.on('interactionCreate', async (i) => {
@@ -47,6 +59,7 @@ client.on('interactionCreate', async (i) => {
     if (!i.isChatInputCommand()) return;
 
     if (i.commandName === 'join') {
+      _textChannel = i.channel;
       const member = await i.guild.members.fetch(i.user.id);
       const channel = member.voice.channel;
       if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });

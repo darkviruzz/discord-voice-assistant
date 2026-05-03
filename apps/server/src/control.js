@@ -5,19 +5,17 @@ import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline } from './pipeline.js';
+import { botConnections } from './broadcast.js';
 
 const PROTO_VERSION = 1;
 const SERVER_VERSION = '0.1.0';
 const SERVER_ID = randomUUID();
 
-// Registered bot connections — used to route server→bot commands.
-const botConnections = new Set();
-
 // Default playout/gating params advertised to bots; bots may apply them
 // locally. These mirror the env-documented defaults from the README.
 function serverParams() {
   return {
-    gateMs:        Number(process.env.GATE_MS        ?? 200),
+    gateMs:        Number(process.env.GATE_MS        ?? 80),
     jitterMs:      Number(process.env.JITTER_MS      ?? 120),
     playoutMs:     Number(process.env.PLAYOUT_MS     ?? 200),
     playoutMaxMs:  Number(process.env.PLAYOUT_MAX_MS ?? 1500),
@@ -115,7 +113,8 @@ export function initControlWSS({ bearer } = {}) {
             return;
           }
           case 'set_params':
-          case 'stop_playback': {
+          case 'stop_playback':
+          case 'chat_message': {
             let forwarded = 0;
             for (const botWs of botConnections) {
               if (botWs !== ws && botWs.readyState === 1 /* OPEN */) {

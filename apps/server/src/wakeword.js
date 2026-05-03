@@ -17,27 +17,38 @@ function normalize(str) {
   return str.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 }
 
-// Checks whether `transcript` starts with `wakeWord`.
-// Returns { detected: false } or { detected: true, query: "..." }
-// `query` is the text after the wake word (original casing, punctuation stripped from the prefix).
-export function detectWakeWord(transcript, wakeWord, fuzzy = false) {
+// Split on any whitespace/newline run; keeps punctuation attached to words
+// (normalize() strips it during comparison).
+function tokenize(text) {
+  return text.trim().split(/[\s\n\r]+/);
+}
+
+// Checks whether `transcript` contains `wakeWord` within the first `maxPosition` words.
+//   maxPosition = 0 → anywhere in the transcript
+//   maxPosition = 1 → first word only  (original behaviour)
+//   maxPosition = N → within first N words  (e.g. 3 catches "Hey Rabenauge")
+//
+// Returns { detected: false } or { detected: true, query: "text after wake word" }
+export function detectWakeWord(transcript, wakeWord, fuzzy = false, maxPosition = 1) {
   if (!transcript || !wakeWord) return { detected: false };
 
   const normWake = normalize(wakeWord);
-  const trimmed  = transcript.trim();
+  const words    = tokenize(transcript.trim());
+  const limit    = maxPosition === 0 ? words.length : Math.min(maxPosition, words.length);
 
-  // Isolate the first token (everything before the first whitespace or punctuation boundary).
-  const firstEnd = trimmed.search(/[\s,.…!?]/);
-  const firstWord = firstEnd === -1 ? trimmed : trimmed.slice(0, firstEnd);
-  const normFirst = normalize(firstWord);
-
-  let matched = normFirst === normWake;
-  if (!matched && fuzzy) {
-    matched = levenshtein(normFirst, normWake) <= 2;
+  for (let i = 0; i < limit; i++) {
+    const normWord = normalize(words[i]);
+    if (!normWord) continue; // skip empty tokens (e.g. leading newlines)
+    let matched = normWord === normWake;
+    if (!matched && fuzzy) {
+      matched = levenshtein(normWord, normWake) <= 2;
+    }
+    if (matched) {
+      // Everything after the matched token, stripped of leading punctuation.
+      const query = words.slice(i + 1).join(' ').replace(/^[\s,.…!?]+/, '').trim();
+      return { detected: true, query };
+    }
   }
-  if (!matched) return { detected: false };
 
-  // Strip the matched token and any trailing punctuation/spaces to get the query.
-  const rest = trimmed.slice(firstWord.length).replace(/^[\s,.…!?]+/, '').trim();
-  return { detected: true, query: rest };
+  return { detected: false };
 }

@@ -1,3 +1,9 @@
+# Projektspezifische Dateien (kein Commit)
+apps/server/prompt.txt
+apps/server/transcripts/
+__pycache__/
+*.pyc
+
 # Logs
 logs
 *.log

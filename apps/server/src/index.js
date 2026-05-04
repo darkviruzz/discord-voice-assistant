@@ -13,6 +13,10 @@ const HB_INTERVAL_MS = 15000;
 const app = express();
 app.use(express.json({ limit: '32kb' }));
 app.get('/health', (_req, res) => res.json({ ok: true, t: Date.now() }));
+app.post('/shutdown', (_req, res) => {
+  res.json({ status: 'shutting down' });
+  setTimeout(() => shutdown('HTTP /shutdown'), 200);
+});
 
 const server = http.createServer(app);
 

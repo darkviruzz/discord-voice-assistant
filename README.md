@@ -198,10 +198,24 @@ WantedBy=multi-user.target
 
 ### Server (Windows)
 
-* Node.js LTS installieren.
-* Repo klonen oder nur `apps/server` kopieren.
-* `npm install` in `apps/server`, `.env` füllen, `npm start`.
-* Optional als Dienst via **NSSM** einrichten (nicht erforderlich).
+```powershell
+# im Repo-Root
+npm install
+cp apps/server/.env.example apps/server/.env
+# .env ausfüllen (CONTROL_BEARER, Pfade, Wake-Word)
+
+# Alle Dienste starten (Whisper + Piper minimiert, Server im Vordergrund)
+.\scripts\Start-VoiceAssistant.ps1
+
+# Alternativ: 3 Split-Panes in Windows Terminal (Debugging)
+.\scripts\Start-VoiceAssistant.ps1 -Mode all
+
+# Alternativ: Hintergrundprozesse ohne Fenster (Autostart)
+.\scripts\Start-VoiceAssistant.ps1 -Mode silent
+```
+
+**Pfade anpassen:** Die Variablen `$WhisperDir`, `$PiperDir` etc. am Anfang von
+[`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) auf dein System anpassen.
 
 ### System-Prompt als Datei einrichten
 
@@ -515,85 +529,37 @@ python -m venv piper
 pip install fastapi uvicorn
 ```
 
-**4. HTTP-Server-Skript erstellen**
+**4. HTTP-Server-Skript**
 
-Speichere als `C:\Users\<NAME>\Programme\piper\server.py` (UTF-8 ohne BOM):
+Das Skript liegt im Repo unter [`services/piper/server.py`](services/piper/server.py) und liest Pfade aus Umgebungsvariablen, die das Startskript automatisch setzt:
 
-```python
-from fastapi import FastAPI
-from fastapi.responses import Response
-from pydantic import BaseModel
-import subprocess, tempfile, os
-
-app = FastAPI()
-
-PIPER_EXE = r"C:\Users\<NAME>\Programme\piper\piper.exe"
-
-MODELS = {
-    "emotional": r"C:\Users\<NAME>\Programme\piper\voices\de_DE-thorsten_emotional-medium.onnx",
-    "high":      r"C:\Users\<NAME>\Programme\piper\voices\de_DE-thorsten-high.onnx",
-}
-
-# Speaker IDs (nur fuer model="emotional"):
-# 0=Frohlich  1=Wutend   2=Angewidert  3=Betrunken
-# 4=Neutral   5=Schlafrig 6=Ueberrascht 7=Flusternd
-
-class TTSRequest(BaseModel):
-    text: str
-    model: str = "emotional"
-    speaker_id: int = 4  # Default: Neutral
-
-@app.post("/synthesize")
-async def synthesize(req: TTSRequest):
-    model_path = MODELS.get(req.model, MODELS["emotional"])
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        outfile = f.name
-
-    cmd = [PIPER_EXE, "--model", model_path, "--output_file", outfile]
-    if req.model == "emotional":
-        cmd += ["--speaker", str(req.speaker_id)]
-
-    subprocess.run(cmd, input=req.text.encode("utf-8"), capture_output=True)
-
-    with open(outfile, "rb") as f:
-        audio = f.read()
-    os.unlink(outfile)
-
-    return Response(content=audio, media_type="audio/wav")
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+```
+PIPER_DIR        → Basisverzeichnis der Piper-Installation
+PIPER_EXE        → Pfad zur piper.exe
+PIPER_VOICES_DIR → Verzeichnis mit den .onnx-Modellen
 ```
 
-> **Wichtig:** `<NAME>` durch deinen Windows-Benutzernamen ersetzen.
+Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese Variablen anhand der konfigurierten `$PiperDir`-Variable und startet `uvicorn` dann aus dem `services/piper/`-Verzeichnis des Repos.
 
 #### Server starten
 
-**Batch-Script:** `C:\Users\<NAME>\Programme\piper\start-piper.bat`
+Piper wird über das Haupt-Startskript gestartet:
 
-```batch
-@echo off
-cd /d C:\Users\%USERNAME%\Programme\piper
-echo ========================================
-echo  Piper TTS HTTP Server
-echo  Modelle: thorsten_emotional-medium
-echo           thorsten-high
-echo  Port: 5000
-echo.
-echo  Speaker IDs (emotional):
-echo    0=Frohlich   1=Wutend    2=Angewidert
-echo    3=Betrunken  4=Neutral   5=Schlafrig
-echo    6=Ueberrascht 7=Flusternd
-echo ========================================
-echo.
-call .\piper\Scripts\activate.bat
+```powershell
+.\scripts\Start-VoiceAssistant.ps1        # Piper startet minimiert
+.\scripts\Start-VoiceAssistant.ps1 -Mode all   # Piper in eigenem Windows Terminal Pane
+```
+
+Oder manuell (Piper-Venv muss aktiviert sein):
+
+```powershell
+cd "C:\Users\$env:USERNAME\Programme\piper"
+.\piper\Scripts\activate.ps1
+$env:PIPER_DIR = (Get-Location).Path
+$env:PIPER_EXE = "$env:PIPER_DIR\piper.exe"
+$env:PIPER_VOICES_DIR = "$env:PIPER_DIR\voices"
+cd "<Repo-Root>\services\piper"
 uvicorn server:app --host 0.0.0.0 --port 5000
-
-echo.
-echo Server beendet.
-pause
 ```
 
 #### Health-Check
@@ -661,10 +627,10 @@ $p = & "C:\Windows\System32\curl.exe" -s http://localhost:5000/health
 Write-Host "Piper    (5000): $p" -ForegroundColor $(if ($p -match "ok") {"Green"} else {"Red"})
 ```
 
-Speichern als `check-services.ps1` im Repo-Root, ausführen mit:
+Speichern als `scripts/check-services.ps1`, ausführen mit:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\check-services.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\check-services.ps1
 ```
 
 ---
@@ -672,12 +638,13 @@ powershell -ExecutionPolicy Bypass -File .\check-services.ps1
 ### Startreihenfolge
 
 ```
-1. Ollama        → läuft automatisch als Windows-Service beim Boot
-2. Whisper       → start-whisper.bat (C:\...\whisper-vulkan\)
-3. Piper         → start-piper.bat   (C:\...\piper\)
-4. Discord-Server→ npm start         (apps/server/)
-5. Discord-Bot   → auf Linux: npm run start:bot
+1. Ollama         → läuft automatisch als Windows-Service beim Boot
+2–4. Whisper, Piper, Server → .\scripts\Start-VoiceAssistant.ps1
+5. Discord-Bot    → auf Linux: systemctl start discord-bot
 ```
+
+Das Startskript wartet nach dem Starten von Whisper und Piper auf deren Health-Checks,
+bevor der Node-Server hochgefahren wird. Pfade am Anfang des Skripts einmalig anpassen.
 
 ---
 
@@ -690,7 +657,7 @@ powershell -ExecutionPolicy Bypass -File .\check-services.ps1
 | Ollama: `model not found` | Zweite `ollama serve` Instanz | Terminal-Instanz beenden, nur Service nutzen |
 | Ollama: `connection refused` | Service nicht gestartet | Startmenü → Ollama → starten |
 | Piper: `connection refused` | FastAPI nicht gestartet | `start-piper.bat` ausführen |
-| Piper: langer Pfad-Fehler | Falscher Username in server.py | `<NAME>` → deinen Benutzernamen ersetzen |
+| Piper: `PIPER_EXE not found` | Env-Var nicht gesetzt | Startskript verwenden, oder `$env:PIPER_DIR` manuell setzen |
 | Alle Services: Port belegt | Alter Prozess läuft noch | `netstat -ano \| findstr :8080` → PID beenden |
 
 #### Port-Konflikt debuggen

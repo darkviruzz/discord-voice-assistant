@@ -1,16 +1,16 @@
 [Unit]
-Description=Discord Audio Recorder Bot
+Description=Discord Voice Assistant
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/discord-voice-assistant/apps/bot
+WorkingDirectory=/home/discordbot/discord-voice-assistant
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node src/index.js
+ExecStart=/usr/bin/npm run start:bot
 Restart=always
 RestartSec=3
-User=root
+User=discordbot
 
 [Install]
 WantedBy=multi-user.target

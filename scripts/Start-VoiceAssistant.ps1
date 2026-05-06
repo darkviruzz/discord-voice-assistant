@@ -35,8 +35,8 @@ $WhisperExe    = "whisper-server.exe"
 $WhisperModel  = "models\ggml-medium-q5_0.bin"
 $WhisperPort   = 8080
 
-$PiperDir      = "C:\Users\nogar\Programme\piper"
-$PiperVenv     = "$PiperDir\piper\Scripts"
+$PiperForkDir  = "C:\Users\nogar\Programme\piper-directml-fork"
+$PiperVenv     = "$PiperForkDir\venv\Scripts"
 $PiperPython   = "$PiperVenv\python.exe"
 $PiperPort     = 5000
 
@@ -60,9 +60,9 @@ $ServerLog  = "$LogDir\server.log"
 if (-not (Test-Path $LogDir)) { $null = New-Item -ItemType Directory -Path $LogDir -Force }
 
 # Env-Vars für services/piper/server.py (werden an Kindprozesse vererbt)
-$env:PIPER_DIR        = $PiperDir
-$env:PIPER_EXE        = "$PiperDir\piper.exe"
-$env:PIPER_VOICES_DIR = "$PiperDir\voices"
+$env:PIPER_VOICES_DIR      = "C:\Users\nogar\Programme\piper\voices"
+$env:PIPER_USE_DIRECTML    = "1"
+$env:PIPER_DIRECTML_DEVICE = "0"
 
 # ============================================================
 # Hilfsfunktionen

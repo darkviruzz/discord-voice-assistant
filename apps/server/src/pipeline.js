@@ -6,7 +6,7 @@ import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
-import { synthesize } from './tts.js';
+import { synthesizeStream } from './tts.js';
 import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
@@ -283,8 +283,9 @@ function sendOpusToSession(sessionId, opusFrames) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-// Prevent simultaneous pipeline runs per session (avoids LLM/GPU contention).
-const activePipelines = new Set();
+// Active pipeline per session key → AbortController for its TTS stream.
+// A new run aborts the previous one rather than silently skipping.
+const activePipelines = new Map();
 
 // Last LLM response per session — used to add interrupt context to history.
 const lastResponses = new Map(); // sessionId(string) → response text
@@ -294,10 +295,11 @@ const lastResponses = new Map(); // sessionId(string) → response text
 export async function runPipeline(sessionId, userId) {
   const key = `${sessionId}:${userId}`;
   if (activePipelines.has(key)) {
-    debug('pipeline: already running for', key, '— skipping');
-    return;
+    debug('pipeline: aborting previous run for', key);
+    activePipelines.get(key).abort();
   }
-  activePipelines.add(key);
+  const ctrl = new AbortController();
+  activePipelines.set(key, ctrl);
 
   try {
     // 1. Drain buffered Opus frames for this speaker.
@@ -411,30 +413,28 @@ export async function runPipeline(sessionId, userId) {
       question: transcript, answer: responseText, isStop: false,
     });
 
-    // 8. TTS.
-    let wavAudio;
+    // 8–10. Streaming TTS → resample per sentence → encode → push to downlink.
+    // Each sentence chunk is sent as soon as it is synthesized, reducing TTFA.
     try {
-      wavAudio = await synthesize(responseText, { model: ttsModel, speakerId });
+      const opts = { model: ttsModel, speakerId };
+      for await (const { pcm, sampleRate, isWav } of synthesizeStream(responseText, opts, ctrl.signal)) {
+        if (ctrl.signal.aborted) break;
+        let rawPcm = pcm;
+        let rate   = sampleRate;
+        let channels = 1;
+        if (isWav) {
+          // ElevenLabs fallback: pcm is a full WAV buffer
+          ({ pcm: rawPcm, sampleRate: rate, channels } = parseWav(pcm));
+        }
+        const mono48k    = resampleMono(toMono(rawPcm, channels), rate, 48000);
+        const opusFrames = pcm48kToOpusFrames(mono48k);
+        sendOpusToSession(sessionId, opusFrames);
+      }
     } catch (e) {
-      warn('pipeline: tts error:', e.message);
-      return;
+      if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
     }
-
-    // 9. Parse TTS WAV → mono 48 kHz PCM.
-    let pcmOut;
-    try {
-      const { pcm, sampleRate, channels } = parseWav(wavAudio);
-      const mono = toMono(pcm, channels);
-      pcmOut = resampleMono(mono, sampleRate, 48000);
-    } catch (e) {
-      warn('pipeline: wav parse error:', e.message);
-      return;
-    }
-
-    // 10. Encode to Opus and push to downlink.
-    const opusOut = pcm48kToOpusFrames(pcmOut);
-    sendOpusToSession(sessionId, opusOut);
   } finally {
-    activePipelines.delete(key);
+    // Only clean up if this run is still the active one (a newer run may have replaced it).
+    if (activePipelines.get(key) === ctrl) activePipelines.delete(key);
   }
 }

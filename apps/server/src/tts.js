@@ -11,6 +11,47 @@ export async function synthesize(text, { model = 'emotional', speakerId = 4 } = 
   return synthLocal(text, model, speakerId);
 }
 
+// Streaming variant: yields { pcm: Buffer, sampleRate: number } per sentence.
+// `signal`: AbortSignal — pass controller.signal to cancel mid-stream.
+// Only available for local Piper server (ElevenLabs falls back to bulk WAV).
+export async function* synthesizeStream(text, { model = 'emotional', speakerId = 4 } = {}, signal) {
+  const provider = (process.env.TTS_PROVIDER ?? 'piper').toLowerCase();
+  if (provider === 'elevenlabs') {
+    // ElevenLabs has no streaming path here — fall back to full WAV, yield once.
+    const wav = await synthElevenLabs(text);
+    yield { pcm: wav, sampleRate: 24000, isWav: true };
+    return;
+  }
+
+  const base = (process.env.TTS_URL ?? 'http://localhost:5000').replace(/\/+$/, '');
+  const body = { text, model, speaker_id: speakerId };
+
+  let res;
+  try {
+    res = await fetch(`${base}/tts/synthesize`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    throw new Error(`tts: stream connection failed: ${e.message}`);
+  }
+  if (!res.ok) {
+    const rb = await res.text().catch(() => '');
+    throw new Error(`tts: stream HTTP ${res.status}: ${rb.slice(0, 200)}`);
+  }
+
+  const sampleRate = parseInt(res.headers.get('X-Sample-Rate') ?? '22050', 10);
+  log('tts: streaming', `(model=${model} speaker=${speakerId} rate=${sampleRate})`);
+
+  for await (const chunk of res.body) {
+    if (signal?.aborted) return;
+    yield { pcm: Buffer.from(chunk), sampleRate, isWav: false };
+  }
+}
+
 // Generic local TTS server (Piper / KokoroTTS).  POST /synthesize → WAV body.
 async function synthLocal(text, model, speakerId) {
   const base = (process.env.TTS_URL ?? 'http://localhost:5000').replace(/\/+$/, '');

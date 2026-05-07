@@ -6,6 +6,38 @@ Gesammelte Feature-Ideen und Verbesserungen. Kein Versprechen auf Umsetzung.
 
 ## Bot / Discord UX
 
+- [ ] **Version-Anzeige** – Bot-Status zeigt Bot- und Server-Version an
+  - Versionsstrategie: `package.json`-Version + kurzer Git-Hash, z.B. `1.0.1-d5b717a`
+    → Hash ändert sich automatisch bei jedem Commit, kein manuelles Bumping erforderlich
+  - Bot-Status (Discord Presence/Activity):
+    - Server online:  `1.0.1-d5b717a (server:1.0.1-d5b717a)`
+    - Server offline: `1.0.1-d5b717a`
+  - Kein `/version` Slash-Command nötig
+  - **Server:**
+    - Liest beim Start `package.json`-Version + `git rev-parse --short HEAD` → ersetzt hardcoded `SERVER_VERSION = '0.1.0'` in `apps/server/src/control.js`
+    - Loggt Version beim Startup: `Server v1.0.1-d5b717a gestartet`
+    - Sendet Version bereits über `hello`-Message beim Verbindungsaufbau (`{ type: 'hello', version: '...' }`) — Infrastruktur ist vorhanden, nur Wert ist hardcoded
+  - **Bot:**
+    - Liest beim Start ebenfalls `package.json`-Version + git hash
+    - Setzt initial Activity auf eigene Version (Server noch unbekannt)
+    - Beim Empfang der `hello`-Message von Server: Activity auf kombinierte Version updaten
+    - Bei Verbindungsverlust: Activity auf reine Bot-Version zurücksetzen
+  - **Implementierung:**
+    - Hilfsfunktion `getVersionString()` (je einmal in bot und server) — liest `package.json` + `execSync('git rev-parse --short HEAD')`
+    - `apps/server/src/control.js`: `SERVER_VERSION` durch Aufruf von `getVersionString()` beim Modulstart ersetzen
+    - `apps/bot/src/index.js`: `clientReady` → Activity setzen; `hello`-Handler → Activity updaten; Disconnect-Handler → Activity zurücksetzen
+    - `apps/bot/src/transport/control.js`: `hello`-Message auswerten und Server-Version nach oben weitergeben
+
+- [ ] **Type-to-Ask Feature** – Nutzer können Fragen per Text mit `/ask "Frage"` stellen, statt nur per Sprache
+  - Sessionless: Funktioniert auch ohne aktive Voice-Session (nur Text-Response in Discord)
+  - Optional TTS: Flag `/ask "Frage" tts:true` spielt Antwort als Audio ab (nur wenn Bot im Voice-Channel)
+  - Shared History: Text-Queries verwenden dieselbe Conversation-History wie Voice-Queries
+  - **Implementierung:**
+    - Bot: Neuer Slash-Command mit `question` (string) + `tts` (bool, default=false) Parametern
+    - Bot: Handler sendet `text_query` Message über Control-Plane an Server
+    - Server: Neue `runTextPipeline()` Funktion, skippt STT/Wake-Word, startet direkt bei LLM
+    - Server: Reuse von `chat()`, `synthesize()`, History-Management, Opus-Encoding
+    - Verification: Sessions vs. sessionless, TTS-Flag Kombis, History-Mixing voice+text
 - [ ] **LLM-Modell per Slash-Command wählen** – `/model llama3.2` wechselt das aktive Ollama-Modell zur Laufzeit ohne Server-Neustart
 - [ ] **Config via Slash-Commands ändern** – WAKE_WORD, HISTORY_TURNS, TTS-Provider, Stimme (speaker_id) etc. ohne `.env`-Edit; Änderungen im Arbeitsspeicher, optional persistent via JSON-Datei
 - [ ] **Debug-Modus per Slash-Command** – `/debug on` zeigt in einem Discord-Kanal: STT-Transkripte, Wake-Word-Treffer, LLM-Antworten, Verbindungs-Metriken (Latenz, Buffer-Füllstand, Jitter)

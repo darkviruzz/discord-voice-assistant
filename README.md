@@ -12,6 +12,7 @@ Dieses Monorepo enthält:
   * **Ohne Server voll nutzbar**: Aufnehmen, Speichern, Mischen.
   * Optional: **per-Speaker Uplink** (20-ms Frames, Opus/PCM passthrough) an den LAN-Server.
   * Downlink-Wiedergabe mit **Jitter-/Playout-Puffer** und **Gating** (spielt nur bei Stille).
+  * **Text-to-Ask** (geplant): Fragen per `/ask "text"` statt nur per Sprache, optional mit TTS-Antwort.
 
 * **Server (apps/server)** *(optional)*
 

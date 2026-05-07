@@ -37,7 +37,6 @@ if [ ${#all_names[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Pre-select active branch
 selected=0
 for i in "${!all_names[@]}"; do
     if [[ "${all_names[$i]}" == "$CURRENT_BRANCH" ]]; then
@@ -103,8 +102,8 @@ while [ $done_selecting -eq 0 ]; do
         if [[ "$key2" == '[' ]]; then
             IFS= read -rsn1 -t 0.1 key3
             case "$key3" in
-                'A') ((selected > 0)) && ((selected--)) ;;
-                'B') ((selected < ${#all_names[@]} - 1)) && ((selected++)) ;;
+                'A') [ "$selected" -gt 0 ] && selected=$((selected - 1)) || true ;;
+                'B') [ "$selected" -lt $((${#all_names[@]} - 1)) ] && selected=$((selected + 1)) || true ;;
             esac
         fi
     elif [[ "$key" == '' ]]; then
@@ -125,13 +124,11 @@ hasL=0; hasR=0
 echo ""
 echo -e "\033[32mSelected: $chosen @ ${local_hash[$chosen]:-${remote_hash[$chosen]}}\033[0m"
 
-# Selber Branch -> direkt starten
 if [[ "$chosen" == "$CURRENT_BRANCH" ]]; then
     echo "Branch unveraendert - starte Bot direkt."
-    exec npm start
+    exec node apps/bot/src/index.js
 fi
 
-# Stash wenn dirty
 if [ "$DIRTY" -gt 0 ]; then
     stash_label="auto: vor checkout zu $chosen ($(date '+%Y-%m-%d %H:%M'))"
     echo "Stashing uncommitted changes..."
@@ -139,12 +136,10 @@ if [ "$DIRTY" -gt 0 ]; then
     echo "  Wiederherstellen wenn zurueck auf '$CURRENT_BRANCH': git stash pop"
 fi
 
-# Stop bot
 echo "Stopping bot..."
-pkill -f "node src/index.js" 2>/dev/null || true
+pkill -f "node apps/bot/src/index.js" 2>/dev/null || true
 sleep 1
 
-# Checkout
 if [ $hasL -eq 1 ]; then
     git checkout --quiet "$chosen"
 else
@@ -157,7 +152,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Pull (nur wenn Remote existiert)
 if [ $hasR -eq 1 ]; then
     if ! git pull --quiet origin "$chosen" 2>&1; then
         echo -e "\033[31mWARNUNG: git pull fehlgeschlagen.\033[0m"
@@ -169,4 +163,4 @@ else
 fi
 
 echo "Starting bot..."
-exec npm start
+exec node apps/bot/src/index.js

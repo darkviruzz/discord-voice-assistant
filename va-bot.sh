@@ -125,8 +125,10 @@ echo ""
 echo -e "\033[32mSelected: $chosen @ ${local_hash[$chosen]:-${remote_hash[$chosen]}}\033[0m"
 
 if [[ "$chosen" == "$CURRENT_BRANCH" ]]; then
-    echo "Branch unveraendert - starte Bot direkt."
-    exec node apps/bot/src/index.js
+    echo "Branch unveraendert - starte Bot neu..."
+    sudo systemctl restart discord-bot.service
+    echo "Bot gestartet (systemctl restart discord-bot.service)"
+    exit 0
 fi
 
 if [ "$DIRTY" -gt 0 ]; then
@@ -137,7 +139,7 @@ if [ "$DIRTY" -gt 0 ]; then
 fi
 
 echo "Stopping bot..."
-pkill -f "node apps/bot/src/index.js" 2>/dev/null || true
+sudo systemctl stop discord-bot.service 2>/dev/null || true
 sleep 1
 
 if [ $hasL -eq 1 ]; then
@@ -163,4 +165,5 @@ else
 fi
 
 echo "Starting bot..."
-exec node apps/bot/src/index.js
+sudo systemctl start discord-bot.service
+echo "Bot gestartet (systemctl start discord-bot.service)"

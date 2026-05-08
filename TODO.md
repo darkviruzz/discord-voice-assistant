@@ -63,10 +63,10 @@ Whisper kann mit `--print-special` oder via JSON-Output Token-Level-Infos zurüc
 
 Piper ist schnell auf CPU (~100-200ms pro Satz), auf GPU (AMD 6800XT) sollte es noch schneller sein. Mehrere Streaming-Implementierungen verfügbar (WebSocket-basiert). Falls möglich mit Whisper + Ollama parallel nutzen.
 
-- [ ] **Evaluate Piper Streaming Repos** – Vergleich: [piper-streaming](https://github.com/jitendraparande/piper-streaming) (WebSocket), [paroli](https://github.com/marty1885/paroli) (C++); Entscheidung: WebSocket wahrscheinlich best für Discord-Integration
-- [ ] **GPU Support evaluieren** – VRAM-Check: Piper braucht ~200-500MB (vs. Whisper/Ollama). AMD 6800XT hat 16GB, sollte parallel laufen. Testen ob Piper ONNX/HIP-Unterstützung hat
-- [ ] **API Refactoring** – Jetzige Piper-API zu Streaming umbauen: `POST /tts/synthesize` mit `{text, voice, speed, sample_rate}` → WebSocket-Endpoint mit Audio-Chunks (PCM16)
-- [ ] **TTS Settings hinzufügen** – Voice-Selektion, Speed (0.5–2.0), Sample Rate (22050, 48000), optional Pitch/Prosody
+- [x] **GPU Support evaluieren** – DirectML-Provider (ONNX Runtime) funktioniert auf Windows mit AMD GPU. Kein ROCm/HIP nötig. Bestätigt 1.93× Speedup (de_DE-thorsten-high, AMD RX 6800 XT). Piper-Fork: `C:\Users\nogar\Programme\piper-directml-fork`
+- [x] **API Refactoring** – `POST /tts/synthesize` (HTTP chunked streaming, raw int16LE PCM) implementiert. Satz-für-Satz-Chunks → sofortiger Opus-Versand → niedrigere TTFA. WebSocket wäre nächster Schritt für echtes Bidirectional-Streaming.
+- [x] **TTS Settings hinzufügen** – `length_scale`, `noise_scale`, `noise_w_scale` per Request konfigurierbar. Voice-Wechsel per `model`-Feld.
+- [ ] **Evaluate Piper Streaming Repos** – Vergleich: [piper-streaming](https://github.com/jitendraparande/piper-streaming) (WebSocket), [paroli](https://github.com/marty1885/paroli) (C++); HTTP-Chunked aktuell ausreichend, WebSocket als Upgrade-Pfad falls Sub-100ms-TTFA nötig
 - [ ] **Standardisierte API** – An [Pipecat TTS Service Spec](https://docs.pipecat.ai/server/services/tts/piper) orientieren für Wartbarkeit
 
 ---

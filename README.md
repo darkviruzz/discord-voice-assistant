@@ -1,35 +1,79 @@
 ## Titel
 
-Discord Voice Assistant – Bot + LAN Audio Server (per-Speaker Uplink, low-latency Downlink)
+Discord Voice Assistant – lokaler Pen-&-Paper-Recorder mit Transkript-Pipeline
 
-## Überblick
+## Hauptzweck
 
-Dieses Monorepo enthält:
+Der Bot sitzt während einer Pen-&-Paper-Session **kontinuierlich** im Discord-Voice-Channel und produziert ein **strukturiertes, lokal erzeugtes Transkript** als Eingabe für die Notizen, die die Spieler nebenbei stichpunktartig schreiben. Eine separate Cowork-Pipeline (außerhalb dieses Repos) verarbeitet die fertigen Notizen weiter zu einem Obsidian-Wiki über NPCs, Orte, Quests etc.
 
-* **Bot (apps/bot)**
+Alles läuft **lokal** — auch off-topic / privates Geplauder wird transkribiert, daher kein Cloud-STT/LLM.
 
-  * Discord-Recorder/Player: pro Sprecher WAV-Chunks, zeitkorrekter Session-Mix (HQ/LQ), zusätzlich je **Sprecher HQ/LQ-Mix**.
-  * **Ohne Server voll nutzbar**: Aufnehmen, Speichern, Mischen.
-  * Optional: **per-Speaker Uplink** (20-ms Frames, Opus/PCM passthrough) an den LAN-Server.
-  * Downlink-Wiedergabe mit **Jitter-/Playout-Puffer** und **Gating** (spielt nur bei Stille).
-  * **Text-to-Ask** (geplant): Fragen per `/ask "text"` statt nur per Sprache, optional mit TTS-Antwort.
+**Hauptjob:** zuhören → pro Sprecher mitschneiden → bei `/finalize` ein chronologisch korrektes Transkript erzeugen.
+**Nebenfeature:** Wake-Word-Aktivierung („Rabenauge, …") für In-Game-Lookups (NPC-Fragen, Regeln) per lokalem LLM. Antworten werden im Voice-Channel zurückgespielt und im Transkript markiert.
 
-* **Server (apps/server)** *(optional)*
+## Komponenten
 
-  * Nimmt per-Speaker Uplink an (kein Mix, kein Re-encode im Bot nötig).
-  * Schickt Downlink-Frames (20-ms Opus) an den Bot.
-  * Control-WS (JSON) für Befehle (z. B. Testton, TTS/STT-Hooks).
-  * Für **Windows** oder Linux geeignet; keine speziellen Abhängigkeiten außer Node.js.
+* **Bot (apps/bot)** — Discord-Recorder. Nimmt pro Sprecher Opus-Frames auf (siehe [recorder.js](apps/bot/src/recorder.js)), speichert lokal als WAV. Sendet im Live-Modus optional Frames an den Server für sofortige Transkription. Wiedergabe von TTS-Antworten mit Jitter-/Playout-Puffer und Gating (spielt nur bei Stille).
+* **Server (apps/server)** — STT-/LLM-/TTS-Pipeline (Whisper + Ollama + Piper, alle lokal). Empfängt Uplink-Frames, transkribiert pro Utterance, scannt auf Wake-Word, ruft LLM auf, generiert TTS-Antwort.
+* **Cowork-Pipeline** *(extern)* — beobachtet den Transkript-Inbox-Ordner, reichert Spieler-Notizen an, baut/aktualisiert das Obsidian-Wiki.
 
-## Architektur
+## Operating Modes
 
-* **Transport:** Drei Kanäle
+Drei klar getrennte Betriebszustände:
 
-  * `/uplink` (Binär, 20-ms-Frames; pro Sprecher; Codecflag: `opus` bevorzugt passthrough),
-  * `/downlink` (Binär, 20-ms Opus → Bot),
-  * `/control` (WebSocket JSON; Events/Befehle/Backpressure).
-* **Gating/Playout im Bot:** Wiedergabe startet nur, wenn `activeSpeakers.size == 0` für ≥ `GATE_MS`. Bei Unterbrechung pausieren; beim Fortsetzen werden die letzten ~1000 ms aus dem Wiedergabe-History-Buffer erneut eingespielt.
-* **Latenz:** LAN-Ziel 0,5–2,0 s end-to-end (Transport << 5 ms; Rest Puffer + STT/TTS/LLM).
+| Modus | Trigger | Bot | Server |
+|---|---|---|---|
+| **Online-Live** | Server bei `/join` erreichbar (oder per Auto-SSH-Start hochgefahren) | streamt Audio zum Server, speichert lokal als Backup | live-Transkription, Wake-Word, LLM-Antworten, JSONL-Log |
+| **Offline-Cache** | Server nach Auto-Start-Versuch nicht erreichbar | speichert nur lokal, **kein** Live-Transkript, **kein** Wake-Word | — |
+| **Finalize** | manuell `/finalize` nach Session-Ende | schickt Backlog falls Offline-Cache | transkribiert Backlog, baut chronologisch-korrektes Markdown-Transkript, archiviert Audio als OGG/Opus, optional LLM-Summary |
+
+Bei Server-Ausfall mitten in der Session fällt der Bot auf Offline-Cache zurück; `/finalize` füllt die Lücke nach.
+
+## Transkript
+
+Format: ein Markdown-File pro Session unter `apps/server/data/transcripts/<datum>-<session-id>/transcript.md`. Dieser Pfad ist die Inbox für die externe Cowork-Pipeline.
+
+```markdown
+# Session 2026-05-08
+
+## 14:32 — Session-Start
+
+**Markus**: Heute geht ihr also in den Wald, ihr seht...
+  *[Tom unterbricht]* Moment, hab ich noch das Heiltrank-Inventar?
+  *[Markus weiter]* ... einen alten Wegweiser. Ja Tom, hast du.
+
+## 14:48 — Pause (5 min)
+
+## 14:53 — Fortsetzung
+
+**Anna**: Hey **Rabenauge**, wer war nochmal Baron Kelthur?
+**Rabenauge**: Baron Kelthur war ein Halbork-Söldner …
+**Anna**: Danke, **Stop**!
+```
+
+Konventionen:
+* **Reines Transkript, kein AI-Enhancement** (kein Auto-Redact, kein Auto-Marker — bewusst, weil das LLM-Entscheidungen erfordern würde).
+* Wake-Word („Rabenauge") und Stop-Word („Stop"/„Stopp") werden im Output **fett markiert**.
+* Bot-Antworten erscheinen als eigener Sprecher („Rabenauge"), inline im Gesprächsfluss.
+* Pausen >30 s erzeugen einen Header `## HH:MM — Pause (N min)`.
+* **Monolog-Unterbrechungen** werden chronologisch eingebettet — der Algorithmus dafür rendert bei Finalize aus Whisper-Token-Timestamps und Discord-Per-User-Spuren-Timestamps (Live-Log ist chronologisch unkorrigiert; das finale Transkript ist sauber).
+
+## Audio-Archiv
+
+* **Während Aufnahme**: hohe Qualität (PCM 48 kHz / 16-bit WAV, ~1 GB/h pro Sprecher) — gibt Whisper bestmögliche Eingabe.
+* **Nach Transkription / bei Finalize**: Originale werden zu OGG/Opus 32 kbps zusammengefasst (~430 MB für eine 6-h-Session mit 5 Spielern). 1–6 Monate aufbewahren für Rebuild/Quality-Checks, dann manuell löschen.
+
+## Transport-Architektur (Detail)
+
+Drei Kanäle zwischen Bot und Server:
+
+* `/uplink` (Binär, 20-ms-Frames pro Sprecher; Codec `opus` Passthrough — kein Re-Encode im Bot)
+* `/downlink` (Binär, 20-ms Opus → Bot)
+* `/control` (WebSocket JSON; Events/Befehle/Backpressure)
+
+**Gating/Playout im Bot**: Wiedergabe startet nur, wenn `activeSpeakers.size == 0` für ≥ `GATE_MS`. Bei Unterbrechung pausieren; beim Fortsetzen werden die letzten ~1000 ms aus dem Wiedergabe-History-Buffer erneut eingespielt.
+
+**Latenz** (LAN-Ziel) für die Wake-Word-Antwort: 0,5–2,0 s end-to-end (Transport << 5 ms; Rest = Puffer + STT/TTS/LLM). Latenz ist **nicht** Tier-1-Optimierungsziel — Transkript-Qualität geht vor.
 
 ## Konfiguration
 
@@ -672,189 +716,24 @@ netstat -ano | findstr ":5000"
 Stop-Process -Id <PID> -Force
 ```
 
-## Roadmap / Offene Feature-Ideen
+## Roadmap
 
-Dieser Abschnitt dokumentiert geplante Erweiterungen und was vor der Implementierung noch geklärt werden muss. **Noch keine Branches erstellt** — jedes Feature soll auf einem eigenen Branch ohne Überlapp landen.
+Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Modes" oben). Die priorisierte Feature-Reihenfolge mit Aufwand/Impact-Bewertung steht in `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Backlog/Brainstorm in [`TODO.md`](TODO.md).
 
----
+**Aktuelle Phasen (grob):**
 
-### 0 — Scope-Klärung (vor allem anderen)
+1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Filter.
+2. **Phase 2 — Core Workflows**: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log.
+3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
+4. **Phase 4 — RAG + Obsidian**: Python-RAG-Service (FastAPI + ChromaDB + Ollama-Embeddings), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
+5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).
 
-Bevor einzelne Features gebaut werden, muss der **Zweck des Bot+Server-Systems** schriftlich abgesteckt werden:
+Die Stränge **Finalize (Phase 3)** und **RAG/Obsidian (Phase 4)** sind voneinander unabhängig und können parallel entwickelt werden.
 
-- Was ist der Bot? (Aufnahme, Playback, Discord-Schnittstelle — das steht)
-- Was ist der Server? (STT/LLM/TTS-Pipeline — das steht)
-- Was ist **nicht** der Bot? Grenzen gegenüber anderen Tools (OBS, Whisper-Desktop, Obsidian-Plugins)?
-- **Finalize — was genau passiert dabei?** Aktuell unklar:
-  - Werden die WAV-Chunks nur transkribiert, oder auch gemischt/exportiert?
-  - Was ist das Ziel-Artefakt? (Markdown-Datei? JSON? Obsidian-Note?)
-  - Wo landet das Artefakt? (lokal, Obsidian Vault, beides?)
-  - Wer triggert es — Bot-Command `/finalize`, Auto-Timer, oder beides?
-  - Was passiert wenn Server offline war während der Session (alles nachträglich), vs. online war (Transkript liegt vor, nur noch Summary)?
-
-> **Empfehlung**: Diese Fragen in einer kurzen Session klären und das Ergebnis hier eintragen, bevor Feature-Branches erstellt werden.
-
----
-
-### 1 — `feature/offline-finalize`
-
-**Idee**: Der Bot läuft auch ohne Server. Am Ende einer Session sollen die aufgenommenen WAV-Chunks nachträglich transkribiert werden können, sobald der Server erreichbar ist.
-
-**Geplant**:
-- Bot markiert Sessions als "pending finalization" wenn Server während der Session offline war
-- `/finalize`-Command schickt gespeicherte WAVs an den Server → Transkription → Ergebnis zurück
-- Bei Server-offline: Discord-Nachricht "Session muss manuell finalisiert werden"
-
-**Noch zu klären**:
-- → Scope-Klärung (s. oben): Was ist das Ziel-Artefakt?
-- Werden WAV-Chunks in ihrer aktuellen Form geschickt, oder als komprimierter Batch?
-- Soll `/finalize` auch bei Server-online-Sessions etwas tun (Summary triggern)?
-
-**Keine Überlapp mit**: Bot-Recorder-Code bleibt unberührt; nur neues Command + Server-Endpunkt.
-
----
-
-### 2 — `feature/auto-finalize`
-
-**Idee**: 4 Stunden nach `/leave` ohne erneutem `/join` wird die Session automatisch finalisiert — aber nur wenn der Server online ist. Sonst: Chat-Hinweis.
-
-**Geplant**:
-- Timer startet beim `/leave`-Event, wird beim `/join` zurückgesetzt
-- Nach Ablauf: Server-Ping → online? → finalize. Offline? → Discord-Nachricht.
-
-**Noch zu klären**:
-- → Abhängig von `feature/offline-finalize` (braucht dessen Finalize-Logik)
-- Was passiert wenn der Bot neu gestartet wird während der Timer läuft? Timer persistieren?
-
----
-
-### 3 — `feature/session-log-enriched`
-
-**Idee**: Der aktuelle JSONL-Transkript-Log (`transcripts/session_*.jsonl`) ist ein guter Start, aber unvollständig. Dieser Branch reichert ihn an.
-
-**Geplant**:
-- Jeder Turn: Timestamp, Speaker-ID, Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
-- Regelmäßige "Checkpoint"-Einträge (z. B. alle 30 min): kompakter Kontext-Snapshot
-- Maschinenlesbar genug für spätere RAG-Indexierung
-
-**Noch zu klären**:
-- Format-Standard festlegen bevor Obsidian-Integration beginnt (Branch 5 baut darauf auf)
-- Soll der Log auch Bot-Events enthalten (join/leave, wer spricht wann)?
-
----
-
-### 4 — `feature/session-rolling-summary`
-
-**Idee**: Für sehr lange Sessions (mehrstündige Pen&Paper-Runden) wird der Kontext zu groß. Llama fasst alle N Turns zu einem kompakten Summary zusammen, der die alten Turns in `conversationHistory` ersetzt.
-
-**Geplant**:
-- Nach jeweils N=10 Turns (konfigurierbar): LLM-Prompt "Fasse die letzten N Turns in 3–5 Sätzen zusammen"
-- Summary landet als `role: system`-Eintrag, alte Turns werden entfernt
-- Letzter Summary wird auch im Session-Log persistiert
-
-**Noch zu klären**:
-- Welches Modell für den Summary-Call? Gleiches Ollama-Modell oder separates (schnelleres)?
-- Soll der User merken dass ein Summary passiert ist (kurze Log-Meldung reicht)?
-
----
-
-### 5 — `feature/rag-service`
-
-**Idee**: Neuer Python-Dienst (`apps/rag/`) der den Obsidian-Vault indexiert und per HTTP durchsuchbar macht. Infrastruktur-Basis für alle Obsidian-Features.
-
-**Geplant**:
-- FastAPI-Service analog zum Piper-TTS-Wrapper
-- Vault-Scanner: liest alle `.md`-Files, parst Frontmatter als Metadaten, chunked nach `##`-Sections
-- Embedding via **Ollama** (`nomic-embed-text` — kein neuer Service nötig, läuft bereits)
-- Vektorstore: **ChromaDB** (persistent, file-based, kein Server nötig)
-- Filewatcher: re-indexiert geänderte Files automatisch
-- Endpunkte: `POST /query` (Top-K relevante Chunks), `POST /index` (Force-Reindex), `GET /health`
-
-**Voraussetzungen**:
-- `ollama pull nomic-embed-text` ausführen
-- `VAULT_PATH` als Env-Variable (Windows-Pfad, z. B. `C:\Users\...\Obsidian\Kampagne`)
-- `CHROMA_DIR` für persistente Vektordatenbank
-
-**Noch zu klären**:
-- Chunk-Größe bei langen Sections (Max-Token-Cap pro Chunk nötig?)
-- Obsidian-Links (`[[NPC-Name]]`) — als Text erhalten oder auflösen?
-- Wie oft vollständig re-indexieren? (Startup + Watcher sollte reichen)
-
-**Keine Abhängigkeit von**: Branches 1–4 (komplett unabhängig)
-
----
-
-### 6 — `feature/obsidian-session-start`
-
-**Idee**: Beim `/join` (Session-Start) wird automatisch ein Kampagnen-Briefing generiert: "Wo haben wir letztes Mal aufgehört?" — basierend auf dem Vault.
-
-**Geplant**:
-- Server bekommt `session_start`-Event → RAG-Query an `rag-service` mit dem letzten Session-Summary als Suchkontext
-- Top-K relevante Vault-Chunks → LLM-Prompt: "Erstelle ein kurzes Briefing für die heutige Session"
-- Ergebnis als `role: system`-Message in `conversationHistory` am Anfang
-- Optionale Discord-Text-Nachricht mit dem Briefing
-
-**Abhängig von**: `feature/rag-service`
-
-**Noch zu klären**:
-- Soll das Briefing automatisch passieren oder nur auf Kommando ("Hey Rabenauge, wo haben wir aufgehört?")?
-- Wie viele Chunks für das Start-Briefing (8–10 vorgeschlagen, konfigurierbar)?
-
----
-
-### 7 — `feature/obsidian-per-query`
-
-**Idee**: Bei jeder Wake-Word-Anfrage wird parallel ein RAG-Query gegen den Vault gemacht. Bei hinreichendem Score werden die Top-3-Chunks als Kontext vor dem LLM-Call injiziert.
-
-**Geplant**:
-- `runPipeline` → nach STT, vor LLM: async RAG-Query mit `query` als Suchtext
-- Score-Threshold (konfigurierbar): nur injizieren wenn relevant genug
-- Chunks werden als `role: system`-Präambel eingefügt, nicht in `conversationHistory` persistiert
-
-**Abhängig von**: `feature/rag-service`, `feature/obsidian-session-start`
-
-**Noch zu klären**:
-- Latenz-Impact: RAG-Query + Embedding dauert ~100–300ms zusätzlich — akzeptabel?
-- Score-Threshold festlegen (erst im Betrieb kalibrierbar)
-
----
-
-### 8 — `feature/obsidian-write-notes` *(später)*
-
-**Idee**: Am Session-Ende wird automatisch eine Obsidian-Note angelegt (Session-Summary, wichtige Ereignisse, erwähnte NPCs/Orte).
-
-**Geplant**: *offen — erst nach Erfahrung mit Read-Only-Integration*
-
-**Noch zu klären**:
-- Format der generierten Note (Frontmatter-Schema?)
-- In welchem Vault-Ordner landen Session-Notes?
-- Soll Rabenauge auch bestehende NPC-/Orts-Files aktualisieren, oder nur neue Notes anlegen?
-
----
-
-### Abhängigkeits-Übersicht
-
-```
-0-scope-klärung
-    ↓
-1-offline-finalize ──────────────────┐
-    ↓                                │
-2-auto-finalize                      │
-                                     │
-3-session-log-enriched               │
-    ↓                                │
-4-session-rolling-summary            │
-                                     │
-5-rag-service (unabhängig)          │
-    ↓                                │
-6-obsidian-session-start             │
-    ↓                                │
-7-obsidian-per-query                 │
-    ↓                                │
-8-obsidian-write-notes  ←───────────┘
-```
-
-Branches 1–4 (Finalize/Session-Log) und 5–7 (RAG/Obsidian) sind **zwei unabhängige Stränge** die parallel entwickelt werden können. Branch 8 sinnvoll erst nach Erfahrung mit beiden Strängen.
+**Bewusst zurückgestellt / verworfen:**
+- `/redact`, `/marker`-Commands — würden LLM-Entscheidungen erfordern; das Transkript bleibt bewusst „raw".
+- Multi-Channel-Sessions — Bot ist auf einen Voice-Channel beschränkt.
+- Live-Stitching der Monolog-Unterbrechungen — zu komplex; das Live-Log ist chronologisch unkorrigiert, das Finalize-Transkript ist sauber.
 
 ---
 

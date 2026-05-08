@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
-import { Client, GatewayIntentBits, Partials, MessageFlags } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, MessageFlags, ActivityType } from 'discord.js';
 import {
   joinVoiceChannel,
   getVoiceConnection,
@@ -12,6 +12,8 @@ import { log, warn, error, debug } from './logger.js';
 import { SessionManager } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
 import { mixSession } from './mixer.js';
+import { getVersion } from './version.js';
+import { ensureServerReachable } from './serverAutoStart.js';
 import * as transport from './transport/index.js';
 
 const client = new Client({
@@ -22,6 +24,23 @@ const client = new Client({
 const sessions = new SessionManager();
 const activeRecordings = new Map();
 let _textChannel = null;
+
+// Build the Custom-Status text shown in the bot's Discord profile.
+// With server connected: "1.0.1-d5b717a (server:1.0.1-d5b717a)"
+// Without:               "1.0.1-d5b717a"
+function makeStatusText(serverVersion) {
+  const own = getVersion();
+  return serverVersion ? `${own} (server:${serverVersion})` : own;
+}
+
+function setBotStatus(serverVersion) {
+  if (!client.user) return;
+  try {
+    client.user.setActivity(makeStatusText(serverVersion), { type: ActivityType.Custom });
+  } catch (e) {
+    warn('setActivity failed:', e.message);
+  }
+}
 
 async function recoverOldSessions() {
   const stale = SessionManager.tryAutoFinalizeOld();
@@ -38,9 +57,14 @@ async function recoverOldSessions() {
 }
 
 client.once('clientReady', async () => {
-  log(`Bot online als ${client.user.tag}`);
+  log(`Bot v${getVersion()} online als ${client.user.tag}`);
+  setBotStatus(null);
   await recoverOldSessions();
   transport.start({ botId: client.user.id });
+
+  transport.onServerInfo((info) => {
+    setBotStatus(info.connected ? info.version : null);
+  });
 
   transport.onChatMessage((msg) => {
     if (!_textChannel) return;
@@ -63,6 +87,28 @@ client.on('interactionCreate', async (i) => {
       const member = await i.guild.members.fetch(i.user.id);
       const channel = member.voice.channel;
       if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });
+
+      // Auto-start can take up to ~30 s — defer the reply so Discord doesn't
+      // time out the interaction (3 s limit for non-deferred replies).
+      await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const startResult = await ensureServerReachable({
+        onProgress: (state) => {
+          const msg = state === 'starte'
+            ? '⏳ Server offline – starte ihn …'
+            : '⏳ Warte bis Server bereit ist …';
+          i.editReply({ content: msg }).catch(() => {});
+        },
+      });
+      if (startResult === 'started') {
+        log('join: server auto-started successfully');
+      } else if (startResult === 'no-cmd') {
+        warn('join: server offline, no SERVER_START_CMD — continuing in offline mode');
+        await i.editReply({ content: '⚠️ Server offline (kein Auto-Start konfiguriert) – Aufnahme läuft lokal.' }).catch(() => {});
+      } else if (startResult === 'timeout') {
+        warn('join: server did not come up — continuing in offline mode');
+        await i.editReply({ content: '⚠️ Server-Start fehlgeschlagen – Aufnahme läuft lokal.' }).catch(() => {});
+      }
 
       const connection = joinVoiceChannel({
         channelId: channel.id,
@@ -132,7 +178,7 @@ client.on('interactionCreate', async (i) => {
         transport.speakingEnd(userId);
       });
 
-      await i.reply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).`, flags: MessageFlags.Ephemeral });
+      await i.editReply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).` });
     }
 
     if (i.commandName === 'leave') {

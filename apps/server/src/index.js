@@ -7,6 +7,7 @@ import { initUplinkWSS } from './uplink.js';
 import { initDownlinkWSS } from './downlink.js';
 import { initControlWSS } from './control.js';
 import { checkBearer } from './auth.js';
+import { getVersion } from './version.js';
 
 const HB_INTERVAL_MS = 15000;
 
@@ -87,4 +88,4 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = parseInt(process.env.PORT || '7440', 10);
 
-server.listen(PORT, HOST, () => log(`server listening on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => log(`server v${getVersion()} listening on http://${HOST}:${PORT}`));

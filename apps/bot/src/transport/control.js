@@ -2,10 +2,10 @@ import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { randomUUID } from 'crypto';
 import { log, warn, debug } from '../logger.js';
+import { getVersion } from '../version.js';
 import { State } from './state.js';
 
 const PROTO_VERSION = 1;
-const BOT_VERSION = '1.0.1';
 
 const BACKOFF_BASE_MS = 2000;
 const BACKOFF_CAP_MS = 30000;
@@ -178,10 +178,11 @@ export class ControlClient extends EventEmitter {
           return;
         }
         this.serverInfo = { serverId: msg.serverId, version: msg.version, protoVersion: msg.protoVersion };
+        this.emit('serverHello', this.serverInfo);
         this._send({
           type: 'register',
           botId: this.botId,
-          version: BOT_VERSION,
+          version: getVersion(),
           protoVersion: PROTO_VERSION,
           capabilities: ['uplink', 'downlink'],
           t: Date.now(),

@@ -208,8 +208,19 @@ export class DownlinkClient {
 
   speakingStart(userId) {
     if (this._speakTimers.has(userId)) return; // already counting
+
+    // Do NOT close the gate while TTS is playing (jitter buffer non-empty).
+    // Automatic interruption via speaking events causes SILENCE_FRAMEs to be
+    // inserted mid-stream, which produces audible Opus decoder artefacts
+    // ("choppy noise").  Explicit interruption is handled by the stop command
+    // (stop_playback → jitter.clear()), which cleanly empties the buffer.
+    if (this._jitter.size > 0) {
+      debug('downlink: speaking start userId=', userId, '— TTS playing, gate stays open');
+      return;
+    }
+
     // Capture playback state now; the buffer may drain before the timer fires.
-    const wasPlaying = this._jitter.size > 0;
+    const wasPlaying = false; // jitter was empty above, so definitely not playing
     const timer = setTimeout(() => {
       this._speakTimers.delete(userId);
       this._activeSpeakers.add(userId);

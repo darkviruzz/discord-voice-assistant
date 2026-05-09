@@ -19,20 +19,56 @@ const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
 // It returns one Opus Buffer per _read() call (every ~20ms). When the gate is
 // closed or the buffer is empty, it returns a silence frame so the AudioPlayer
 // stays in Playing state without startup latency when audio resumes.
+//
+// highWaterMark:1 avoids pre-buffering stale SILENCE_FRAMEs: with the default
+// hwm=16 the stream eagerly pre-fills 16 silence frames (~320 ms) before any
+// real audio, which triggers Discord's Comfort Noise Generator on playback.
+// With hwm=1 only the very next frame is pre-queued, so real audio follows
+// within one tick after frames arrive in the jitter buffer.
 class PlaybackStream extends Readable {
   constructor(jitterBuffer, gating) {
-    super({ objectMode: true });
-    this._jitter  = jitterBuffer;
-    this._gating  = gating;
-    this._active  = true;
+    super({ objectMode: true, highWaterMark: 1 });
+    this._jitter     = jitterBuffer;
+    this._gating     = gating;
+    this._active     = true;
+    this._silenceRun = 0;   // consecutive silence frames (for diagnostics)
+    this._realFrames = 0;   // real frames served since last silence run
   }
 
   _read() {
     if (!this._active) { this.push(null); return; }
-    const packet = this._gating.isOpen()
-      ? (this._jitter.shift(this._gating.playoutMaxMs) ?? SILENCE_FRAME)
-      : SILENCE_FRAME;
-    this.push(packet);
+
+    const gateOpen = this._gating.isOpen();
+    let packet;
+    if (gateOpen) {
+      packet = this._jitter.shift(this._gating.playoutMaxMs) ?? null;
+    } else {
+      packet = null;
+    }
+
+    if (packet) {
+      // Real frame — log first frame after a silence run.
+      if (this._silenceRun > 0) {
+        debug(`playback: real audio resumed after ${this._silenceRun} silence frames`
+          + ` (${this._silenceRun * 20} ms), jitter=${this._jitter.size}`);
+        this._silenceRun = 0;
+      }
+      this._realFrames++;
+      // Periodic heartbeat every 5 s of real audio.
+      if (this._realFrames % 250 === 0) {
+        debug(`playback: ${this._realFrames} real frames played, jitter=${this._jitter.size}`);
+      }
+      this.push(packet);
+    } else {
+      // Silence frame — log reason on first occurrence and every 50 thereafter.
+      this._silenceRun++;
+      this._realFrames = 0;
+      if (this._silenceRun === 1 || this._silenceRun % 50 === 0) {
+        const reason = gateOpen ? 'jitter empty' : 'gate closed';
+        debug(`playback: silence #${this._silenceRun} (${reason}), jitter=${this._jitter.size}`);
+      }
+      this.push(SILENCE_FRAME);
+    }
   }
 
   destroy(err) {

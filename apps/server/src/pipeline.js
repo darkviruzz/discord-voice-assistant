@@ -367,9 +367,18 @@ export async function runPipeline(sessionId, userId) {
       for await (const { pcm, sampleRate } of synthesizeStream(responseText, opts, ctrl.signal)) {
         if (ctrl.signal.aborted) break;
         audioPipe ??= new StreamingAudioPipeline(sampleRate);
-        nextTsMs = sendOpusToSession(sessionId, audioPipe.push(pcm), nextTsMs);
+        const frames = audioPipe.push(pcm);
+        if (frames.length > 0) {
+          // Safety: if Piper is slower than real-time, virtual timestamps can fall
+          // behind the bot's clock and the batch would arrive stale.  Advancing
+          // nextTsMs to server-now keeps every batch fresh at arrival time while
+          // preserving strict monotonicity when Piper is fast.
+          nextTsMs = Math.max(nextTsMs, Date.now());
+          nextTsMs = sendOpusToSession(sessionId, frames, nextTsMs);
+        }
       }
       if (audioPipe && !ctrl.signal.aborted) {
+        nextTsMs = Math.max(nextTsMs, Date.now());
         sendOpusToSession(sessionId, audioPipe.flush(), nextTsMs);
       }
     } catch (e) {

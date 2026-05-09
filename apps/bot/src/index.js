@@ -166,6 +166,7 @@ client.on('interactionCreate', async (i) => {
 
       receiver.speaking.on('start', (userId) => {
         debug('speaking: start userId=', userId);
+        if (userId === client.user.id) return; // bot's own voice, ignore
         transport.speakingStart(userId);
         if (activeRecordings.has(userId)) {
           debug('already recording, skip start for', userId);
@@ -186,6 +187,7 @@ client.on('interactionCreate', async (i) => {
       });
 
       receiver.speaking.on('end', (userId) => {
+        if (userId === client.user.id) return; // bot's own voice, ignore
         transport.speakingEnd(userId);
       });
 

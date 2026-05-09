@@ -6,9 +6,9 @@ import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline } from './pipeline.js';
 import { botConnections } from './broadcast.js';
+import { getVersion } from './version.js';
 
 const PROTO_VERSION = 1;
-const SERVER_VERSION = '0.1.0';
 const SERVER_ID = randomUUID();
 
 // Default playout/gating params advertised to bots; bots may apply them
@@ -43,7 +43,7 @@ export function initControlWSS({ bearer } = {}) {
     let registered = false;
     let activeSessionId = null;
 
-    send(ws, { type: 'hello', serverId: SERVER_ID, version: SERVER_VERSION, protoVersion: PROTO_VERSION, t: Date.now() });
+    send(ws, { type: 'hello', serverId: SERVER_ID, version: getVersion(), protoVersion: PROTO_VERSION, t: Date.now() });
 
     ws.on('message', (data) => {
       let msg;

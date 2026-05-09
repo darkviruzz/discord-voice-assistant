@@ -2,6 +2,8 @@
 
 Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Mental Model und Operating Modes: siehe [`README.md`](README.md).
 
+> **Versionierung**: Bot + Server teilen `MAJOR.PHASE.PATCH` (z. B. `1.1.0` = nach Phase 1). Bump am Ende jeder Phase. Details im Plan-File.
+
 ---
 
 ## Phase 1 — Quick Wins

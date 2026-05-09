@@ -6,9 +6,23 @@ import { log, warn, debug } from '../logger.js';
 
 let _instance = null;
 let _chatMessageCallback = null;
+let _serverInfoCallback = null;
 
 export function onChatMessage(cb) {
   _chatMessageCallback = cb;
+}
+
+// Notifies on server-version changes: { connected: true, version, serverId } on hello,
+// { connected: false } when transport leaves READY (lost server). Fires the latest
+// known state immediately if subscribed late.
+export function onServerInfo(cb) {
+  _serverInfoCallback = cb;
+  if (!cb || !_instance) return;
+  if (_instance.fsm.is(State.READY) && _instance.control.serverInfo) {
+    cb({ connected: true, ..._instance.control.serverInfo });
+  } else {
+    cb({ connected: false });
+  }
 }
 
 function deriveBaseUrl() {
@@ -47,6 +61,16 @@ export function start({ botId } = {}) {
     } else {
       uplink.close();
       downlink.close();
+    }
+  });
+
+  // Fire serverInfo callback on hello and on state-leaving-READY.
+  control.on('serverHello', (info) => {
+    if (_serverInfoCallback) _serverInfoCallback({ connected: true, ...info });
+  });
+  fsm.on('change', (next, prev) => {
+    if (prev === State.READY && next !== State.READY) {
+      if (_serverInfoCallback) _serverInfoCallback({ connected: false });
     }
   });
 

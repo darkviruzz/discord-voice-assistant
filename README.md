@@ -720,6 +720,8 @@ Stop-Process -Id <PID> -Force
 
 Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Modes" oben). Die priorisierte Feature-Reihenfolge mit Aufwand/Impact-Bewertung steht in `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Backlog/Brainstorm in [`TODO.md`](TODO.md).
 
+**Versionierung**: Bot und Server teilen sich eine Version nach `MAJOR.PHASE.PATCH` — z. B. `1.1.0` für Phase 1, `1.2.0` für Phase 2 usw. Bump erfolgt am Ende einer Phase im Merge-Commit. Im Discord-Bot-Status erscheint `<bot-version>-<git-hash> (server:<server-version>-<git-hash>)`.
+
 **Aktuelle Phasen (grob):**
 
 1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Filter.

@@ -140,12 +140,27 @@ export class DownlinkClient {
     });
 
     let downlinkFrames = 0;
+    let firstTsMs      = null;
+    let lastTsMs       = null;
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;
       try {
         const f = parseFrame(Buffer.from(data));
         if (!f.magic.equals(MAGIC_DNLK)) return;
-        if (++downlinkFrames === 1) debug('downlink: first frame received from server');
+        downlinkFrames++;
+        if (downlinkFrames === 1) {
+          firstTsMs = f.tsMs;
+          debug('downlink: first frame, tsMs=', f.tsMs, 'now=', Date.now());
+        }
+        // Log if there's a suspicious gap or overlap between consecutive timestamps.
+        if (lastTsMs !== null && f.tsMs < lastTsMs) {
+          warn('downlink: out-of-order tsMs — got', f.tsMs, 'after', lastTsMs,
+               '(gap', f.tsMs - lastTsMs, 'ms) — jitter drops likely!');
+        } else if (lastTsMs !== null && f.tsMs - lastTsMs > 100) {
+          debug('downlink: tsMs gap', f.tsMs - lastTsMs, 'ms at frame', downlinkFrames,
+                '(expected ~20ms) — new sentence batch');
+        }
+        lastTsMs = f.tsMs;
         this._jitter.add(f.payload, f.tsMs);
       } catch (e) {
         warn('downlink: parse error:', e.message);

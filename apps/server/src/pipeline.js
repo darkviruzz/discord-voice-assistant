@@ -213,6 +213,7 @@ function sendOpusToSession(sessionId, opusFrames, startTsMs = Date.now()) {
       try { ws.send(pkt, { binary: true }); } catch {}
     }
   }
+  debug('pipeline: sent', opusFrames.length, 'opus frames tsMs', startTsMs, '→', startTsMs + (opusFrames.length - 1) * 20);
   log('pipeline: sent', opusFrames.length, 'opus frames to session', sessionId.toString());
   return startTsMs + opusFrames.length * 20;
 }

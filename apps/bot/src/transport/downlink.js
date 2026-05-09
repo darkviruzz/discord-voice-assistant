@@ -57,6 +57,17 @@ export class DownlinkClient {
     this._jitter         = new JitterBuffer();
     this._activeSpeakers = new Set();
     this._lastSpeakEnd   = 0;
+    // Clock offset between server and bot (ms). Computed on first received frame:
+    //   _serverClockOffset = Date.now() - f.tsMs
+    // Positive means the bot clock is ahead of the server clock.
+    // Applied to every incoming frame's tsMs to normalize to the local clock
+    // before entering the jitter buffer — otherwise the jitter buffer's
+    // maxAgeMs check uses the bot's clock while the frame's tsMs is on the
+    // server's clock, shrinking the effective freshness window to
+    //   maxAgeMs - abs(clockSkew).
+    // Example: 1098 ms skew → only 402 ms window → Piper gaps of >402 ms
+    // cause the next batch to appear stale and get silently dropped.
+    this._serverClockOffset = null;
     // Pending timers before a speaking event is treated as a real interruption.
     this._speakTimers    = new Map(); // userId → setTimeout handle
     // Gate duration to use after the next silence (null = use gateMs).
@@ -140,28 +151,29 @@ export class DownlinkClient {
     });
 
     let downlinkFrames = 0;
-    let firstTsMs      = null;
-    let lastTsMs       = null;
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;
       try {
         const f = parseFrame(Buffer.from(data));
         if (!f.magic.equals(MAGIC_DNLK)) return;
-        downlinkFrames++;
-        if (downlinkFrames === 1) {
-          firstTsMs = f.tsMs;
-          debug('downlink: first frame, tsMs=', f.tsMs, 'now=', Date.now());
+
+        // Compute clock offset on the first frame and reuse for the whole session.
+        // Server (Windows) and bot (Linux) clocks may differ significantly; the
+        // jitter buffer's maxAgeMs check runs on bot time while tsMs is server time,
+        // so the effective freshness window shrinks to (maxAgeMs - |offset|).
+        // Normalizing to bot time restores the full window.
+        if (this._serverClockOffset === null) {
+          this._serverClockOffset = Date.now() - f.tsMs;
+          debug('downlink: clock offset =', this._serverClockOffset,
+                'ms (positive = bot ahead; freshness window =',
+                this.playoutMaxMs - Math.abs(this._serverClockOffset), 'ms without fix)');
         }
-        // Log if there's a suspicious gap or overlap between consecutive timestamps.
-        if (lastTsMs !== null && f.tsMs < lastTsMs) {
-          warn('downlink: out-of-order tsMs — got', f.tsMs, 'after', lastTsMs,
-               '(gap', f.tsMs - lastTsMs, 'ms) — jitter drops likely!');
-        } else if (lastTsMs !== null && f.tsMs - lastTsMs > 100) {
-          debug('downlink: tsMs gap', f.tsMs - lastTsMs, 'ms at frame', downlinkFrames,
-                '(expected ~20ms) — new sentence batch');
-        }
-        lastTsMs = f.tsMs;
-        this._jitter.add(f.payload, f.tsMs);
+
+        if (++downlinkFrames === 1) debug('downlink: first frame received from server');
+
+        // Normalize server timestamp to local clock before buffering.
+        const normalizedTs = f.tsMs + this._serverClockOffset;
+        this._jitter.add(f.payload, normalizedTs);
       } catch (e) {
         warn('downlink: parse error:', e.message);
       }
@@ -188,7 +200,8 @@ export class DownlinkClient {
     }
     this._jitter.clear();
     this._interruptedWhilePlaying = false;
-    this._sessionId = null;
+    this._sessionId        = null;
+    this._serverClockOffset = null;  // recompute on next open()
   }
 
   // Bind the AudioPlayer to a VoiceConnection so it can output audio.
@@ -208,19 +221,8 @@ export class DownlinkClient {
 
   speakingStart(userId) {
     if (this._speakTimers.has(userId)) return; // already counting
-
-    // Do NOT close the gate while TTS is playing (jitter buffer non-empty).
-    // Automatic interruption via speaking events causes SILENCE_FRAMEs to be
-    // inserted mid-stream, which produces audible Opus decoder artefacts
-    // ("choppy noise").  Explicit interruption is handled by the stop command
-    // (stop_playback → jitter.clear()), which cleanly empties the buffer.
-    if (this._jitter.size > 0) {
-      debug('downlink: speaking start userId=', userId, '— TTS playing, gate stays open');
-      return;
-    }
-
     // Capture playback state now; the buffer may drain before the timer fires.
-    const wasPlaying = false; // jitter was empty above, so definitely not playing
+    const wasPlaying = this._jitter.size > 0;
     const timer = setTimeout(() => {
       this._speakTimers.delete(userId);
       this._activeSpeakers.add(userId);

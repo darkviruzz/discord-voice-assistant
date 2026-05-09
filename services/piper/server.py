@@ -133,14 +133,21 @@ async def synthesize_stream(req: TTSRequest) -> StreamingResponse:
     sample_rate = voice.config.sample_rate
 
     async def _generate() -> AsyncGenerator[bytes, None]:
-        loop = asyncio.get_event_loop()
-        # Run the blocking synthesize() generator in a thread pool so we don't
-        # block the event loop while ONNX inference runs.
+        loop = asyncio.get_running_loop()
         gen = voice.synthesize(req.text, syn)
-        while True:
+        _DONE = object()
+
+        def _next_chunk():
+            # StopIteration must NOT cross the Future boundary (PEP 479) —
+            # catch it here inside the thread and return a sentinel instead.
             try:
-                chunk = await loop.run_in_executor(None, next, gen)
+                return next(gen)
             except StopIteration:
+                return _DONE
+
+        while True:
+            chunk = await loop.run_in_executor(None, _next_chunk)
+            if chunk is _DONE:
                 break
             yield chunk.audio_int16_bytes
 

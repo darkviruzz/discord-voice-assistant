@@ -230,11 +230,36 @@ function Clear-AllLogs {
 # stdout UND stderr landen zusammen in einer Log-Datei (kein .err.log).
 # Intern läuft ein PowerShell-Wrapper, der 2>&1 | ForEach-Object { "$_" } | Out-File macht.
 # Die PID des PS-Wrappers ist irrelevant – Stoppen erfolgt port-basiert.
+#
+# WICHTIG: Der Spawn läuft via WMI Win32_Process.Create, NICHT via Start-Process.
+# Grund: wenn dieses Script per SSH (Windows OpenSSH) gestartet wird, hängen alle
+# mit Start-Process gestarteten Kindprozesse am Job-Objekt der sshd-Session und
+# werden beim SSH-Disconnect mit-getötet. Win32_Process.Create wird vom WMI-
+# Provider (wmiprvse.exe) geforkt → eigener Job → überlebt den Disconnect.
+# WMI vererbt das Environment des aufrufenden PS-Prozesses NICHT, deshalb werden
+# benötigte env-Vars unten in den Temp-Script-Anfang re-injected.
 function Start-ServiceHidden {
     param([string]$Name, [string[]]$ScriptLines, [string]$LogFile)
     $tmpScript = "$env:TEMP\va-hidden-$($Name.ToLower()).ps1"
-    $ScriptLines | Set-Content -Path $tmpScript -Encoding UTF8
-    Start-Process powershell -ArgumentList @('-NoProfile', '-NoLogo', '-File', $tmpScript) -WindowStyle Hidden
+
+    # Re-inject env-vars die der WMI-gestartete Child sonst nicht sieht.
+    # Nur die für Piper relevanten — Whisper braucht keine, Node liest dotenv.
+    $envBlock = @(
+        ('$env:PIPER_VOICES_DIR = ''' + $env:PIPER_VOICES_DIR + '''')
+        ('$env:PIPER_USE_DIRECTML = ''' + $env:PIPER_USE_DIRECTML + '''')
+        ('$env:PIPER_DIRECTML_DEVICE = ''' + $env:PIPER_DIRECTML_DEVICE + '''')
+    )
+    ($envBlock + $ScriptLines) | Set-Content -Path $tmpScript -Encoding UTF8
+
+    $cmd = "powershell.exe -NoProfile -NoLogo -WindowStyle Hidden -File `"$tmpScript`""
+    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $cmd
+    } -ErrorAction SilentlyContinue
+
+    if (-not $result -or $result.ReturnValue -ne 0) {
+        Write-Warn "WMI-Spawn von $Name fehlgeschlagen (ReturnValue=$($result.ReturnValue)) – fallback auf Start-Process"
+        Start-Process powershell -ArgumentList @('-NoProfile', '-NoLogo', '-File', $tmpScript) -WindowStyle Hidden
+    }
 }
 
 function Start-Whisper-Hidden {
@@ -312,7 +337,15 @@ if ($Mode -eq "silent") {
 
     Start-Server-Hidden
 
-    Write-Ok "Alle Dienste laufen (silent)."
+    # Health-Check des Node-Servers: "OK" erst wenn /health antwortet.
+    # Ohne den Check meldet das Script Erfolg auch wenn Node später crasht.
+    $serverOk = Wait-ForHttp "Server" "http://localhost:$ServerPort/health" -TimeoutSec 15
+
+    if ($serverOk) {
+        Write-Ok "Alle Dienste laufen (silent)."
+    } else {
+        Write-Warn "Whisper/Piper laufen, Node-Server hat nicht geantwortet – siehe $ServerLog"
+    }
     Write-Info "Logs: $LogDir"
     Write-Info "Stoppen mit: .\scripts\Start-VoiceAssistant.ps1 -Mode stop"
     exit

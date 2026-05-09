@@ -57,10 +57,12 @@ function runStartCmd(cmd) {
 }
 
 // Top-level: ensure the LAN server is reachable.
-//   onProgress(message)       — called on each state change for Discord feedback.
-//   probeTimeoutMs            — initial reachability probe per attempt (default 1000)
-//   startTimeoutMs            — total time we wait for the server after launching (default 30000)
-//   pollIntervalMs            — gap between reachability re-probes (default 2000)
+//   onProgress({ phase, elapsedMs, deadlineMs })
+//                              — called on state changes / each poll for Discord feedback.
+//                              — phase is 'starting' | 'waiting'.
+//   probeTimeoutMs             — initial reachability probe per attempt (default 1000)
+//   startTimeoutMs             — total time we wait for the server after launching (default 30000)
+//   pollIntervalMs             — gap between reachability re-probes (default 2000)
 //
 // Returns one of:
 //   'already-online'  — server was reachable immediately
@@ -95,18 +97,19 @@ export async function ensureServerReachable({
     return 'no-cmd';
   }
 
-  onProgress('starte');
+  const startedAt = Date.now();
+  onProgress({ phase: 'starting', elapsedMs: 0, deadlineMs: startTimeoutMs });
   runStartCmd(cmd);
 
   // 3. Poll until reachable or timeout.
-  const deadline = Date.now() + startTimeoutMs;
+  const deadline = startedAt + startTimeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
     if (await probeTcp(target.host, target.port, probeTimeoutMs)) {
       log('autostart: server reachable');
       return 'started';
     }
-    onProgress('warte');
+    onProgress({ phase: 'waiting', elapsedMs: Date.now() - startedAt, deadlineMs: startTimeoutMs });
   }
 
   warn('autostart: server did not come up within', startTimeoutMs, 'ms');

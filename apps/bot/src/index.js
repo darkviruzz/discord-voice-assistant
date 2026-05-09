@@ -92,23 +92,34 @@ client.on('interactionCreate', async (i) => {
       // time out the interaction (3 s limit for non-deferred replies).
       await i.deferReply({ flags: MessageFlags.Ephemeral });
 
+      // Collect status lines so warnings stay visible in the final reply
+      // (a single editReply at the end would otherwise overwrite them).
+      const statusLines = [];
+
       const startResult = await ensureServerReachable({
-        onProgress: (state) => {
-          const msg = state === 'starte'
-            ? '⏳ Server offline – starte ihn …'
-            : '⏳ Warte bis Server bereit ist …';
+        onProgress: ({ phase, elapsedMs, deadlineMs }) => {
+          let msg;
+          if (phase === 'starting') {
+            msg = '⏳ Server offline – starte ihn per SSH …';
+          } else {
+            const sec = Math.round(elapsedMs / 1000);
+            const total = Math.round(deadlineMs / 1000);
+            msg = `⏳ Warte bis Server bereit ist (${sec}s/${total}s) …`;
+          }
           i.editReply({ content: msg }).catch(() => {});
         },
       });
       if (startResult === 'started') {
         log('join: server auto-started successfully');
+        statusLines.push('🟢 Server gestartet.');
       } else if (startResult === 'no-cmd') {
         warn('join: server offline, no SERVER_START_CMD — continuing in offline mode');
-        await i.editReply({ content: '⚠️ Server offline (kein Auto-Start konfiguriert) – Aufnahme läuft lokal.' }).catch(() => {});
+        statusLines.push('⚠️ Server offline (kein Auto-Start konfiguriert) – Aufnahme läuft lokal.');
       } else if (startResult === 'timeout') {
         warn('join: server did not come up — continuing in offline mode');
-        await i.editReply({ content: '⚠️ Server-Start fehlgeschlagen – Aufnahme läuft lokal.' }).catch(() => {});
+        statusLines.push('⚠️ Server-Start fehlgeschlagen (Timeout) – Aufnahme läuft lokal.');
       }
+      // 'already-online' and 'no-base-url' produce no extra status line.
 
       const connection = joinVoiceChannel({
         channelId: channel.id,
@@ -178,7 +189,8 @@ client.on('interactionCreate', async (i) => {
         transport.speakingEnd(userId);
       });
 
-      await i.editReply({ content: `Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).` });
+      statusLines.push(`Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).`);
+      await i.editReply({ content: statusLines.join('\n') });
     }
 
     if (i.commandName === 'leave') {

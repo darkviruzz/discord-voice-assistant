@@ -7,6 +7,7 @@ import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
 import { synthesizeStream } from './tts.js';
+import { StreamingAudioPipeline } from './audio.js';
 import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
@@ -43,82 +44,6 @@ function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
   hdr.writeUInt16LE(bitDepth, 34);
   hdr.write('data', 36);       hdr.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([hdr, pcm]);
-}
-
-// Parse a WAV buffer and return { pcm, sampleRate, channels, bitDepth }.
-function parseWav(buf) {
-  if (buf.length < 44) throw new Error('wav: buffer too short');
-  if (buf.toString('ascii', 0, 4) !== 'RIFF') throw new Error('wav: not RIFF');
-  if (buf.toString('ascii', 8, 12) !== 'WAVE') throw new Error('wav: not WAVE');
-
-  let offset = 12;
-  let sampleRate, channels, bitDepth, dataStart, dataLen;
-
-  while (offset + 8 <= buf.length) {
-    const id   = buf.toString('ascii', offset, offset + 4);
-    const size = buf.readUInt32LE(offset + 4);
-    offset += 8;
-    if (id === 'fmt ') {
-      const fmt = buf.readUInt16LE(offset);
-      if (fmt !== 1) throw new Error(`wav: unsupported format ${fmt} (only PCM=1)`);
-      channels   = buf.readUInt16LE(offset + 2);
-      sampleRate = buf.readUInt32LE(offset + 4);
-      bitDepth   = buf.readUInt16LE(offset + 14);
-    } else if (id === 'data') {
-      dataStart = offset;
-      dataLen   = Math.min(size, buf.length - offset);
-      break;
-    }
-    offset += size % 2 === 0 ? size : size + 1; // RIFF chunks are word-aligned
-  }
-
-  if (dataStart == null) throw new Error('wav: no data chunk');
-  return { pcm: buf.subarray(dataStart, dataStart + dataLen), sampleRate, channels, bitDepth };
-}
-
-// Stereo / multi-channel → mono by averaging.
-function toMono(pcmI16Le, channels) {
-  if (channels === 1) return pcmI16Le;
-  const frames = Math.floor(pcmI16Le.length / 2 / channels);
-  const out = Buffer.alloc(frames * 2);
-  for (let i = 0; i < frames; i++) {
-    let sum = 0;
-    for (let c = 0; c < channels; c++) {
-      sum += pcmI16Le.readInt16LE((i * channels + c) * 2);
-    }
-    out.writeInt16LE(Math.round(sum / channels), i * 2);
-  }
-  return out;
-}
-
-// Linear-interpolation resampler (mono int16LE).
-function resampleMono(src, fromRate, toRate) {
-  if (fromRate === toRate) return src;
-  const srcFrames = src.length / 2;
-  const dstFrames = Math.round(srcFrames * toRate / fromRate);
-  const dst = Buffer.alloc(dstFrames * 2);
-  for (let i = 0; i < dstFrames; i++) {
-    const pos = i * fromRate / toRate;
-    const lo  = Math.min(Math.floor(pos), srcFrames - 1);
-    const hi  = Math.min(lo + 1,          srcFrames - 1);
-    const s0  = src.readInt16LE(lo * 2);
-    const s1  = src.readInt16LE(hi * 2);
-    const s   = Math.round(s0 + (s1 - s0) * (pos - lo));
-    dst.writeInt16LE(Math.max(-32768, Math.min(32767, s)), i * 2);
-  }
-  return dst;
-}
-
-// Encode 48 kHz mono int16LE PCM to an array of Opus Buffer packets.
-function pcm48kToOpusFrames(pcm48k) {
-  const enc        = new OpusEncoder(48000, 1);
-  const frameSamples = 960;      // 20 ms @ 48 kHz
-  const frameBytes   = frameSamples * 2;
-  const frames = [];
-  for (let off = 0; off + frameBytes <= pcm48k.length; off += frameBytes) {
-    frames.push(Buffer.from(enc.encode(pcm48k.subarray(off, off + frameBytes))));
-  }
-  return frames;
 }
 
 // ── Long-audio transcription helpers ────────────────────────────────────────
@@ -413,22 +338,20 @@ export async function runPipeline(sessionId, userId) {
       question: transcript, answer: responseText, isStop: false,
     });
 
-    // 8–10. Streaming TTS → resample per sentence → encode → push to downlink.
-    // Each sentence chunk is sent as soon as it is synthesized, reducing TTFA.
+    // 8–10. Streaming TTS → resample → encode → push to downlink.
+    // StreamingAudioPipeline keeps a single OpusEncoder and accumulator alive
+    // across all chunks so that chunk boundaries cause no encoder resets or
+    // dropped samples (fixes the noise-after-2s bug).
+    let audioPipe = null;
     try {
       const opts = { model: ttsModel, speakerId };
-      for await (const { pcm, sampleRate, isWav } of synthesizeStream(responseText, opts, ctrl.signal)) {
+      for await (const { pcm, sampleRate } of synthesizeStream(responseText, opts, ctrl.signal)) {
         if (ctrl.signal.aborted) break;
-        let rawPcm = pcm;
-        let rate   = sampleRate;
-        let channels = 1;
-        if (isWav) {
-          // ElevenLabs fallback: pcm is a full WAV buffer
-          ({ pcm: rawPcm, sampleRate: rate, channels } = parseWav(pcm));
-        }
-        const mono48k    = resampleMono(toMono(rawPcm, channels), rate, 48000);
-        const opusFrames = pcm48kToOpusFrames(mono48k);
-        sendOpusToSession(sessionId, opusFrames);
+        audioPipe ??= new StreamingAudioPipeline(sampleRate);
+        sendOpusToSession(sessionId, audioPipe.push(pcm));
+      }
+      if (audioPipe && !ctrl.signal.aborted) {
+        sendOpusToSession(sessionId, audioPipe.flush());
       }
     } catch (e) {
       if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);

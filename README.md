@@ -529,21 +529,12 @@ Erwartet: JSON-Antwort mit `"role":"assistant"` und deutschem Text.
 
 ### Service 3: Piper TTS (Text-to-Speech)
 
+Der TTS-Server nutzt **piper via Python-API** (kein Subprocess-Aufruf der `piper.exe`).
+Für GPU-Beschleunigung auf AMD-GPUs wird ein DirectML-Fork der piper-Library verwendet.
+
 #### Installation
 
-**1. Piper-Binary herunterladen**
-
-```powershell
-New-Item -ItemType Directory -Path "C:\Users\$env:USERNAME\Programme\piper" -Force
-cd "C:\Users\$env:USERNAME\Programme\piper"
-
-& "C:\Windows\System32\curl.exe" -L -o piper.zip `
-    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
-
-Expand-Archive -Path piper.zip -DestinationPath . -Force
-```
-
-**2. Deutsche Stimmen herunterladen**
+**1. Deutsche Stimmen herunterladen**
 
 ```powershell
 New-Item -ItemType Directory -Path "C:\Users\$env:USERNAME\Programme\piper\voices" -Force
@@ -552,72 +543,94 @@ cd "C:\Users\$env:USERNAME\Programme\piper\voices"
 # Stimme 1: Thorsten High (klare, neutrale Stimme)
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten-high.onnx `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx"
-
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten-high.onnx.json `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json"
 
-# Stimme 2: Thorsten Emotional Medium (8 Emotionen)
+# Stimme 2: Thorsten Emotional Medium (8 Emotionen, empfohlen)
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten_emotional-medium.onnx `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx"
-
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten_emotional-medium.onnx.json `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json"
 ```
 
-**3. Python-Umgebung einrichten**
+**2. Python-Umgebung einrichten (DirectML-Fork)**
+
+Der DirectML-Fork erweitert piper-tts um GPU-Support via `PIPER_USE_DIRECTML=1`.
+Ohne den Fork läuft der Server nur auf CPU.
 
 ```powershell
-cd "C:\Users\$env:USERNAME\Programme\piper"
-
-python -m venv piper
-.\piper\Scripts\activate
+# Fork installieren (einmalig):
+cd "C:\Users\$env:USERNAME\Programme\piper-directml-fork"
+python -m venv venv
+.\venv\Scripts\activate
+pip install -e .           # piper-tts aus dem Fork
 pip install fastapi uvicorn
 ```
 
-**4. HTTP-Server-Skript**
+Die Python-Dependencies sind in [`services/piper/requirements.txt`](services/piper/requirements.txt) dokumentiert.
 
-Das Skript liegt im Repo unter [`services/piper/server.py`](services/piper/server.py) und liest Pfade aus Umgebungsvariablen, die das Startskript automatisch setzt:
+**3. Umgebungsvariablen**
 
-```
-PIPER_DIR        → Basisverzeichnis der Piper-Installation
-PIPER_EXE        → Pfad zur piper.exe
-PIPER_VOICES_DIR → Verzeichnis mit den .onnx-Modellen
-```
+Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch:
 
-Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese Variablen anhand der konfigurierten `$PiperDir`-Variable und startet `uvicorn` dann aus dem `services/piper/`-Verzeichnis des Repos.
+| Variable | Wert | Beschreibung |
+|----------|------|--------------|
+| `PIPER_VOICES_DIR` | `C:\...\piper\voices` | Verzeichnis mit den `.onnx`-Modellen |
+| `PIPER_USE_DIRECTML` | `1` | GPU-Beschleunigung aktivieren (AMD DirectML) |
+| `PIPER_DIRECTML_DEVICE` | `0` | GPU-Index (0 = erste GPU) |
 
 #### Server starten
 
-Piper wird über das Haupt-Startskript gestartet:
+Über das Haupt-Startskript (empfohlen):
 
 ```powershell
 .\scripts\Start-VoiceAssistant.ps1        # Piper startet minimiert
 .\scripts\Start-VoiceAssistant.ps1 -Mode all   # Piper in eigenem Windows Terminal Pane
 ```
 
-Oder manuell (Piper-Venv muss aktiviert sein):
+Manuell:
 
 ```powershell
-cd "C:\Users\$env:USERNAME\Programme\piper"
-.\piper\Scripts\activate.ps1
-$env:PIPER_DIR = (Get-Location).Path
-$env:PIPER_EXE = "$env:PIPER_DIR\piper.exe"
-$env:PIPER_VOICES_DIR = "$env:PIPER_DIR\voices"
+cd "C:\Users\$env:USERNAME\Programme\piper-directml-fork"
+.\venv\Scripts\Activate.ps1
+$env:PIPER_VOICES_DIR      = "C:\Users\$env:USERNAME\Programme\piper\voices"
+$env:PIPER_USE_DIRECTML    = "1"
+$env:PIPER_DIRECTML_DEVICE = "0"
 cd "<Repo-Root>\services\piper"
-uvicorn server:app --host 0.0.0.0 --port 5000
+python -m uvicorn server:app --host 0.0.0.0 --port 5000
 ```
 
-#### Health-Check
+#### Health-Check & Voice-Discovery
 
 ```powershell
+# Server-Status + DirectML-Zustand:
 & "C:\Windows\System32\curl.exe" http://localhost:5000/health
-# Erwartet: {"status":"ok"}
+# Erwartet: {"status":"ok","voices":["emotional","high"],"directml":true}
+
+# Verfügbare Stimmen (Pipecat-kompatible Discovery):
+& "C:\Windows\System32\curl.exe" http://localhost:5000/voices
+# Erwartet: [{"id":"emotional","name":"...","lang":"de","speakers":8},...]
 ```
 
 #### TTS-Tests
 
+Die Tests verwenden den **primären Streaming-Endpoint** `/tts/synthesize`.
+Für einfaches WAV-Testen (Debug) steht `/synthesize` zusätzlich bereit.
+
 ```powershell
-# Test 1: Neutral (emotional, speaker 4)
+# Test 1: Streaming (primärer Produktionspfad) — PCM-Chunks in Datei sammeln
+[System.IO.File]::WriteAllText(
+    "$env:TEMP\tts-stream.json",
+    '{"text":"Hallo Abenteurer, ich bin Rabenauge. Baron Kelthur regiert die Nordprovinz seit zwanzig Jahren.","model":"emotional","speaker_id":4,"length_scale":1.0}',
+    [System.Text.UTF8Encoding]::new($false)
+)
+& "C:\Windows\System32\curl.exe" -X POST http://localhost:5000/tts/synthesize `
+    -H "Content-Type: application/json" `
+    -d "@$env:TEMP\tts-stream.json" `
+    -v 2>&1 | Select-String "X-Sample-Rate|Content-Type|bytes"
+# Erwartet: Content-Type: audio/pcm-s16le, X-Sample-Rate: 22050
+
+# Test 2: WAV (Debug, nicht-streaming)
 [System.IO.File]::WriteAllText(
     "$env:TEMP\tts-neutral.json",
     '{"text":"Hallo Abenteurer, ich bin Rabenauge. Wie kann ich euch helfen?","model":"emotional","speaker_id":4}',
@@ -629,7 +642,7 @@ uvicorn server:app --host 0.0.0.0 --port 5000
     --output test-neutral.wav
 Start-Process test-neutral.wav
 
-# Test 2: Flüsternd (speaker 7)
+# Test 3: Flüsternd (speaker 7)
 [System.IO.File]::WriteAllText(
     "$env:TEMP\tts-fluster.json",
     '{"text":"Vorsicht, da vorne lauert etwas im Schatten...","model":"emotional","speaker_id":7}',
@@ -641,18 +654,27 @@ Start-Process test-neutral.wav
     --output test-fluster.wav
 Start-Process test-fluster.wav
 
-# Test 3: High (klare Stimme ohne Emotion)
+# Test 4: Verlangsamte Sprache (length_scale > 1)
 [System.IO.File]::WriteAllText(
-    "$env:TEMP\tts-high.json",
-    '{"text":"Baron Kelthur regiert seit zwanzig Jahren die Nordprovinz.","model":"high"}',
+    "$env:TEMP\tts-slow.json",
+    '{"text":"Baron Kelthur regiert seit zwanzig Jahren die Nordprovinz.","model":"high","length_scale":1.3}',
     [System.Text.UTF8Encoding]::new($false)
 )
 & "C:\Windows\System32\curl.exe" -X POST http://localhost:5000/synthesize `
     -H "Content-Type: application/json" `
-    -d "@$env:TEMP\tts-high.json" `
-    --output test-high.wav
-Start-Process test-high.wav
+    -d "@$env:TEMP\tts-slow.json" `
+    --output test-slow.wav
+Start-Process test-slow.wav
 ```
+
+#### Troubleshooting Piper
+
+| Symptom | Ursache | Lösung |
+|---------|---------|--------|
+| `No voice models found` | `PIPER_VOICES_DIR` falsch | Env-Var prüfen, Pfad muss `.onnx`-Dateien enthalten |
+| `use_directml not supported` | Basis-piper statt Fork | Fork installieren: `pip install -e C:\...\piper-directml-fork` |
+| `{"directml":false}` im Health-Check | `PIPER_USE_DIRECTML` nicht gesetzt | Startskript nutzen oder Env-Var manuell setzen |
+| Server startet nicht | venv nicht aktiviert | `.\venv\Scripts\Activate.ps1` vor `uvicorn` |
 
 ---
 

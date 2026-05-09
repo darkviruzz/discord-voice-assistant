@@ -173,9 +173,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Hängt zusammen mit `session-rolling-summary` (oben) und `obsidian-per-query` (Phase 4) — ggf. überflüssig wenn RAG den nötigen Kontext liefert
   - Format: leserliches Markdown (Speaker/Text), keine Steuerzeichen/JSON-Klammern. Falls LLM JSON ausgeben soll, dialog auch in JSON-Form serialisieren — sonst Markdown
 
-- [ ] **`Pipecat TTS Service Spec`-konforme TTS-API** — Wartbarkeit/Ecosystem-Kompatibilität.
-
-- [ ] **WebSocket-basiertes Piper-Streaming evaluieren** — `piper-streaming` oder `paroli` als Upgrade-Pfad falls Sub-100-ms-TTFA nötig wird. Aktuelle HTTP-Chunked-Lösung reicht aus.
+- [x] **`Pipecat TTS Service Spec`-konforme TTS-API** — `GET /voices` Endpoint + `Content-Type: audio/pcm-s16le` Header hinzugefügt (`feature/piper-pipeline-rework`).
 
 - [ ] **Autostart via Windows Task Scheduler** — wird durch „Server-Auto-Start via SSH bei `/join`" weitgehend redundant. Falls noch gebraucht: `Start-VoiceAssistant.ps1 -Mode silent` als Aufgabe „bei PC-Entsperrung".
 
@@ -193,6 +191,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Verworfen
 
+- **WebSocket-basiertes Piper-Streaming** (`piper-streaming` / `paroli`) — evaluiert in `feature/piper-pipeline-rework`. HTTP-Chunked-Streaming liefert identische TTFA (first-byte innerhalb von 100–200 ms), kein messbarer Vorteil für unser 0.5–2s End-to-End-Ziel. Aufwand >> Nutzen.
 - **Mehrere gleichzeitige Sessions** — Bot ist bewusst auf einen Voice-Channel beschränkt.
 - **`/redact`-Command** — würde LLM-Entscheidungen erfordern. Off-Topic-Filter passiert manuell oder in der externen Cowork-Pipeline.
 - **`/marker`-Command** — gleiches Argument; Anker im Transkript besser über Pause-Erkennung + Spielernotizen.

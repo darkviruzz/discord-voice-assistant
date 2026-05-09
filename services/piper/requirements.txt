@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn>=0.29
+
+# piper-tts wird NICHT von PyPI installiert – es wird der DirectML-Fork verwendet:
+#
+#   pip install -e C:\Users\nogar\Programme\piper-directml-fork
+#
+# Der Fork erweitert die offizielle piper-tts Library um DirectML-GPU-Support
+# (use_directml=True / directml_device_id Parameter in PiperVoice.load).
+# Ohne diesen Fork läuft der Server nur auf CPU.

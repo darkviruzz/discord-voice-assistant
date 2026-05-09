@@ -139,10 +139,17 @@ function Stop-ServiceByPort {
         return
     }
 
-    # Sofort hart killen (kein graceful-Versuch, kein Timeout)
+    # Sofort hart killen via WMI (kein graceful-Versuch, kein Timeout).
+    # WMI-Terminate statt Stop-Process, da Prozesse via Win32_Process.Create gestartet
+    # wurden und Stop-Process bei fremdem Account lautlos versagt (Access Denied).
     if ($HardKillOnly) {
         foreach ($p in $procIds) {
-            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+            $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+            if ($wmiProc) {
+                $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
+            } else {
+                Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+            }
         }
         Write-Ok "$Name beendet"
         return
@@ -181,9 +188,16 @@ function Stop-ServiceByPort {
         Start-Sleep -Milliseconds 200
     }
 
-    # 4. Hart killen
+    # 4. Hart killen via WMI (da Prozesse via Win32_Process.Create gestartet wurden
+    #    und unter einem anderen Account laufen können, schlägt Stop-Process fehl –
+    #    WMI-Terminate hat dieselben Rechte wie der WMI-Provider, der den Prozess geforkt hat)
     foreach ($p in $procIds) {
-        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+        if ($wmiProc) {
+            $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
+        } else {
+            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        }
     }
     Write-Warn "$Name hart beendet (graceful Timeout nach ${GracefulTimeoutSec}s)"
 }

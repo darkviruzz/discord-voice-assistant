@@ -184,13 +184,23 @@ function logTranscript(sessionId, userId, text) {
 }
 
 // Push Opus frames to every downlink subscriber of a session.
-function sendOpusToSession(sessionId, opusFrames) {
+//
+// startTsMs: wall-clock timestamp of the first frame in this batch.
+//   Pass the return value of the previous call to keep timestamps
+//   time-continuous across Piper sentence boundaries.  The jitter buffer
+//   on the bot side uses these timestamps to detect stale frames; if
+//   multiple batches all start from Date.now() (as was the case before)
+//   their windows overlap and frames from batch N+1 look "old" by the
+//   time batch N has been played — causing silent drops and noise artefacts.
+//
+// Returns the next startTsMs (startTsMs + frames.length * 20).
+function sendOpusToSession(sessionId, opusFrames, startTsMs = Date.now()) {
+  if (opusFrames.length === 0) return startTsMs;
   const s = sessions.get(BigInt(sessionId));
   if (!s || s.downlinks.size === 0) {
     debug('pipeline: no downlink subscribers for session', sessionId.toString());
-    return;
+    return startTsMs + opusFrames.length * 20;
   }
-  const ts0 = Date.now();
   for (const ws of s.downlinks) {
     if (ws.readyState !== 1) continue;
     let seq = 0;
@@ -198,12 +208,13 @@ function sendOpusToSession(sessionId, opusFrames) {
       const pkt = buildFrame({
         magic: MAGIC_DNLK, codec: 'opus',
         sessionId: BigInt(sessionId), userId: 0n,
-        seq: seq++, tsMs: ts0 + i * 20, payload: opusFrames[i],
+        seq: seq++, tsMs: startTsMs + i * 20, payload: opusFrames[i],
       });
       try { ws.send(pkt, { binary: true }); } catch {}
     }
   }
   log('pipeline: sent', opusFrames.length, 'opus frames to session', sessionId.toString());
+  return startTsMs + opusFrames.length * 20;
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -342,16 +353,23 @@ export async function runPipeline(sessionId, userId) {
     // StreamingAudioPipeline keeps a single OpusEncoder and accumulator alive
     // across all chunks so that chunk boundaries cause no encoder resets or
     // dropped samples (fixes the noise-after-2s bug).
+    //
+    // nextTsMs is threaded through every sendOpusToSession call so that
+    // timestamps are strictly sequential across all Piper sentence batches.
+    // Without this, each batch restarts from Date.now(), causing overlapping
+    // timestamp windows that the jitter buffer misinterprets as stale frames
+    // and silently drops — producing the noise artefact on long responses.
     let audioPipe = null;
+    let nextTsMs  = Date.now();
     try {
       const opts = { model: ttsModel, speakerId };
       for await (const { pcm, sampleRate } of synthesizeStream(responseText, opts, ctrl.signal)) {
         if (ctrl.signal.aborted) break;
         audioPipe ??= new StreamingAudioPipeline(sampleRate);
-        sendOpusToSession(sessionId, audioPipe.push(pcm));
+        nextTsMs = sendOpusToSession(sessionId, audioPipe.push(pcm), nextTsMs);
       }
       if (audioPipe && !ctrl.signal.aborted) {
-        sendOpusToSession(sessionId, audioPipe.flush());
+        sendOpusToSession(sessionId, audioPipe.flush(), nextTsMs);
       }
     } catch (e) {
       if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);

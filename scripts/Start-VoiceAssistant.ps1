@@ -139,16 +139,20 @@ function Stop-ServiceByPort {
         return
     }
 
-    # Sofort hart killen via WMI (kein graceful-Versuch, kein Timeout).
-    # WMI-Terminate statt Stop-Process, da Prozesse via Win32_Process.Create gestartet
-    # wurden und Stop-Process bei fremdem Account lautlos versagt (Access Denied).
+    # Sofort hart killen (kein graceful-Versuch, kein Timeout).
+    # Prozesse, die via Scheduled Task (S4U) gestartet wurden, gehören dem
+    # aufrufenden User → Stop-Process reicht.  WMI-Terminate als Fallback für
+    # eventuell noch vorhandene, via Win32_Process.Create gestartete Prozesse
+    # (alter Spawn-Mechanismus) unter einem anderen Account.
     if ($HardKillOnly) {
         foreach ($p in $procIds) {
-            $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
-            if ($wmiProc) {
-                $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
-            } else {
-                Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+            # Fallback: WMI-Terminate falls Prozess noch läuft (fremder Account).
+            if (Get-Process -Id $p -ErrorAction SilentlyContinue) {
+                $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+                if ($wmiProc) {
+                    $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
+                }
             }
         }
         Write-Ok "$Name beendet"
@@ -188,15 +192,14 @@ function Stop-ServiceByPort {
         Start-Sleep -Milliseconds 200
     }
 
-    # 4. Hart killen via WMI (da Prozesse via Win32_Process.Create gestartet wurden
-    #    und unter einem anderen Account laufen können, schlägt Stop-Process fehl –
-    #    WMI-Terminate hat dieselben Rechte wie der WMI-Provider, der den Prozess geforkt hat)
+    # 4. Hart killen — gleiche Logik wie HardKillOnly.
     foreach ($p in $procIds) {
-        $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
-        if ($wmiProc) {
-            $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
-        } else {
-            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        if (Get-Process -Id $p -ErrorAction SilentlyContinue) {
+            $wmiProc = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+            if ($wmiProc) {
+                $null = $wmiProc | Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue
+            }
         }
     }
     Write-Warn "$Name hart beendet (graceful Timeout nach ${GracefulTimeoutSec}s)"
@@ -245,18 +248,28 @@ function Clear-AllLogs {
 # Intern läuft ein PowerShell-Wrapper, der 2>&1 | ForEach-Object { "$_" } | Out-File macht.
 # Die PID des PS-Wrappers ist irrelevant – Stoppen erfolgt port-basiert.
 #
-# WICHTIG: Der Spawn läuft via WMI Win32_Process.Create, NICHT via Start-Process.
-# Grund: wenn dieses Script per SSH (Windows OpenSSH) gestartet wird, hängen alle
-# mit Start-Process gestarteten Kindprozesse am Job-Objekt der sshd-Session und
-# werden beim SSH-Disconnect mit-getötet. Win32_Process.Create wird vom WMI-
-# Provider (wmiprvse.exe) geforkt → eigener Job → überlebt den Disconnect.
-# WMI vererbt das Environment des aufrufenden PS-Prozesses NICHT, deshalb werden
-# benötigte env-Vars unten in den Temp-Script-Anfang re-injected.
+# Spawn-Mechanismus: Einmaliger Scheduled Task mit LogonType S4U.
+#
+# Warum kein Start-Process:
+#   Windows-OpenSSH hängt alle Kindprozesse in ein Job-Object mit KILL_ON_JOB_CLOSE.
+#   Start-Process-Kinder sterben daher beim SSH-Disconnect.
+#
+# Warum kein WMI Win32_Process.Create:
+#   WMI forkt aus wmiprvse.exe → Prozesse laufen unter dem WMI-Provider-Account
+#   (NETWORK SERVICE / SYSTEM), NICHT unter dem aufrufenden User.  Folge: Stop-Process
+#   und taskkill /F schlagen ohne Admin-Rechte fehl ("Zugriff verweigert").
+#
+# Warum Scheduled Task + S4U:
+#   - Prozess läuft unter dem Account des aufrufenden Users → Stop-Process funktioniert.
+#   - Task Scheduler ist ein eigener Dienst, kein Kind des SSH-Prozesses → überlebt Disconnect.
+#   - S4U-Logon: kein gespeichertes Passwort nötig, kein interaktiver Desktop erforderlich.
+#   - Task-Definition wird nach dem Spawn sofort wieder gelöscht (Prozess läuft weiter).
+#   - Env-Vars werden trotzdem explizit ins Temp-Script re-injected (Task erbt sie nicht).
 function Start-ServiceHidden {
     param([string]$Name, [string[]]$ScriptLines, [string]$LogFile)
     $tmpScript = "$env:TEMP\va-hidden-$($Name.ToLower()).ps1"
 
-    # Re-inject env-vars die der WMI-gestartete Child sonst nicht sieht.
+    # Re-inject env-vars, die der Task-Prozess sonst nicht sieht.
     # Nur die für Piper relevanten — Whisper braucht keine, Node liest dotenv.
     $envBlock = @(
         ('$env:PIPER_VOICES_DIR = ''' + $env:PIPER_VOICES_DIR + '''')
@@ -265,15 +278,35 @@ function Start-ServiceHidden {
     )
     ($envBlock + $ScriptLines) | Set-Content -Path $tmpScript -Encoding UTF8
 
-    $cmd = "powershell.exe -NoProfile -NoLogo -WindowStyle Hidden -File `"$tmpScript`""
-    $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine = $cmd
-    } -ErrorAction SilentlyContinue
+    $taskName    = "VA-Spawn-$($Name.ToLower())"
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    if (-not $result -or $result.ReturnValue -ne 0) {
-        Write-Warn "WMI-Spawn von $Name fehlgeschlagen (ReturnValue=$($result.ReturnValue)) – fallback auf Start-Process"
-        Start-Process powershell -ArgumentList @('-NoProfile', '-NoLogo', '-File', $tmpScript) -WindowStyle Hidden
+    # Alte Task-Definition aufräumen (z.B. nach Crash).
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    $action    = New-ScheduledTaskAction -Execute "powershell.exe" `
+                     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -File `"$tmpScript`""
+    # Kein Trigger — Task wird sofort via Start-ScheduledTask gestartet.
+    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U
+    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 24) `
+                     -MultipleInstances IgnoreNew
+
+    $null = Register-ScheduledTask -TaskName $taskName -Action $action `
+                -Principal $principal -Settings $settings -Force -ErrorAction SilentlyContinue
+
+    if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+        Write-Warn "Scheduled Task für $Name konnte nicht registriert werden – fallback auf Start-Process"
+        Start-Process powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-File', $tmpScript) -WindowStyle Hidden
+        return
     }
+
+    Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+    # Kurz warten, damit der Prozess spawnt, bevor die Task-Definition gelöscht wird.
+    # (Löschen der Definition beendet den laufenden Prozess NICHT.)
+    Start-Sleep -Milliseconds 2000
+
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 function Start-Whisper-Hidden {

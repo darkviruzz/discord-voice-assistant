@@ -5,6 +5,7 @@ import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline } from './pipeline.js';
+import { streamTtsToSession, DEBUG_TTS_TEXT } from './ttsStream.js';
 import { botConnections } from './broadcast.js';
 import { getVersion } from './version.js';
 
@@ -110,6 +111,22 @@ export function initControlWSS({ bearer } = {}) {
               () => send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'play_test_tone' }),
               (e) => send(ws, { type: 'error', code: 'TEST_TONE_FAILED', message: e.message, cmdId: msg.cmdId }),
             );
+            return;
+          }
+          case 'debug_tts': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            const sid = typeof msg.sessionId === 'string' && /^\d+$/.test(msg.sessionId)
+              ? BigInt(msg.sessionId)
+              : activeSessionId;
+            if (!sid) {
+              send(ws, { type: 'error', code: 'NO_ACTIVE_SESSION', cmdId: msg.cmdId });
+              return;
+            }
+            const text = typeof msg.text === 'string' && msg.text.trim()
+              ? msg.text
+              : DEBUG_TTS_TEXT;
+            streamTtsToSession(sid, text).catch((e) => warn('debug_tts failed:', e.message));
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'debug_tts' });
             return;
           }
           case 'set_params':

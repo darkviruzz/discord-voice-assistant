@@ -137,6 +137,17 @@ export function sendUtteranceEnd({ sessionId, userId, durationMs }) {
   catch (e) { warn('transport.sendUtteranceEnd:', e.message); }
 }
 
+export function debugTts({ sessionId, text } = {}) {
+  if (!_instance) return;
+  const sid = sessionId ?? _instance.currentSessionId;
+  if (!sid) {
+    warn('transport.debugTts: no active session');
+    return;
+  }
+  try { _instance.control.debugTts({ sessionId: sid, text }); }
+  catch (e) { warn('transport.debugTts:', e.message); }
+}
+
 export function setVoiceConnection(conn) {
   if (!_instance) return;
   try { _instance.downlink.setVoiceConnection(conn); }

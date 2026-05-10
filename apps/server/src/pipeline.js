@@ -6,9 +6,6 @@ import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
-import { synthesizeStream } from './tts.js';
-import { StreamingAudioPipeline } from './audio.js';
-import { MAGIC_DNLK, buildFrame } from './protocol.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import opus from '@discordjs/opus';
@@ -183,41 +180,6 @@ function logTranscript(sessionId, userId, text) {
   }
 }
 
-// Push Opus frames to every downlink subscriber of a session.
-//
-// startTsMs: wall-clock timestamp of the first frame in this batch.
-//   Pass the return value of the previous call to keep timestamps
-//   time-continuous across Piper sentence boundaries.  The jitter buffer
-//   on the bot side uses these timestamps to detect stale frames; if
-//   multiple batches all start from Date.now() (as was the case before)
-//   their windows overlap and frames from batch N+1 look "old" by the
-//   time batch N has been played — causing silent drops and noise artefacts.
-//
-// Returns the next startTsMs (startTsMs + frames.length * 20).
-function sendOpusToSession(sessionId, opusFrames, startTsMs = Date.now()) {
-  if (opusFrames.length === 0) return startTsMs;
-  const s = sessions.get(BigInt(sessionId));
-  if (!s || s.downlinks.size === 0) {
-    debug('pipeline: no downlink subscribers for session', sessionId.toString());
-    return startTsMs + opusFrames.length * 20;
-  }
-  for (const ws of s.downlinks) {
-    if (ws.readyState !== 1) continue;
-    let seq = 0;
-    for (let i = 0; i < opusFrames.length; i++) {
-      const pkt = buildFrame({
-        magic: MAGIC_DNLK, codec: 'opus',
-        sessionId: BigInt(sessionId), userId: 0n,
-        seq: seq++, tsMs: startTsMs + i * 20, payload: opusFrames[i],
-      });
-      try { ws.send(pkt, { binary: true }); } catch {}
-    }
-  }
-  debug('pipeline: sent', opusFrames.length, 'opus frames tsMs', startTsMs, '→', startTsMs + (opusFrames.length - 1) * 20);
-  log('pipeline: sent', opusFrames.length, 'opus frames to session', sessionId.toString());
-  return startTsMs + opusFrames.length * 20;
-}
-
 // ── State ────────────────────────────────────────────────────────────────────
 
 // Active pipeline per session key → AbortController for its TTS stream.
@@ -337,7 +299,7 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    const { text: responseText, speakerId, model: ttsModel } = response;
+    const { text: responseText } = response;
 
     // Persist turn to history using the spoken text (not raw JSON).
     session.conversationHistory.push({ role: 'user',      content: query        });
@@ -350,40 +312,7 @@ export async function runPipeline(sessionId, userId) {
       question: transcript, answer: responseText, isStop: false,
     });
 
-    // 8–10. Streaming TTS → resample → encode → push to downlink.
-    // StreamingAudioPipeline keeps a single OpusEncoder and accumulator alive
-    // across all chunks so that chunk boundaries cause no encoder resets or
-    // dropped samples (fixes the noise-after-2s bug).
-    //
-    // nextTsMs is threaded through every sendOpusToSession call so that
-    // timestamps are strictly sequential across all Piper sentence batches.
-    // Without this, each batch restarts from Date.now(), causing overlapping
-    // timestamp windows that the jitter buffer misinterprets as stale frames
-    // and silently drops — producing the noise artefact on long responses.
-    let audioPipe = null;
-    let nextTsMs  = Date.now();
-    try {
-      const opts = { model: ttsModel, speakerId };
-      for await (const { pcm, sampleRate } of synthesizeStream(responseText, opts, ctrl.signal)) {
-        if (ctrl.signal.aborted) break;
-        audioPipe ??= new StreamingAudioPipeline(sampleRate);
-        const frames = audioPipe.push(pcm);
-        if (frames.length > 0) {
-          // Safety: if Piper is slower than real-time, virtual timestamps can fall
-          // behind the bot's clock and the batch would arrive stale.  Advancing
-          // nextTsMs to server-now keeps every batch fresh at arrival time while
-          // preserving strict monotonicity when Piper is fast.
-          nextTsMs = Math.max(nextTsMs, Date.now());
-          nextTsMs = sendOpusToSession(sessionId, frames, nextTsMs);
-        }
-      }
-      if (audioPipe && !ctrl.signal.aborted) {
-        nextTsMs = Math.max(nextTsMs, Date.now());
-        sendOpusToSession(sessionId, audioPipe.flush(), nextTsMs);
-      }
-    } catch (e) {
-      if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
-    }
+    log('pipeline: voice TTS disabled in minimal playback rebuild; answer sent as chat only');
   } finally {
     // Only clean up if this run is still the active one (a newer run may have replaced it).
     if (activePipelines.get(key) === ctrl) activePipelines.delete(key);

@@ -86,6 +86,10 @@ export class ControlClient extends EventEmitter {
     this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs });
   }
 
+  debugTts({ sessionId, text }) {
+    this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
+  }
+
   _sendIfReady(obj) {
     if (!this.fsm.is(State.READY)) {
       debug('control: drop send (not ready)', obj.type);

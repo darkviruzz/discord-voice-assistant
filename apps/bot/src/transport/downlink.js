@@ -77,6 +77,8 @@ class PlaybackStream extends Readable {
   }
 }
 
+const RECONNECT_DELAY_MS = 3000; // flat 3 s before retrying a dropped downlink WS
+
 export class DownlinkClient {
   constructor({ baseUrl, bearer, params = {} }) {
     this.url    = `${baseUrl}/downlink`;
@@ -89,6 +91,9 @@ export class DownlinkClient {
     this.interruptMinMs = params.interruptMinMs  ?? 400;
     // After a real interruption ends, wait this long before resuming.
     this.resumeGateMs   = params.resumeGateMs    ?? 900;
+
+    this._reconnectTimer = null;
+    this._closing        = false; // true when close() was called intentionally
 
     this._jitter         = new JitterBuffer();
     this._activeSpeakers = new Set();
@@ -217,7 +222,21 @@ export class DownlinkClient {
 
     ws.on('close', (code) => {
       debug('downlink: ws closed', code);
-      if (this._ws === ws) this._ws = null;
+      if (this._ws === ws) {
+        this._ws = null;
+        // Re-subscribe automatically unless close() was called intentionally
+        // (e.g. session end, transport shut-down, or server told us to stop).
+        if (!this._closing && this._sessionId) {
+          debug('downlink: scheduling reconnect in', RECONNECT_DELAY_MS, 'ms');
+          this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            if (!this._closing && this._sessionId) {
+              debug('downlink: reconnecting to session', this._sessionId.toString());
+              this.open(this._sessionId);
+            }
+          }, RECONNECT_DELAY_MS);
+        }
+      }
     });
     ws.on('error', (e) => {
       warn('downlink: ws error:', e.message);
@@ -226,6 +245,11 @@ export class DownlinkClient {
   }
 
   close() {
+    this._closing = true;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     const ws = this._ws;
     this._ws = null;
     if (ws) try { ws.close(); } catch {}
@@ -238,6 +262,7 @@ export class DownlinkClient {
     this._interruptedWhilePlaying = false;
     this._sessionId        = null;
     this._serverClockOffset = null;  // recompute on next open()
+    this._closing = false;  // reset so next open() can reconnect again if needed
   }
 
   // Bind the AudioPlayer to a VoiceConnection so it can output audio.

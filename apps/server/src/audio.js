@@ -86,7 +86,7 @@ export class StreamingAudioPipeline {
   _drain() {
     const frames = [];
     while (this._accum.length >= FRAME_BYTES) {
-      frames.push(Buffer.from(this._enc.encode(this._accum.subarray(0, FRAME_BYTES))));
+      frames.push(Buffer.from(this._enc.encode(this._accum.subarray(0, FRAME_BYTES), FRAME_SAMPLES)));
       this._accum = this._accum.subarray(FRAME_BYTES);
     }
     return frames;
@@ -95,7 +95,7 @@ export class StreamingAudioPipeline {
   _encodeAll(buf) {
     const frames = [];
     for (let off = 0; off + FRAME_BYTES <= buf.length; off += FRAME_BYTES) {
-      frames.push(Buffer.from(this._enc.encode(buf.subarray(off, off + FRAME_BYTES))));
+      frames.push(Buffer.from(this._enc.encode(buf.subarray(off, off + FRAME_BYTES), FRAME_SAMPLES)));
     }
     return frames;
   }

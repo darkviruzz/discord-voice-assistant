@@ -16,23 +16,36 @@ import { log, debug, warn } from '../logger.js';
 const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
 
 // PlaybackStream is the pull-based Readable that the AudioPlayer consumes.
-// It returns one Opus Buffer per _read() call (every ~20ms). When the gate is
-// closed or the buffer is empty, it returns a silence frame so the AudioPlayer
-// stays in Playing state without startup latency when audio resumes.
+// It returns one Opus Buffer per _read() call (every ~20ms).
 //
-// highWaterMark:1 avoids pre-buffering stale SILENCE_FRAMEs: with the default
-// hwm=16 the stream eagerly pre-fills 16 silence frames (~320 ms) before any
-// real audio, which triggers Discord's Comfort Noise Generator on playback.
-// With hwm=1 only the very next frame is pre-queued, so real audio follows
-// within one tick after frames arrive in the jitter buffer.
+// Design notes:
+// - The stream only starts AFTER the first real frame arrives in the jitter
+//   buffer (_startPlayback() is called from the WS message handler, not on
+//   WS open).  This eliminates the pre-audio CNG burst that was miscalibrating
+//   Discord's AGC: previously 839 DTX silence frames (16.78 s) were sent
+//   before any real audio, causing the noise processor to calibrate to
+//   CNG-level and then apply wrong gain when real audio started.
+// - While waiting for real audio the stream pushes DTX silence so the
+//   AudioPlayer stays in Playing state (no startup latency on resume).
+// - After real audio completes (gate open, jitter empty, hadRealAudio), the
+//   stream ends itself after SILENCE_TAIL_FRAMES (100 × 20 ms = 2 s) of
+//   post-audio silence.  The AudioPlayer then transitions to Idle; the Idle
+//   handler recreates the stream when the next batch arrives.
+// - highWaterMark:1 avoids pre-buffering stale SILENCE_FRAMEs: with the
+//   default hwm=16 the stream eagerly pre-fills 16 silence frames (~320 ms)
+//   before any real audio, which triggers Discord's CNG on playback.
+//   With hwm=1 only the very next frame is pre-queued.
+const SILENCE_TAIL_FRAMES = 100; // 2 s of post-audio silence before stream end
+
 class PlaybackStream extends Readable {
   constructor(jitterBuffer, gating) {
     super({ objectMode: true, highWaterMark: 1 });
-    this._jitter     = jitterBuffer;
-    this._gating     = gating;
-    this._active     = true;
-    this._silenceRun = 0;   // consecutive silence frames (for diagnostics)
-    this._realFrames = 0;   // real frames served since last silence run
+    this._jitter        = jitterBuffer;
+    this._gating        = gating;
+    this._active        = true;
+    this._hadRealAudio  = false; // true once the first real frame has been served
+    this._silenceRun    = 0;    // consecutive silence frames (for diagnostics)
+    this._realFrames    = 0;    // real frames served since last silence run
   }
 
   _read() {
@@ -53,6 +66,7 @@ class PlaybackStream extends Readable {
           + ` (${this._silenceRun * 20} ms), jitter=${this._jitter.size}`);
         this._silenceRun = 0;
       }
+      this._hadRealAudio = true;
       this._realFrames++;
       // Periodic heartbeat every 5 s of real audio.
       if (this._realFrames % 250 === 0) {
@@ -60,9 +74,20 @@ class PlaybackStream extends Readable {
       }
       this.push(packet);
     } else {
-      // Silence frame — log reason on first occurrence and every 50 thereafter.
+      // Silence frame.
       this._silenceRun++;
       this._realFrames = 0;
+
+      // After real audio ends, let the stream terminate so the AudioPlayer
+      // goes Idle.  This stops the continuous DTX stream to Discord and lets
+      // the next response start fresh without any CNG tail.
+      if (this._hadRealAudio && gateOpen && this._silenceRun >= SILENCE_TAIL_FRAMES) {
+        debug(`playback: stream ended after ${this._silenceRun} post-audio silence frames`);
+        this._active = false;
+        this.push(null);
+        return;
+      }
+
       if (this._silenceRun === 1 || this._silenceRun % 50 === 0) {
         const reason = gateOpen ? 'jitter empty' : 'gate closed';
         debug(`playback: silence #${this._silenceRun} (${reason}), jitter=${this._jitter.size}`);
@@ -154,7 +179,15 @@ export class DownlinkClient {
       // Resource errored; recreate on the next open() call.
       this._playStream = null;
     });
-    player.on(AudioPlayerStatus.Idle, () => debug('downlink: player idle'));
+    player.on(AudioPlayerStatus.Idle, () => {
+      debug('downlink: player idle');
+      this._playStream = null;
+      // If frames already arrived for the next response, start immediately.
+      if (this._jitter.size > 0) {
+        debug('downlink: frames already in jitter on idle — restarting playback');
+        this._startPlayback();
+      }
+    });
     return player;
   }
 
@@ -188,7 +221,8 @@ export class DownlinkClient {
       try {
         ws.send(JSON.stringify({ subscribe: true, sessionId }));
       } catch (e) { warn('downlink: subscribe send failed:', e.message); }
-      this._startPlayback();
+      // Do NOT start playback here — wait for the first real frame to arrive
+      // so Discord never sees a CNG burst before audio (see PlaybackStream comment).
     });
 
     let downlinkFrames = 0;
@@ -215,6 +249,11 @@ export class DownlinkClient {
         // Normalize server timestamp to local clock before buffering.
         const normalizedTs = f.tsMs + this._serverClockOffset;
         this._jitter.add(f.payload, normalizedTs);
+
+        // Start playback on the first frame of each response.  Doing it here
+        // (rather than on WS open) means Discord never receives DTX silence
+        // before real audio, preventing AGC miscalibration.
+        this._startPlayback();
       } catch (e) {
         warn('downlink: parse error:', e.message);
       }

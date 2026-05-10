@@ -25,7 +25,8 @@ export class StreamingAudioPipeline {
     this._toRate   = toRate;
     this._enc      = new OpusEncoder(toRate, 1);
     this._accum    = Buffer.alloc(0);
-    this._lastSrc  = 0;   // last source sample, carried across chunks for interpolation
+    this._srcCarry = Buffer.alloc(0);
+    this._srcPos   = 0; // fractional source index for the next output sample
   }
 
   /** Resample + buffer chunk. Returns zero or more encoded Opus frames. */
@@ -41,6 +42,10 @@ export class StreamingAudioPipeline {
    * otherwise stale audio from an old response might be played.
    */
   flush() {
+    const tail = this._flushResampler();
+    if (tail.length > 0) {
+      this._accum = Buffer.concat([this._accum, tail]);
+    }
     if (this._accum.length === 0) return [];
     const rem    = this._accum.length % FRAME_BYTES;
     const padded = rem > 0
@@ -54,32 +59,71 @@ export class StreamingAudioPipeline {
 
   _resample(src) {
     if (this._fromRate === this._toRate) {
-      if (src.length >= 2) this._lastSrc = src.readInt16LE(src.length - 2);
       return src;
     }
-    const srcSamples = src.length >>> 1;
+
+    const input = this._srcCarry.length > 0
+      ? Buffer.concat([this._srcCarry, src])
+      : src;
+    const srcSamples = input.length >>> 1;
     if (srcSamples === 0) return Buffer.alloc(0);
 
-    const dstSamples = Math.round(srcSamples * this._toRate / this._fromRate);
-    const dst        = Buffer.alloc(dstSamples * 2);
+    const step = this._fromRate / this._toRate;
+    let pos = this._srcPos;
+    const samples = [];
 
-    for (let i = 0; i < dstSamples; i++) {
-      const pos  = i * this._fromRate / this._toRate;
-      const lo   = Math.floor(pos);
+    // Keep one source sample of lookahead for interpolation across chunk
+    // boundaries.  The final edge is emitted in _flushResampler().
+    while (pos + 1 < srcSamples) {
+      const lo = Math.floor(pos);
       const frac = pos - lo;
-      const s0   = lo < srcSamples
-        ? src.readInt16LE(lo * 2)
-        : src.readInt16LE((srcSamples - 1) * 2);
-      const hi   = lo + 1;
-      // Clamp at chunk end; the next push() resumes from the new chunk's start.
-      // A natural silence at sentence boundaries means this artefact is inaudible.
-      const s1   = hi < srcSamples
-        ? src.readInt16LE(hi * 2)
-        : src.readInt16LE((srcSamples - 1) * 2);
+      const s0 = input.readInt16LE(lo * 2);
+      const s1 = input.readInt16LE((lo + 1) * 2);
       const s = s0 + (s1 - s0) * frac;
-      dst.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(s))), i * 2);
+      samples.push(Math.max(-32768, Math.min(32767, Math.round(s))));
+      pos += step;
     }
-    this._lastSrc = src.readInt16LE((srcSamples - 1) * 2);
+
+    const consumed = Math.max(0, Math.floor(pos));
+    this._srcCarry = input.subarray(consumed * 2);
+    this._srcPos = pos - consumed;
+    return this._samplesToBuffer(samples);
+  }
+
+  _flushResampler() {
+    if (this._fromRate === this._toRate || this._srcCarry.length === 0) {
+      this._srcCarry = Buffer.alloc(0);
+      this._srcPos = 0;
+      return Buffer.alloc(0);
+    }
+
+    const srcSamples = this._srcCarry.length >>> 1;
+    const step = this._fromRate / this._toRate;
+    let pos = this._srcPos;
+    const samples = [];
+
+    while (pos < srcSamples) {
+      const lo = Math.min(Math.floor(pos), srcSamples - 1);
+      const hi = Math.min(lo + 1, srcSamples - 1);
+      const frac = pos - lo;
+      const s0 = this._srcCarry.readInt16LE(lo * 2);
+      const s1 = this._srcCarry.readInt16LE(hi * 2);
+      const s = s0 + (s1 - s0) * frac;
+      samples.push(Math.max(-32768, Math.min(32767, Math.round(s))));
+      pos += step;
+    }
+
+    this._srcCarry = Buffer.alloc(0);
+    this._srcPos = 0;
+    return this._samplesToBuffer(samples);
+  }
+
+  _samplesToBuffer(samples) {
+    if (samples.length === 0) return Buffer.alloc(0);
+    const dst = Buffer.alloc(samples.length * 2);
+    for (let i = 0; i < samples.length; i++) {
+      dst.writeInt16LE(samples[i], i * 2);
+    }
     return dst;
   }
 

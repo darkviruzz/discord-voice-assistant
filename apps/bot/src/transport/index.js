@@ -84,8 +84,8 @@ export function start({ botId } = {}) {
         break;
       case 'set_params':
         downlink.setParams({
-          gateMs:       msg.gateMs,
-          playoutMaxMs: msg.playoutMaxMs,
+          interruptMinMs: msg.interruptMinMs,
+          resumeGateMs:   msg.resumeGateMs,
         });
         control.ack(msg.cmdId, true);
         break;

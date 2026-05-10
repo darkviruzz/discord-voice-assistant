@@ -5,7 +5,7 @@ import { debug, warn } from '../logger.js';
 const RECONNECT_DELAY_MS = 3000;
 
 export class DownlinkClient {
-  constructor({ baseUrl, bearer }) {
+  constructor({ baseUrl, bearer, params = {} }) {
     this.url = `${baseUrl}/downlink`;
     this.bearer = bearer || null;
 
@@ -14,6 +14,12 @@ export class DownlinkClient {
     this._closing = false;
     this._reconnectTimer = null;
     this._playback = new TtsPlayback();
+
+    this.interruptMinMs = params.interruptMinMs ?? 400;
+    this.resumeGateMs = params.resumeGateMs ?? 900;
+    this._speakTimers = new Map();
+    this._activeSpeakers = new Set();
+    this._resumeTimer = null;
   }
 
   open(sessionId) {
@@ -90,6 +96,14 @@ export class DownlinkClient {
       try { ws.close(); } catch {}
     }
 
+    for (const timer of this._speakTimers.values()) clearTimeout(timer);
+    this._speakTimers.clear();
+    this._activeSpeakers.clear();
+    if (this._resumeTimer) {
+      clearTimeout(this._resumeTimer);
+      this._resumeTimer = null;
+    }
+
     this._playback.stop();
     this._sessionId = null;
     this._closing = false;
@@ -115,16 +129,45 @@ export class DownlinkClient {
     if (wasOpen) this.open(sessionId);
   }
 
-  setParams(_params) {
-    debug('downlink: set_params ignored by minimal FIFO playback');
+  setParams({ interruptMinMs, resumeGateMs } = {}) {
+    if (typeof interruptMinMs === 'number') this.interruptMinMs = interruptMinMs;
+    if (typeof resumeGateMs === 'number') this.resumeGateMs = resumeGateMs;
+    debug('downlink: params updated', {
+      interruptMinMs: this.interruptMinMs,
+      resumeGateMs: this.resumeGateMs,
+    });
   }
 
   speakingStart(_userId) {
-    // Minimal rebuild step 1: no gate, no pause, no DTX.
+    if (this._speakTimers.has(_userId) || this._activeSpeakers.has(_userId)) return;
+    if (this._resumeTimer) {
+      clearTimeout(this._resumeTimer);
+      this._resumeTimer = null;
+    }
+    const timer = setTimeout(() => {
+      this._speakTimers.delete(_userId);
+      this._activeSpeakers.add(_userId);
+      this._playback.pause(`speaker ${_userId}`);
+    }, this.interruptMinMs);
+    this._speakTimers.set(_userId, timer);
   }
 
   speakingEnd(_userId) {
-    // Minimal rebuild step 1: no gate, no pause, no DTX.
+    const timer = this._speakTimers.get(_userId);
+    if (timer) {
+      clearTimeout(timer);
+      this._speakTimers.delete(_userId);
+      return;
+    }
+
+    this._activeSpeakers.delete(_userId);
+    if (this._activeSpeakers.size > 0) return;
+
+    if (this._resumeTimer) clearTimeout(this._resumeTimer);
+    this._resumeTimer = setTimeout(() => {
+      this._resumeTimer = null;
+      this._playback.resume('speakers ended');
+    }, this.resumeGateMs);
   }
 
   _handleMessage(msg) {

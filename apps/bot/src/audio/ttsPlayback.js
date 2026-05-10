@@ -33,6 +33,8 @@ export class TtsPlayback {
     this.readable = null;
     this.framesReceived = 0;
     this.framesPlayed = 0;
+    this.paused = false;
+    this.pauseLogged = false;
 
     this.player.on(AudioPlayerStatus.Idle, () => {
       debug('tts-playback: player idle');
@@ -63,6 +65,8 @@ export class TtsPlayback {
     this.framesReceived = 0;
     this.framesPlayed = 0;
     this.waiter = null;
+    this.paused = false;
+    this.pauseLogged = false;
     debug('tts-playback: start id=', id);
   }
 
@@ -104,7 +108,24 @@ export class TtsPlayback {
     this.framesReceived = 0;
     this.framesPlayed = 0;
     this.active = false;
+    this.paused = false;
+    this.pauseLogged = false;
     try { this.player.stop(true); } catch {}
+  }
+
+  pause(reason = 'interrupt') {
+    if (!this.currentId || this.paused) return;
+    this.paused = true;
+    this.pauseLogged = false;
+    debug('tts-playback: paused id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
+  }
+
+  resume(reason = 'resume') {
+    if (!this.paused) return;
+    this.paused = false;
+    this.pauseLogged = false;
+    debug('tts-playback: resumed id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
+    this._notify();
   }
 
   start() {
@@ -120,6 +141,15 @@ export class TtsPlayback {
 
   _pump(readable) {
     if (readable !== this.readable) return;
+
+    if (this.paused) {
+      if (!this.pauseLogged) {
+        debug('tts-playback: read paused queue=', this.queue.length);
+        this.pauseLogged = true;
+      }
+      this._wait(readable);
+      return;
+    }
 
     const item = this.queue.shift();
     if (item) {
@@ -138,8 +168,8 @@ export class TtsPlayback {
       return;
     }
 
-    debug('tts-playback: waiting for frames queue=0 done=false');
-    this.waiter = () => setImmediate(() => this._pump(readable));
+    debug(`tts-playback: waiting for frames queue=0 done=false played=${this.framesPlayed} received=${this.framesReceived}`);
+    this._wait(readable);
   }
 
   _notify() {
@@ -147,5 +177,9 @@ export class TtsPlayback {
     const waiter = this.waiter;
     this.waiter = null;
     waiter();
+  }
+
+  _wait(readable) {
+    this.waiter = () => setImmediate(() => this._pump(readable));
   }
 }

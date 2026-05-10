@@ -85,7 +85,7 @@ export class TtsPlayback {
       debug(`tts-playback: frame received id=${id} seq=${seq} received=${this.framesReceived} queue=${this.queue.length}`);
     }
 
-    if (!this.active) this.start();
+    if (!this.active && !this.paused) this.start();
     this._notify();
   }
 
@@ -125,6 +125,11 @@ export class TtsPlayback {
     this.paused = false;
     this.pauseLogged = false;
     debug('tts-playback: resumed id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
+    if (!this.active && this.currentId && (this.queue.length > 0 || !this.done)) {
+      debug('tts-playback: restarting player after pause idle');
+      this.start();
+      return;
+    }
     this._notify();
   }
 

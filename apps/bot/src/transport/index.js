@@ -42,8 +42,8 @@ export function start({ botId } = {}) {
   const params = {
     gateMs:         Number(process.env.GATE_MS           ?? 80),
     playoutMaxMs:   Number(process.env.PLAYOUT_MAX_MS    ?? 1500),
-    interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 400),
-    resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 900),
+    interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 800),
+    resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 1200),
     rewindMs:       Number(process.env.REWIND_MS         ?? 1000),
   };
 
@@ -92,8 +92,7 @@ export function start({ botId } = {}) {
         control.ack(msg.cmdId, true);
         break;
       case 'stop_playback':
-        downlink.stopPlayback();
-        control.ack(msg.cmdId, true);
+        control.ack(msg.cmdId, true, null, { playback: downlink.stopPlayback() });
         break;
       case 'chat_message':
         if (_chatMessageCallback) _chatMessageCallback(msg);

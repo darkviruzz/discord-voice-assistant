@@ -1,12 +1,11 @@
 import { randomUUID } from 'crypto';
-import { appendFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
 import { sessions } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
 import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
+import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import opus from '@discordjs/opus';
@@ -15,11 +14,40 @@ const { OpusEncoder } = opus;
 
 // ── Stop-command detection ───────────────────────────────────────────────────
 
-// Matches German stop commands, with or without the wake word in front.
-const STOP_RE = /\b(stopp?|aufhören|halt(e)?\s*(ein|an)?|abbrechen|beenden)\b/i;
+const DEFAULT_STOP_PHRASES = [
+  'stop',
+  'stopp',
+  'abbrechen',
+  'beenden',
+  'hör auf',
+  'aufhören',
+  'halt',
+  'halte an',
+  'halte ein',
+];
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stopPhrases() {
+  const raw = process.env.STOP_PHRASES;
+  const phrases = raw
+    ? raw.split(',').map((item) => item.trim()).filter(Boolean)
+    : DEFAULT_STOP_PHRASES;
+  return phrases.length > 0 ? phrases : DEFAULT_STOP_PHRASES;
+}
+
+function stopRegex() {
+  const body = stopPhrases()
+    .map((phrase) => phrase.split(/\s+/).map(escapeRegex).join('\\s+'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  return new RegExp(`(^|[^\\p{L}\\p{N}])(?:${body})(?=$|[^\\p{L}\\p{N}])`, 'iu');
+}
 
 function isStopCommand(text) {
-  return STOP_RE.test(text);
+  return stopRegex().test(text);
 }
 
 // ── Audio helpers ────────────────────────────────────────────────────────────
@@ -46,11 +74,20 @@ function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
 
 // ── Long-audio transcription helpers ────────────────────────────────────────
 
-const FRAME           = 960;        // 20 ms @ 48 kHz
-const SILENCE_FRAMES  = 15;         // 300 ms continuous silence → split candidate
-const MIN_CHUNK       = 48000 * 10; // 10 s minimum speech before a natural split
-const MAX_CHUNK       = 48000 * 30; // 30 s hard cap
-const OVERLAP_SAMPLES = 48000 *  2; // 2 s overlap used only in the no-silence fallback
+const SAMPLE_RATE     = 48000;
+const FRAME           = 960;              // 20 ms @ 48 kHz
+const SILENCE_FRAMES  = 15;               // 300 ms continuous silence → split candidate
+const MIN_CHUNK       = SAMPLE_RATE * 10; // 10 s minimum speech before a natural split
+const OVERLAP_SAMPLES = SAMPLE_RATE *  2; // 2 s overlap used only in the no-silence fallback
+
+function numberEnv(name, fallback, min = 0) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.max(min, value) : fallback;
+}
+
+function maxChunkSamples() {
+  return Math.round(SAMPLE_RATE * numberEnv('STT_MAX_CHUNK_SECONDS', 30, 1));
+}
 
 function frameRms(pcm, sampleOffset) {
   let sum = 0;
@@ -67,7 +104,8 @@ function frameRms(pcm, sampleOffset) {
 //   hasOverlap=true  — forced split with 2 s overlap; stitchOverlap() should merge with previous.
 function splitAtSilence(pcm) {
   const totalSamples = pcm.length / 2;
-  if (totalSamples <= MAX_CHUNK) return [{ pcm, hasOverlap: false }];
+  const maxChunk = maxChunkSamples();
+  if (totalSamples <= maxChunk) return [{ pcm, hasOverlap: false, split: 'single' }];
 
   const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
   const chunks = [];
@@ -97,7 +135,11 @@ function splitAtSilence(pcm) {
         }
         // Natural split: enough speech before this silence.
         if ((silenceStart - chunkStart) >= MIN_CHUNK) {
-          chunks.push({ pcm: pcm.subarray(chunkStart * 2, silenceStart * 2), hasOverlap: nextHasOverlap });
+          chunks.push({
+            pcm: pcm.subarray(chunkStart * 2, silenceStart * 2),
+            hasOverlap: nextHasOverlap,
+            split: 'natural-silence',
+          });
           nextHasOverlap = false;
           chunkStart     = off;
           bestSilStart   = -1; bestSilEnd = -1; bestSilDur = 0;
@@ -107,17 +149,25 @@ function splitAtSilence(pcm) {
       silenceFrames = 0;
     }
 
-    // Hard cap: chunk has grown to MAX_CHUNK.
-    if ((off + FRAME - chunkStart) >= MAX_CHUNK) {
+    // Hard cap: chunk has grown to STT_MAX_CHUNK_SECONDS.
+    if ((off + FRAME - chunkStart) >= maxChunk) {
       if (bestSilStart >= 0) {
         // Split at the longest silence found — best boundary available.
-        chunks.push({ pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2), hasOverlap: nextHasOverlap });
+        chunks.push({
+          pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2),
+          hasOverlap: nextHasOverlap,
+          split: 'natural-silence',
+        });
         nextHasOverlap = false;
         chunkStart     = bestSilEnd; // skip silence
       } else {
         // No qualifying silence at all — forced split with 2 s overlap.
         const splitAt = off + FRAME;
-        chunks.push({ pcm: pcm.subarray(chunkStart * 2, splitAt * 2), hasOverlap: nextHasOverlap });
+        chunks.push({
+          pcm: pcm.subarray(chunkStart * 2, splitAt * 2),
+          hasOverlap: nextHasOverlap,
+          split: 'forced-overlap',
+        });
         nextHasOverlap = true; // next chunk carries the overlap flag
         chunkStart     = Math.max(0, splitAt - OVERLAP_SAMPLES);
       }
@@ -127,9 +177,27 @@ function splitAtSilence(pcm) {
   }
 
   if (chunkStart * 2 < pcm.length) {
-    chunks.push({ pcm: pcm.subarray(chunkStart * 2), hasOverlap: nextHasOverlap });
+    chunks.push({
+      pcm: pcm.subarray(chunkStart * 2),
+      hasOverlap: nextHasOverlap,
+      split: 'tail',
+    });
   }
-  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false }];
+  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false, split: 'single' }];
+}
+
+function logSilenceSplitDebug(pcm48k, chunks) {
+  const totalSec = pcm48k.length / 2 / SAMPLE_RATE;
+  const maxSec = numberEnv('STT_MAX_CHUNK_SECONDS', 30, 1);
+  if (totalSec <= maxSec) return;
+
+  const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
+  const details = chunks.map((chunk, i) => {
+    const sec = chunk.pcm.length / 2 / SAMPLE_RATE;
+    const overlap = chunk.hasOverlap ? ',overlap-in' : '';
+    return `#${i + 1}:${sec.toFixed(1)}s/${chunk.split}${overlap}`;
+  }).join(' ');
+  debug(`pipeline: silence split debug duration=${totalSec.toFixed(1)}s maxChunk=${maxSec}s threshold=${thresh} chunks=${chunks.length} ${details}`);
 }
 
 // Soft word-boundary deduplication for the 2 s overlap fallback.
@@ -151,6 +219,7 @@ function stitchOverlap(t1, t2) {
 // Transcribe PCM split at silence boundaries. Returns one string per logical chunk.
 async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
+  logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {
     log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
   }
@@ -165,20 +234,6 @@ async function transcribeChunked(pcm48k) {
     }
   }
   return parts;
-}
-
-// Append one transcript line to a per-session JSONL log on disk.
-function logTranscript(sessionId, userId, text) {
-  const dir = (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
-  try {
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(
-      join(dir, `session_${sessionId}.jsonl`),
-      JSON.stringify({ tsMs: Date.now(), userId: userId.toString(), text }) + '\n',
-    );
-  } catch (e) {
-    warn('pipeline: transcript log error:', e.message);
-  }
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -228,7 +283,12 @@ export async function runPipeline(sessionId, userId) {
     }
 
     // Log the full utterance (all chunks joined) to disk.
-    logTranscript(sessionId, userId, transcripts.join(' '));
+    const fullTranscript = transcripts.join(' ');
+    logTranscriptEvent(sessionId, 'user_transcript', {
+      userId,
+      text: fullTranscript,
+      chunks: transcripts,
+    });
 
     // 4. Read wake-word config.
     const wakeWord = process.env.WAKE_WORD        ?? 'Rabenauge';
@@ -243,14 +303,21 @@ export async function runPipeline(sessionId, userId) {
     for (const chunk of transcripts) {
       const wordCount = chunk.trim().split(/\s+/).length;
       const wr        = detectWakeWord(chunk, wakeWord, fuzzy, maxPos);
+      const maxStopWords = Math.floor(numberEnv('STOP_WITHOUT_WAKE_MAX_WORDS', 5, 0));
 
       // Stop-command check (works with or without wake word).
       const isStop = (wr.detected && isStopCommand(wr.query)) ||
-                     (!wr.detected && wordCount <= 5 && isStopCommand(chunk));
+                     (!wr.detected && wordCount <= maxStopWords && isStopCommand(chunk));
 
       if (isStop) {
         cancelTtsForSession(sessionId, 'stopword');
         broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+        logTranscriptEvent(sessionId, 'stop_command', {
+          userId,
+          text: chunk,
+          wakeWordDetected: wr.detected,
+          query: wr.detected ? wr.query : null,
+        });
 
         const session = sessions.get(BigInt(sessionId));
         if (session) {
@@ -285,6 +352,11 @@ export async function runPipeline(sessionId, userId) {
 
     const { query } = wakeResult;
     log('pipeline: wake word detected, query=', JSON.stringify(query));
+    logTranscriptEvent(sessionId, 'wakeword_query', {
+      userId,
+      transcript,
+      query,
+    });
 
     // 7. LLM.
     const session = sessions.get(BigInt(sessionId));
@@ -302,6 +374,13 @@ export async function runPipeline(sessionId, userId) {
     }
 
     const { text: responseText, speakerId, model: ttsModel } = response;
+    logTranscriptEvent(sessionId, 'assistant_response', {
+      userId,
+      query,
+      text: responseText,
+      speakerId,
+      model: ttsModel,
+    });
 
     // Persist turn to history using the spoken text (not raw JSON).
     session.conversationHistory.push({ role: 'user',      content: query        });

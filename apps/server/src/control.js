@@ -5,7 +5,8 @@ import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline } from './pipeline.js';
-import { streamTtsToSession, DEBUG_TTS_TEXT, cancelTtsForSession } from './ttsStream.js';
+import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession } from './ttsStream.js';
+import { logTranscriptEvent } from './transcript.js';
 import { botConnections } from './broadcast.js';
 import { getVersion } from './version.js';
 
@@ -20,8 +21,8 @@ function serverParams() {
     jitterMs:      Number(process.env.JITTER_MS      ?? 120),
     playoutMs:     Number(process.env.PLAYOUT_MS     ?? 200),
     playoutMaxMs:  Number(process.env.PLAYOUT_MAX_MS ?? 1500),
-    interruptMinMs:Number(process.env.INTERRUPT_MIN_MS ?? 400),
-    resumeGateMs:  Number(process.env.RESUME_GATE_MS   ?? 900),
+    interruptMinMs:Number(process.env.INTERRUPT_MIN_MS ?? 800),
+    resumeGateMs:  Number(process.env.RESUME_GATE_MS   ?? 1200),
     rewindMs:      Number(process.env.REWIND_MS      ?? 1000),
     hbIntervalMs:  15000,
   };
@@ -102,6 +103,10 @@ export function initControlWSS({ bearer } = {}) {
           }
           case 'ack': {
             // Bot acknowledges a server→bot command (e.g. set_params routed from a controller).
+            if (msg.playback?.id && msg.playback?.sessionId) {
+              logTranscriptEvent(msg.playback.sessionId, 'playback_stopped', msg.playback);
+              debug('control: playback stopped', JSON.stringify(msg.playback));
+            }
             debug('control: bot ack', msg.cmdId, msg.ok);
             return;
           }
@@ -127,7 +132,7 @@ export function initControlWSS({ bearer } = {}) {
             }
             const text = typeof msg.text === 'string' && msg.text.trim()
               ? msg.text
-              : DEBUG_TTS_TEXT;
+              : defaultDebugTtsText();
             streamTtsToSession(sid, text).catch((e) => warn('debug_tts failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'debug_tts' });
             return;

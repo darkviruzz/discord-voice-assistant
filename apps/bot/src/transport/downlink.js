@@ -15,8 +15,8 @@ export class DownlinkClient {
     this._reconnectTimer = null;
     this._playback = new TtsPlayback({ rewindMs: params.rewindMs ?? 1000 });
 
-    this.interruptMinMs = params.interruptMinMs ?? 400;
-    this.resumeGateMs = params.resumeGateMs ?? 900;
+    this.interruptMinMs = params.interruptMinMs ?? 800;
+    this.resumeGateMs = params.resumeGateMs ?? 1200;
     this.rewindMs = params.rewindMs ?? 1000;
     this._speakTimers = new Map();
     this._activeSpeakers = new Set();
@@ -120,7 +120,8 @@ export class DownlinkClient {
   }
 
   stopPlayback() {
-    this._playback.stop();
+    const stats = this._playback.stop();
+    return stats ? { ...stats, sessionId: this._sessionId?.toString?.() ?? String(this._sessionId ?? '') } : null;
   }
 
   updateSession(sessionId) {
@@ -163,12 +164,19 @@ export class DownlinkClient {
     if (timer) {
       clearTimeout(timer);
       this._speakTimers.delete(_userId);
+      if (this._playback.isPaused() && this._activeSpeakers.size === 0) {
+        this._scheduleResume();
+      }
       return;
     }
 
     this._activeSpeakers.delete(_userId);
     if (this._activeSpeakers.size > 0) return;
 
+    if (this._playback.isPaused()) this._scheduleResume();
+  }
+
+  _scheduleResume() {
     if (this._resumeTimer) clearTimeout(this._resumeTimer);
     this._resumeTimer = setTimeout(() => {
       this._resumeTimer = null;

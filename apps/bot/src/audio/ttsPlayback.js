@@ -110,6 +110,7 @@ export class TtsPlayback {
   }
 
   stop() {
+    const stats = this.stats();
     if (this.currentId) debug('tts-playback: stopped id=', this.currentId);
     if (this.currentId) this._ignoreId(this.currentId);
     this.queue = [];
@@ -123,6 +124,7 @@ export class TtsPlayback {
     this.pauseLogged = false;
     this.history = [];
     try { this.player.stop(true); } catch {}
+    return stats;
   }
 
   pause(reason = 'interrupt') {
@@ -162,6 +164,24 @@ export class TtsPlayback {
       this.rewindMs = rewindMs;
       this._trimHistory();
     }
+  }
+
+  isPaused() {
+    return this.paused;
+  }
+
+  stats() {
+    if (!this.currentId) return null;
+    return {
+      id: this.currentId,
+      framesPlayed: this.framesPlayed,
+      msPlayed: this.framesPlayed * 20,
+      framesReceived: this.framesReceived,
+      msReceived: this.framesReceived * 20,
+      queue: this.queue.length,
+      done: this.done,
+      paused: this.paused,
+    };
   }
 
   _pump(readable) {

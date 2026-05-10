@@ -2,14 +2,13 @@ import { randomUUID } from 'crypto';
 import { sessions, ensureSession } from './state.js';
 import { synthesizeStream } from './tts.js';
 import { StreamingAudioPipeline } from './audio.js';
+import { logTranscriptEvent } from './transcript.js';
 import { log, debug, warn } from './logger.js';
 
-export const DEBUG_TTS_TEXT =
-  'Hallo, dies ist ein technischer Test der neuen minimalen Sprachpipeline. ' +
-  'Der Server fragt Piper an, wandelt die erzeugten PCM-Daten direkt in Opus-Frames um ' +
-  'und streamt diese sofort an den Discord-Bot. Der Bot puffert die Frames nur in einer ' +
-  'einfachen Reihenfolge-Queue und spielt sie ohne Gating, ohne Zeitstempel, ohne Jitter-Buffer ' +
-  'und ohne künstliche Silence-Frames ab. Wenn dieser Test sauber klingt, ist der neue Kernpfad korrekt.';
+export function defaultDebugTtsText() {
+  const wakeWord = process.env.WAKE_WORD ?? 'Rabenauge';
+  return `Hallo, ich bin ${wakeWord}. Ich höre zu und antworte, wenn ihr mich mit ${wakeWord} ansprecht.`;
+}
 
 const SUBSCRIBER_WAIT_MS = 3000;
 const activeTtsBySession = new Map();
@@ -44,7 +43,7 @@ async function waitForDownlink(sessionId, timeoutMs = SUBSCRIBER_WAIT_MS) {
   return false;
 }
 
-export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts = {}) {
+export async function streamTtsToSession(sessionId, text = null, opts = {}) {
   const sid = BigInt(sessionId);
   const sessionKey = sid.toString();
   ensureSession(sid);
@@ -54,12 +53,26 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
   const ctrl = new AbortController();
   const token = { id, ctrl, cancelled: false };
   activeTtsBySession.set(sessionKey, token);
-  const cleanText = String(text || DEBUG_TTS_TEXT).trim();
+  const cleanText = String(text || defaultDebugTtsText()).trim();
   log(`debug-tts: request id=${id} chars=${cleanText.length}`);
+  logTranscriptEvent(sid, 'tts_start', {
+    id,
+    text: cleanText,
+    chars: cleanText.length,
+    model: opts.model,
+    speakerId: opts.speakerId,
+    lengthScale: opts.lengthScale,
+    noiseScale: opts.noiseScale,
+    noiseWScale: opts.noiseWScale,
+  });
 
   const hasDownlink = await waitForDownlink(sid);
   if (!hasDownlink) {
     warn('debug-tts: no downlink subscribers for session', sid.toString());
+    logTranscriptEvent(sid, 'tts_error', {
+      id,
+      message: 'no downlink subscribers',
+    });
     if (activeTtsBySession.get(sessionKey) === token) activeTtsBySession.delete(sessionKey);
     return { id, frames: 0, pcmBytes: 0 };
   }
@@ -118,11 +131,19 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
     }
 
     sendToSession(sid, { type: 'tts_done', id });
+    logTranscriptEvent(sid, 'tts_done', {
+      id,
+      frames: seq,
+      pcmBytes,
+      chunks,
+      durationMs: seq * 20,
+    });
     log(`debug-tts: done id=${id} frames=${seq} pcmBytes=${pcmBytes} chunks=${chunks} durationMs≈${seq * 20}`);
     return { id, frames: seq, pcmBytes };
   } catch (e) {
     warn('debug-tts: failed id=', id, e.message);
     sendToSession(sid, { type: 'tts_error', id, message: e.message });
+    logTranscriptEvent(sid, 'tts_error', { id, message: e.message });
     throw e;
   } finally {
     if (activeTtsBySession.get(sessionKey) === token) {
@@ -138,6 +159,10 @@ export function cancelTtsForSession(sessionId, reason = 'cancel') {
   token.cancelled = true;
   try { token.ctrl.abort(); } catch {}
   activeTtsBySession.delete(sessionKey);
+  logTranscriptEvent(sessionKey, 'tts_cancel', {
+    id: token.id,
+    reason,
+  });
   log(`debug-tts: cancel id=${token.id} session=${sessionKey} reason=${reason}`);
   return true;
 }

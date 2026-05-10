@@ -13,8 +13,8 @@ Alles läuft **lokal** — auch off-topic / privates Geplauder wird transkribier
 
 ## Komponenten
 
-* **Bot (apps/bot)** — Discord-Recorder. Nimmt pro Sprecher Opus-Frames auf (siehe [recorder.js](apps/bot/src/recorder.js)), speichert lokal als WAV. Sendet im Live-Modus optional Frames an den Server für sofortige Transkription. Wiedergabe von TTS-Antworten mit Jitter-/Playout-Puffer und Gating (spielt nur bei Stille).
-* **Server (apps/server)** — STT-/LLM-/TTS-Pipeline (Whisper + Ollama + Piper, alle lokal). Empfängt Uplink-Frames, transkribiert pro Utterance, scannt auf Wake-Word, ruft LLM auf, generiert TTS-Antwort.
+* **Bot (apps/bot)** — Discord-Recorder. Nimmt pro Sprecher Opus-Frames auf (siehe [recorder.js](apps/bot/src/recorder.js)), speichert lokal als WAV. Sendet im Live-Modus optional Frames an den Server für sofortige Transkription. TTS-Antworten werden über den neuen FIFO-Downlink abgespielt: keine Timestamp-Scheduling-Logik, kein JitterBuffer und keine Stale-Drops im aktiven TTS-Pfad.
+* **Server (apps/server)** — STT-/LLM-/TTS-Pipeline (Whisper + Ollama + Piper, alle lokal). Empfängt Uplink-Frames, transkribiert pro Utterance, scannt auf Wake-Word/Stop-Phrases, ruft LLM auf, generiert TTS-Antwort und streamt Opus-Frames per JSON-Downlink an den Bot.
 * **Cowork-Pipeline** *(extern)* — beobachtet den Transkript-Inbox-Ordner, reichert Spieler-Notizen an, baut/aktualisiert das Obsidian-Wiki.
 
 ## Operating Modes
@@ -71,7 +71,7 @@ Drei Kanäle zwischen Bot und Server:
 * `/downlink` (JSON, `tts_start` / `tts_frame` / `tts_done`; Opus-Frames base64 im Payload)
 * `/control` (WebSocket JSON; Events/Befehle/Backpressure)
 
-**TTS-Playback im Bot**: Der neue Pfad nutzt eine FIFO-Queue ohne künstliche DTX-/Silence-Frames, ohne Timestamp-Scheduling und ohne Stale-Drops. Bei Unterbrechung pausiert der Readable; beim Fortsetzen werden `REWIND_MS` aus der Playback-History erneut eingespielt.
+**TTS-Playback im Bot**: Der neue Pfad nutzt eine FIFO-Queue ohne Timestamp-Scheduling und ohne Stale-Drops. Playback startet erst mit dem ersten echten `tts_frame`, endet bei `tts_done` und leerer Queue mit `push(null)`. Bei Unterbrechung pausiert der Readable; beim Fortsetzen werden `REWIND_MS` aus der Playback-History erneut eingespielt. Der Bot meldet bei Stop bereits `framesPlayed`/`msPlayed` zurück, damit spätere Transkript-Kürzung möglich ist.
 
 **Latenz** (LAN-Ziel) für die Wake-Word-Antwort: 0,5–2,0 s end-to-end (Transport << 5 ms; Rest = Puffer + STT/TTS/LLM). Latenz ist **nicht** Tier-1-Optimierungsziel — Transkript-Qualität geht vor.
 
@@ -95,8 +95,8 @@ UPLINK_OPUS_BITRATE=32000
 
 GATE_MS=80
 PLAYOUT_MAX_MS=1500
-INTERRUPT_MIN_MS=400
-RESUME_GATE_MS=900
+INTERRUPT_MIN_MS=800
+RESUME_GATE_MS=1200
 REWIND_MS=1000
 ```
 
@@ -118,8 +118,8 @@ REWIND_MS=1000
 | `CONTROL_BEARER` | — | Bearer-Token zur Authentifizierung gegenüber dem Server. Muss mit dem Server-`CONTROL_BEARER` übereinstimmen. |
 | `GATE_MS` | `80` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
 | `PLAYOUT_MAX_MS` | `1500` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
-| `INTERRUPT_MIN_MS` | `400` | Mindest-Sprechdauer in ms, ab der eine Aussage als echte Unterbrechung gewertet wird. Kürzere Geräusche (Husten, Lachen, Hintergrundgeräusche) werden ignoriert. |
-| `RESUME_GATE_MS` | `900` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Gibt dem Spieler Zeit, seinen Satz zu beenden. |
+| `INTERRUPT_MIN_MS` | `800` | Mindest-Sprechdauer in ms, ab der eine Aussage als echte Unterbrechung gewertet wird. Kürzere Geräusche (Husten, Lachen, Hintergrundgeräusche) werden ignoriert. |
+| `RESUME_GATE_MS` | `1200` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Wird bei erneuter User-Sprache während Pause neu gestartet. |
 | `REWIND_MS` | `1000` | Beim Fortsetzen nach einer Unterbrechung werden so viele Millisekunden aus der Playback-History erneut vor die Queue gelegt. |
 
 ### Server – `apps/server/.env`
@@ -133,6 +133,10 @@ DEBUG=1
 
 WHISPER_URL=http://localhost:8080
 WHISPER_LANGUAGE=de
+WHISPER_TEMPERATURE=0.1
+WHISPER_NO_SPEECH_THRESHOLD=0.67
+STT_MAX_CHUNK_SECONDS=30
+STT_SILENCE_THRESH=300
 
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.2
@@ -145,6 +149,8 @@ TTS_URL=http://localhost:5000
 WAKE_WORD=Rabenauge
 WAKE_WORD_FUZZY=true
 WAKE_WORD_POSITION=3
+STOP_PHRASES=stop,stopp,abbrechen,beenden,hör auf,aufhören,halt,halte an,halte ein
+STOP_WITHOUT_WAKE_MAX_WORDS=5
 ```
 
 #### Transport
@@ -163,6 +169,10 @@ WAKE_WORD_POSITION=3
 |---|---|---|
 | `WHISPER_URL` | `http://localhost:8080` | URL des whisper.cpp HTTP-Servers (`/inference`-Endpoint). |
 | `WHISPER_LANGUAGE` | `auto` | Sprache für Whisper. `de` für Deutsch, `en` für Englisch, `auto` für automatische Erkennung. `auto` ist etwas langsamer. |
+| `WHISPER_TEMPERATURE` | `0.2` | Sampling-Temperature für Whisper. Lokale `.env.example` nutzt konservativ `0.1`; Werte >0 liefern brauchbarere `no_speech_prob`-Werte als deterministisches `0`. |
+| `WHISPER_NO_SPEECH_THRESHOLD` | `0.67` | Length-weighted Durchschnitt über Whisper-`no_speech_prob`. Transkripte oberhalb des Thresholds werden als Geräusch verworfen. |
+| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks. Längere Utterances werden an Stille geteilt; wenn keine passende Stille gefunden wird, wird mit `OVERLAP=2s` forced gesplittet. |
+| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
 
 #### LLM
 
@@ -179,7 +189,7 @@ WAKE_WORD_POSITION=3
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `elevenlabs` für die ElevenLabs-Cloud-API. |
-| `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /synthesize` mit JSON `{text, model, speaker_id}` → WAV-Response. |
+| `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /tts/synthesize` mit JSON `{text, model, speaker_id, length_scale, noise_scale, noise_w_scale}` → chunked `audio/pcm-s16le`. |
 | `ELEVENLABS_API_KEY` | — | API-Key für ElevenLabs (nur bei `TTS_PROVIDER=elevenlabs`). |
 | `ELEVENLABS_VOICE_ID` | `EXAVITQu4vr4xnSDxMaL` | Voice-ID für ElevenLabs. Standard ist eine englische Männerstimme; für Deutsch eine passende Stimme aus dem ElevenLabs-Katalog wählen. |
 
@@ -190,9 +200,23 @@ WAKE_WORD_POSITION=3
 | `WAKE_WORD` | `Rabenauge` | Aktivierungswort. Der Bot verarbeitet eine Aussage nur, wenn dieses Wort erkannt wird. Groß-/Kleinschreibung wird ignoriert. |
 | `WAKE_WORD_FUZZY` | `true` | Fuzzy-Matching mit Levenshtein-Distanz ≤ 2. Erkennt Vertipper und Aussprache-Varianten (z. B. „Rabenaugen", „Rabenoge"). Auf `false` setzen für exaktes Matching. |
 | `WAKE_WORD_POSITION` | `3` | Maximale Wortposition des Wake-Words im Transkript. `3` = Wake-Word muss in den ersten 3 Wörtern stehen. `0` = überall im Satz erlaubt. Verhindert False-Positives wenn das Wake-Word mitten in einer Aussage vorkommt. |
-| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+| `STOP_PHRASES` | `stop,stopp,abbrechen,beenden,hör auf,aufhören,halt,halte an,halte ein` | Kommagetrennte Liste erkannter Stop-Phrasen. Mit Wake-Word wird nur der Text nach dem Wake-Word geprüft; ohne Wake-Word nur kurze Äußerungen bis `STOP_WITHOUT_WAKE_MAX_WORDS`. |
+| `STOP_WITHOUT_WAKE_MAX_WORDS` | `5` | Maximale Wortzahl für Stop-Phrases ohne Wake-Word. Verhindert, dass normale Sätze mit Stop-Wörtern versehentlich die Wiedergabe abbrechen. |
 
-> **TODO — Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Das Entfernen des früheren 6-Sekunden-Ringbuffers hat die Transkriptions-Erkennung bereits deutlich verbessert. Falls lange Fragen trotzdem abgeschnitten werden: `DEBUG=1` setzen und die Meldung `pipeline: Xs → N silence-split chunks` im Serverlog beobachten. Erscheint keine Aufteilungs-Meldung bei einer >30-Sekunden-Aufnahme, ist der Schwellwert zu niedrig (zu viel Hintergraudrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+> **Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Bei langen Aufnahmen (`> STT_MAX_CHUNK_SECONDS`) loggt der Server mit `DEBUG=1` Details wie Gesamtdauer, Threshold, Chunk-Anzahl, Chunk-Dauern und Split-Typ (`natural-silence`, `forced-overlap`, `tail`). Erscheint bei langen Fragen kein sinnvoller Natural-Split, ist der Schwellwert oft zu niedrig (zu viel Hintergrundrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+
+### Live-JSONL-Events
+
+Während Online-Live schreibt der Server rohe Events nach `TRANSCRIPT_DIR` (Default `./transcripts`) in `session_<sessionId>.jsonl`. Aktuell geloggt werden u. a.:
+
+* `user_transcript` — rohes STT-Ergebnis pro abgeschlossener Utterance
+* `wakeword_query` — erkannter Wake-Word-Trigger und extrahierte Query
+* `assistant_response` — rohe LLM-Antwort inklusive Voice-Metadaten
+* `tts_start`, `tts_done`, `tts_cancel`, `tts_error` — TTS-Lifecycle
+* `stop_command` — erkannte Stop-Phrase
+* `playback_stopped` — Bot-Feedback mit `framesPlayed` und `msPlayed` nach Stop
+
+Die spätere gekürzte Assistant-Antwort im finalen Transcript kann daraus heuristisch berechnet werden (`msPlayed / tts_done.durationMs`).
 
 ### Piper Speaker-IDs (de_DE-thorsten_emotional-medium)
 
@@ -307,7 +331,7 @@ SYSTEM_PROMPT_FILE=./prompt.txt
 
 * Server starten (Windows).
 * Bot verbindet optional `/uplink` (per-Speaker), `/downlink` (Abo), `/control`.
-* Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames an den Bot; Bot spielt nur bei Stille (Gating).
+* Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames über den JSON-Downlink an den Bot.
 * Wake-Word sprechen: *„Rabenauge, wer ist Baron Kelthur?"* → Bot antwortet per Sprache im Voice-Channel.
 
 ## AI Services Setup — Windows 11 / AMD GPU (RX 6800 XT)

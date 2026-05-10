@@ -61,8 +61,8 @@ export class ControlClient extends EventEmitter {
     this.fsm.set(State.DISCONNECTED);
   }
 
-  ack(cmdId, ok = true, error) {
-    const msg = { type: 'ack', cmdId, ok };
+  ack(cmdId, ok = true, error, extra = {}) {
+    const msg = { type: 'ack', cmdId, ok, ...extra };
     if (error) msg.error = error;
     this._send(msg);
   }

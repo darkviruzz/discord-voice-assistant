@@ -39,7 +39,9 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
   - Macht Feature `Autostart via Task Scheduler` (5.1) damit weitgehend obsolet
 
 - [ ] **Session-Log enriched (JSONL)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
-  - Pro Turn: Timestamp, Speaker-ID, ggf. Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
+  - Erster Roh-Event-Stand existiert: `user_transcript`, `wakeword_query`, `assistant_response`, `stop_command`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`, `playback_stopped`
+  - Pro Turn finalisieren: Timestamp, Speaker-ID, ggf. Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
+  - Stop-Transcript später natürlich kürzen: `playback_stopped.msPlayed` gegen `tts_done.durationMs` schätzen und Assistant-Text mit `...` abschneiden
   - Optionale Bot-Events (join/leave, wer spricht wann)
   - Periodische Checkpoint-Snapshots (alle 30 min) — kompakter Kontext-Stand
   - Format-Standard hier festlegen, weil Phase-3-Finalize und Phase-4-RAG darauf aufbauen
@@ -186,6 +188,10 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 - [x] **Piper TTS auf GPU (DirectML)** — bestätigt 1.93× Speedup auf AMD RX 6800 XT.
 - [x] **Piper Streaming-API** — `POST /tts/synthesize` mit chunked HTTP-Streaming (Satz-für-Satz → niedrigere TTFA).
 - [x] **TTS-Settings konfigurierbar** — `length_scale`, `noise_scale`, `noise_w_scale` per Request; Voice-Wechsel per `model`-Feld.
+- [x] **FIFO-TTS-Playback-Pfad** — Bot spielt Server-Opus-Frames über `tts_start`/`tts_frame`/`tts_done` in FIFO-Reihenfolge, ohne JitterBuffer/Timestamp-Scheduling/Stale-Drops im aktiven TTS-Pfad.
+- [x] **TTS-Unterbrechung mit Resume/Rewind** — User-Sprache pausiert Playback nach `INTERRUPT_MIN_MS`, Resume nach `RESUME_GATE_MS`, Wiederholung über `REWIND_MS`.
+- [x] **Konfigurierbare Stop-Phrases** — `STOP_PHRASES` und `STOP_WITHOUT_WAKE_MAX_WORDS`; Stop bricht Playback und laufenden TTS-Stream ab.
+- [x] **STT-Split-Debug** — lange Utterances loggen bei `DEBUG=1` Chunk-Dauern, Threshold und Split-Typ; `STT_MAX_CHUNK_SECONDS` ist konfigurierbar.
 
 ---
 

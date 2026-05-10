@@ -5,7 +5,7 @@ import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline } from './pipeline.js';
-import { streamTtsToSession, DEBUG_TTS_TEXT } from './ttsStream.js';
+import { streamTtsToSession, DEBUG_TTS_TEXT, cancelTtsForSession } from './ttsStream.js';
 import { botConnections } from './broadcast.js';
 import { getVersion } from './version.js';
 
@@ -20,6 +20,9 @@ function serverParams() {
     jitterMs:      Number(process.env.JITTER_MS      ?? 120),
     playoutMs:     Number(process.env.PLAYOUT_MS     ?? 200),
     playoutMaxMs:  Number(process.env.PLAYOUT_MAX_MS ?? 1500),
+    interruptMinMs:Number(process.env.INTERRUPT_MIN_MS ?? 400),
+    resumeGateMs:  Number(process.env.RESUME_GATE_MS   ?? 900),
+    rewindMs:      Number(process.env.REWIND_MS      ?? 1000),
     hbIntervalMs:  15000,
   };
 }
@@ -130,7 +133,6 @@ export function initControlWSS({ bearer } = {}) {
             return;
           }
           case 'set_params':
-          case 'stop_playback':
           case 'chat_message': {
             let forwarded = 0;
             for (const botWs of botConnections) {
@@ -140,6 +142,19 @@ export function initControlWSS({ bearer } = {}) {
               }
             }
             debug('control: routed', msg.type, 'to', forwarded, 'bot(s)');
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: msg.type });
+            return;
+          }
+          case 'stop_playback': {
+            if (activeSessionId) cancelTtsForSession(activeSessionId, 'stop_playback');
+            let forwarded = 0;
+            for (const botWs of botConnections) {
+              if (botWs !== ws && botWs.readyState === 1 /* OPEN */) {
+                send(botWs, msg);
+                forwarded++;
+              }
+            }
+            debug('control: routed stop_playback to', forwarded, 'bot(s)');
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: msg.type });
             return;
           }

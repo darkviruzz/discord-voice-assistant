@@ -6,6 +6,7 @@ import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
+import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import opus from '@discordjs/opus';
@@ -248,6 +249,7 @@ export async function runPipeline(sessionId, userId) {
                      (!wr.detected && wordCount <= 5 && isStopCommand(chunk));
 
       if (isStop) {
+        cancelTtsForSession(sessionId, 'stopword');
         broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
 
         const session = sessions.get(BigInt(sessionId));
@@ -299,7 +301,7 @@ export async function runPipeline(sessionId, userId) {
       return;
     }
 
-    const { text: responseText } = response;
+    const { text: responseText, speakerId, model: ttsModel } = response;
 
     // Persist turn to history using the spoken text (not raw JSON).
     session.conversationHistory.push({ role: 'user',      content: query        });
@@ -312,7 +314,11 @@ export async function runPipeline(sessionId, userId) {
       question: transcript, answer: responseText, isStop: false,
     });
 
-    log('pipeline: voice TTS disabled in minimal playback rebuild; answer sent as chat only');
+    try {
+      await streamTtsToSession(sessionId, responseText, { model: ttsModel, speakerId });
+    } catch (e) {
+      if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
+    }
   } finally {
     // Only clean up if this run is still the active one (a newer run may have replaced it).
     if (activePipelines.get(key) === ctrl) activePipelines.delete(key);

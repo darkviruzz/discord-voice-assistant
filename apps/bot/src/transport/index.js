@@ -44,6 +44,7 @@ export function start({ botId } = {}) {
     playoutMaxMs:   Number(process.env.PLAYOUT_MAX_MS    ?? 1500),
     interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 400),
     resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 900),
+    rewindMs:       Number(process.env.REWIND_MS         ?? 1000),
   };
 
   const fsm      = new TransportState();
@@ -86,6 +87,7 @@ export function start({ botId } = {}) {
         downlink.setParams({
           interruptMinMs: msg.interruptMinMs,
           resumeGateMs:   msg.resumeGateMs,
+          rewindMs:       msg.rewindMs,
         });
         control.ack(msg.cmdId, true);
         break;

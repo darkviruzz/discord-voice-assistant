@@ -68,10 +68,10 @@ Konventionen:
 Drei Kanäle zwischen Bot und Server:
 
 * `/uplink` (Binär, 20-ms-Frames pro Sprecher; Codec `opus` Passthrough — kein Re-Encode im Bot)
-* `/downlink` (Binär, 20-ms Opus → Bot)
+* `/downlink` (JSON, `tts_start` / `tts_frame` / `tts_done`; Opus-Frames base64 im Payload)
 * `/control` (WebSocket JSON; Events/Befehle/Backpressure)
 
-**Gating/Playout im Bot**: Wiedergabe startet nur, wenn `activeSpeakers.size == 0` für ≥ `GATE_MS`. Bei Unterbrechung pausieren; beim Fortsetzen werden die letzten ~1000 ms aus dem Wiedergabe-History-Buffer erneut eingespielt.
+**TTS-Playback im Bot**: Der neue Pfad nutzt eine FIFO-Queue ohne künstliche DTX-/Silence-Frames, ohne Timestamp-Scheduling und ohne Stale-Drops. Bei Unterbrechung pausiert der Readable; beim Fortsetzen werden `REWIND_MS` aus der Playback-History erneut eingespielt.
 
 **Latenz** (LAN-Ziel) für die Wake-Word-Antwort: 0,5–2,0 s end-to-end (Transport << 5 ms; Rest = Puffer + STT/TTS/LLM). Latenz ist **nicht** Tier-1-Optimierungsziel — Transkript-Qualität geht vor.
 
@@ -97,6 +97,7 @@ GATE_MS=80
 PLAYOUT_MAX_MS=1500
 INTERRUPT_MIN_MS=400
 RESUME_GATE_MS=900
+REWIND_MS=1000
 ```
 
 | Variable | Standard | Beschreibung |
@@ -115,10 +116,11 @@ RESUME_GATE_MS=900
 | `DOWNLINK_WS_URL` | — | Direkte WebSocket-URL für den Downlink-Kanal. Veraltet — `SERVER_BASE_URL` verwenden. |
 | `CONTROL_WS_URL` | — | Direkte WebSocket-URL für die Control-Plane, z. B. `ws://192.168.20.101:7440/control`. Veraltet — `SERVER_BASE_URL` verwenden. |
 | `CONTROL_BEARER` | — | Bearer-Token zur Authentifizierung gegenüber dem Server. Muss mit dem Server-`CONTROL_BEARER` übereinstimmen. |
-| `GATE_MS` | `80` | Mindest-Stille in ms nach dem letzten Sprecher, bevor die Wiedergabe starten darf (normales Gating ohne Unterbrechung). Kleinere Werte = schnellerer Start, aber mehr Überschneidungen. |
-| `PLAYOUT_MAX_MS` | `1500` | Frames die älter als dieser Wert sind (in ms) werden im JitterBuffer als veraltet verworfen. Verhindert Wiedergabe von zu alten Frames bei langen Pausen. |
+| `GATE_MS` | `80` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
+| `PLAYOUT_MAX_MS` | `1500` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
 | `INTERRUPT_MIN_MS` | `400` | Mindest-Sprechdauer in ms, ab der eine Aussage als echte Unterbrechung gewertet wird. Kürzere Geräusche (Husten, Lachen, Hintergrundgeräusche) werden ignoriert. |
 | `RESUME_GATE_MS` | `900` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Gibt dem Spieler Zeit, seinen Satz zu beenden. |
+| `REWIND_MS` | `1000` | Beim Fortsetzen nach einer Unterbrechung werden so viele Millisekunden aus der Playback-History erneut vor die Queue gelegt. |
 
 ### Server – `apps/server/.env`
 

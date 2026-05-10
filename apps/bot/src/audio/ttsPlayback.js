@@ -20,7 +20,7 @@ class QueueReadable extends Readable {
 }
 
 export class TtsPlayback {
-  constructor() {
+  constructor({ rewindMs = 1000 } = {}) {
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Play },
     });
@@ -35,6 +35,9 @@ export class TtsPlayback {
     this.framesPlayed = 0;
     this.paused = false;
     this.pauseLogged = false;
+    this.rewindMs = rewindMs;
+    this.history = [];
+    this.ignoredIds = new Set();
 
     this.player.on(AudioPlayerStatus.Idle, () => {
       debug('tts-playback: player idle');
@@ -54,6 +57,10 @@ export class TtsPlayback {
   }
 
   begin(id) {
+    if (this.ignoredIds.has(id)) {
+      debug('tts-playback: ignoring cancelled start id=', id);
+      return;
+    }
     if (this.currentId && this.currentId !== id) {
       debug('tts-playback: replacing active request', this.currentId, 'with', id);
       this.stop();
@@ -67,10 +74,12 @@ export class TtsPlayback {
     this.waiter = null;
     this.paused = false;
     this.pauseLogged = false;
+    this.history = [];
     debug('tts-playback: start id=', id);
   }
 
   pushFrame(id, frame, seq) {
+    if (this.ignoredIds.has(id)) return;
     if (!this.currentId) {
       this.begin(id);
     }
@@ -90,6 +99,7 @@ export class TtsPlayback {
   }
 
   markDone(id) {
+    if (this.ignoredIds.has(id)) return;
     if (id !== this.currentId) {
       debug('tts-playback: ignoring stale done id=', id, 'current=', this.currentId);
       return;
@@ -101,6 +111,7 @@ export class TtsPlayback {
 
   stop() {
     if (this.currentId) debug('tts-playback: stopped id=', this.currentId);
+    if (this.currentId) this._ignoreId(this.currentId);
     this.queue = [];
     this.done = true;
     this.currentId = null;
@@ -110,6 +121,7 @@ export class TtsPlayback {
     this.active = false;
     this.paused = false;
     this.pauseLogged = false;
+    this.history = [];
     try { this.player.stop(true); } catch {}
   }
 
@@ -125,6 +137,7 @@ export class TtsPlayback {
     this.paused = false;
     this.pauseLogged = false;
     debug('tts-playback: resumed id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
+    this._rewind();
     if (!this.active && this.currentId && (this.queue.length > 0 || !this.done)) {
       debug('tts-playback: restarting player after pause idle');
       this.start();
@@ -144,6 +157,13 @@ export class TtsPlayback {
     debug('tts-playback: play called id=', this.currentId);
   }
 
+  setParams({ rewindMs } = {}) {
+    if (typeof rewindMs === 'number' && Number.isFinite(rewindMs) && rewindMs >= 0) {
+      this.rewindMs = rewindMs;
+      this._trimHistory();
+    }
+  }
+
   _pump(readable) {
     if (readable !== this.readable) return;
 
@@ -159,6 +179,8 @@ export class TtsPlayback {
     const item = this.queue.shift();
     if (item) {
       this.framesPlayed++;
+      this.history.push(item);
+      this._trimHistory();
       if (this.framesPlayed === 1 || this.framesPlayed % 50 === 0) {
         debug(`tts-playback: read frame seq=${item.seq} played=${this.framesPlayed} queue=${this.queue.length}`);
       }
@@ -186,5 +208,32 @@ export class TtsPlayback {
 
   _wait(readable) {
     this.waiter = () => setImmediate(() => this._pump(readable));
+  }
+
+  _rewind() {
+    const frames = Math.min(Math.ceil(this.rewindMs / 20), this.history.length);
+    if (frames <= 0) return;
+    const rewindFrames = this.history.slice(-frames);
+    this.queue.unshift(...rewindFrames);
+    debug(`tts-playback: rewound ${frames} frames (${frames * 20} ms), queue=${this.queue.length}`);
+  }
+
+  _trimHistory() {
+    const maxFrames = Math.max(0, Math.ceil(this.rewindMs / 20));
+    if (maxFrames === 0) {
+      this.history = [];
+      return;
+    }
+    if (this.history.length > maxFrames) {
+      this.history.splice(0, this.history.length - maxFrames);
+    }
+  }
+
+  _ignoreId(id) {
+    this.ignoredIds.add(id);
+    if (this.ignoredIds.size > 20) {
+      const [oldest] = this.ignoredIds;
+      this.ignoredIds.delete(oldest);
+    }
   }
 }

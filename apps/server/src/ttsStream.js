@@ -12,6 +12,7 @@ export const DEBUG_TTS_TEXT =
   'und ohne künstliche Silence-Frames ab. Wenn dieser Test sauber klingt, ist der neue Kernpfad korrekt.';
 
 const SUBSCRIBER_WAIT_MS = 3000;
+const activeTtsBySession = new Map();
 
 function sendJson(ws, obj) {
   if (ws.readyState !== 1) return false;
@@ -45,15 +46,21 @@ async function waitForDownlink(sessionId, timeoutMs = SUBSCRIBER_WAIT_MS) {
 
 export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts = {}) {
   const sid = BigInt(sessionId);
+  const sessionKey = sid.toString();
   ensureSession(sid);
+  cancelTtsForSession(sid, 'replace');
 
   const id = opts.id ?? `tts-${randomUUID()}`;
+  const ctrl = new AbortController();
+  const token = { id, ctrl, cancelled: false };
+  activeTtsBySession.set(sessionKey, token);
   const cleanText = String(text || DEBUG_TTS_TEXT).trim();
   log(`debug-tts: request id=${id} chars=${cleanText.length}`);
 
   const hasDownlink = await waitForDownlink(sid);
   if (!hasDownlink) {
     warn('debug-tts: no downlink subscribers for session', sid.toString());
+    if (activeTtsBySession.get(sessionKey) === token) activeTtsBySession.delete(sessionKey);
     return { id, frames: 0, pcmBytes: 0 };
   }
 
@@ -66,7 +73,8 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
   let lastLoggedFrames = 0;
 
   try {
-    for await (const { pcm, sampleRate } of synthesizeStream(cleanText, opts)) {
+    for await (const { pcm, sampleRate } of synthesizeStream(cleanText, opts, ctrl.signal)) {
+      if (token.cancelled) break;
       chunks++;
       pcmBytes += pcm.length;
       debug(`debug-tts: pcm chunk id=${id} bytes=${pcm.length} total=${pcmBytes}`);
@@ -74,6 +82,7 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
       pipe ??= new StreamingAudioPipeline(sampleRate);
       const frames = pipe.push(pcm);
       for (const frame of frames) {
+        if (token.cancelled) break;
         sendToSession(sid, {
           type: 'tts_frame',
           id,
@@ -82,6 +91,7 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
         });
         seq++;
       }
+      if (token.cancelled) break;
 
       if (seq === 1 || seq - lastLoggedFrames >= 50) {
         debug(`debug-tts: sent frames id=${id} total=${seq}`);
@@ -89,8 +99,14 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
       }
     }
 
+    if (token.cancelled) {
+      log(`debug-tts: cancelled id=${id} frames=${seq} pcmBytes=${pcmBytes}`);
+      return { id, frames: seq, pcmBytes, cancelled: true };
+    }
+
     if (pipe) {
       for (const frame of pipe.flush()) {
+        if (token.cancelled) break;
         sendToSession(sid, {
           type: 'tts_frame',
           id,
@@ -108,5 +124,20 @@ export async function streamTtsToSession(sessionId, text = DEBUG_TTS_TEXT, opts 
     warn('debug-tts: failed id=', id, e.message);
     sendToSession(sid, { type: 'tts_error', id, message: e.message });
     throw e;
+  } finally {
+    if (activeTtsBySession.get(sessionKey) === token) {
+      activeTtsBySession.delete(sessionKey);
+    }
   }
+}
+
+export function cancelTtsForSession(sessionId, reason = 'cancel') {
+  const sessionKey = BigInt(sessionId).toString();
+  const token = activeTtsBySession.get(sessionKey);
+  if (!token) return false;
+  token.cancelled = true;
+  try { token.ctrl.abort(); } catch {}
+  activeTtsBySession.delete(sessionKey);
+  log(`debug-tts: cancel id=${token.id} session=${sessionKey} reason=${reason}`);
+  return true;
 }

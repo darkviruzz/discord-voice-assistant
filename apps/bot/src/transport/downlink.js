@@ -13,10 +13,11 @@ export class DownlinkClient {
     this._sessionId = null;
     this._closing = false;
     this._reconnectTimer = null;
-    this._playback = new TtsPlayback();
+    this._playback = new TtsPlayback({ rewindMs: params.rewindMs ?? 1000 });
 
     this.interruptMinMs = params.interruptMinMs ?? 400;
     this.resumeGateMs = params.resumeGateMs ?? 900;
+    this.rewindMs = params.rewindMs ?? 1000;
     this._speakTimers = new Map();
     this._activeSpeakers = new Set();
     this._resumeTimer = null;
@@ -129,12 +130,17 @@ export class DownlinkClient {
     if (wasOpen) this.open(sessionId);
   }
 
-  setParams({ interruptMinMs, resumeGateMs } = {}) {
+  setParams({ interruptMinMs, resumeGateMs, rewindMs } = {}) {
     if (typeof interruptMinMs === 'number') this.interruptMinMs = interruptMinMs;
     if (typeof resumeGateMs === 'number') this.resumeGateMs = resumeGateMs;
+    if (typeof rewindMs === 'number') {
+      this.rewindMs = rewindMs;
+      this._playback.setParams({ rewindMs });
+    }
     debug('downlink: params updated', {
       interruptMinMs: this.interruptMinMs,
       resumeGateMs: this.resumeGateMs,
+      rewindMs: this.rewindMs,
     });
   }
 

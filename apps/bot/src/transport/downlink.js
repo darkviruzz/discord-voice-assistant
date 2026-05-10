@@ -21,75 +21,62 @@ const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
 // Design notes:
 // - The stream only starts AFTER the first real frame arrives in the jitter
 //   buffer (_startPlayback() is called from the WS message handler, not on
-//   WS open).  This eliminates the pre-audio CNG burst that was miscalibrating
-//   Discord's AGC: previously 839 DTX silence frames (16.78 s) were sent
-//   before any real audio, causing the noise processor to calibrate to
-//   CNG-level and then apply wrong gain when real audio started.
-// - While waiting for real audio the stream pushes DTX silence so the
-//   AudioPlayer stays in Playing state (no startup latency on resume).
-// - After real audio completes (gate open, jitter empty, hadRealAudio), the
-//   stream ends itself after SILENCE_TAIL_FRAMES (100 × 20 ms = 2 s) of
-//   post-audio silence.  The AudioPlayer then transitions to Idle; the Idle
-//   handler recreates the stream when the next batch arrives.
-// - highWaterMark:1 avoids pre-buffering stale SILENCE_FRAMEs: with the
-//   default hwm=16 the stream eagerly pre-fills 16 silence frames (~320 ms)
-//   before any real audio, which triggers Discord's CNG on playback.
-//   With hwm=1 only the very next frame is pre-queued.
-const SILENCE_TAIL_FRAMES = 100; // 2 s of post-audio silence before stream end
-
+//   WS open).  This eliminates any pre-audio CNG burst.
+// - When the jitter drains after real audio AND the gate is open: push(null)
+//   immediately.  The AudioPlayer goes Idle; the Idle handler restarts as
+//   soon as the next response's first frame arrives.  No silence, no CNG.
+// - Silence frames are sent ONLY while the gate is closed (user speaking),
+//   to keep the AudioPlayer warm so playback resumes seamlessly on gate-open.
+// - highWaterMark:1 avoids pre-buffering stale frames: with the default
+//   hwm=16 the stream pre-fills 16 frames before any real audio arrives.
 class PlaybackStream extends Readable {
   constructor(jitterBuffer, gating) {
     super({ objectMode: true, highWaterMark: 1 });
-    this._jitter        = jitterBuffer;
-    this._gating        = gating;
-    this._active        = true;
-    this._hadRealAudio  = false; // true once the first real frame has been served
-    this._silenceRun    = 0;    // consecutive silence frames (for diagnostics)
-    this._realFrames    = 0;    // real frames served since last silence run
+    this._jitter       = jitterBuffer;
+    this._gating       = gating;
+    this._active       = true;
+    this._hadRealAudio = false; // true once the first real frame has been served
+    this._silenceRun   = 0;    // consecutive silence frames (for diagnostics)
+    this._realFrames   = 0;    // real frames served in current real-audio run
   }
 
   _read() {
     if (!this._active) { this.push(null); return; }
 
     const gateOpen = this._gating.isOpen();
-    let packet;
-    if (gateOpen) {
-      packet = this._jitter.shift(this._gating.playoutMaxMs) ?? null;
-    } else {
-      packet = null;
-    }
+    const packet   = gateOpen
+      ? (this._jitter.shift(this._gating.playoutMaxMs) ?? null)
+      : null;
 
     if (packet) {
-      // Real frame — log first frame after a silence run.
+      // ── Real frame ────────────────────────────────────────────────────────
       if (this._silenceRun > 0) {
-        debug(`playback: real audio resumed after ${this._silenceRun} silence frames`
-          + ` (${this._silenceRun * 20} ms), jitter=${this._jitter.size}`);
+        debug(`playback: resumed after ${this._silenceRun} silence frames`
+          + ` (${this._silenceRun * 20} ms gate-closed), jitter=${this._jitter.size}`);
         this._silenceRun = 0;
       }
       this._hadRealAudio = true;
       this._realFrames++;
-      // Periodic heartbeat every 5 s of real audio.
       if (this._realFrames % 250 === 0) {
         debug(`playback: ${this._realFrames} real frames played, jitter=${this._jitter.size}`);
       }
       this.push(packet);
+
+    } else if (this._hadRealAudio && gateOpen) {
+      // ── Audio ended cleanly: gate open, jitter drained ────────────────────
+      // Terminate immediately — zero DTX silence, zero CNG in Discord.
+      debug(`playback: stream ended cleanly (${this._realFrames} real frames total)`);
+      this._active = false;
+      this.push(null);
+
     } else {
-      // Silence frame.
+      // ── Silence frame ─────────────────────────────────────────────────────
+      // Gate is closed (user speaking) → keep AudioPlayer warm for resume.
+      // Or: no real audio yet (rare race) → same.
       this._silenceRun++;
       this._realFrames = 0;
-
-      // After real audio ends, let the stream terminate so the AudioPlayer
-      // goes Idle.  This stops the continuous DTX stream to Discord and lets
-      // the next response start fresh without any CNG tail.
-      if (this._hadRealAudio && gateOpen && this._silenceRun >= SILENCE_TAIL_FRAMES) {
-        debug(`playback: stream ended after ${this._silenceRun} post-audio silence frames`);
-        this._active = false;
-        this.push(null);
-        return;
-      }
-
       if (this._silenceRun === 1 || this._silenceRun % 50 === 0) {
-        const reason = gateOpen ? 'jitter empty' : 'gate closed';
+        const reason = gateOpen ? 'waiting for first frame' : 'gate closed';
         debug(`playback: silence #${this._silenceRun} (${reason}), jitter=${this._jitter.size}`);
       }
       this.push(SILENCE_FRAME);

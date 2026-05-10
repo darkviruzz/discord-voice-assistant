@@ -15,6 +15,7 @@ import { mixSession } from './mixer.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
 import * as transport from './transport/index.js';
+import { runDebugPlayback } from './debugPlayback.js';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
@@ -161,6 +162,34 @@ client.on('interactionCreate', async (i) => {
         startedAt: sessions.active.startedAt,
       });
       transport.setVoiceConnection(connection);
+
+      // ── Debug playback test ───────────────────────────────────────────────
+      // Triggered once when the voice connection first reaches Ready state.
+      // Creates its own AudioPlayer (temporarily replacing the downlink player)
+      // to verify that the encode path produces clean audio independently of
+      // the WebSocket / jitter-buffer pipeline.
+      {
+        const debugBase = (process.env.SERVER_BASE_URL || '')
+          .replace(/^wss?:/, (m) => (m === 'wss:' ? 'https:' : 'http:'));
+        if (debugBase) {
+          const triggerDebug = (_oldState, newState) => {
+            if (newState.status !== VoiceConnectionStatus.Ready) return;
+            connection.off('stateChange', triggerDebug);
+            // Small delay so the downlink WS subscription settles first.
+            setTimeout(() => {
+              runDebugPlayback(connection, debugBase, () => {
+                // Re-subscribe the downlink player after the test finishes.
+                transport.setVoiceConnection(connection);
+                log('debugPlayback: downlink player re-subscribed');
+              }).catch((e) => warn('debugPlayback:', e.message));
+            }, 500);
+          };
+          connection.on('stateChange', triggerDebug);
+        } else {
+          warn('debugPlayback: SERVER_BASE_URL not set, skipping test');
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       const receiver = connection.receiver;
 

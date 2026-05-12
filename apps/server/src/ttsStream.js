@@ -12,6 +12,45 @@ export function defaultDebugTtsText() {
 
 const SUBSCRIBER_WAIT_MS = 3000;
 const activeTtsBySession = new Map();
+const ttsRecords = new Map();
+
+function rememberTtsRecord(id, record) {
+  ttsRecords.set(id, { ...record, updatedAt: Date.now() });
+  if (ttsRecords.size > 100) {
+    const oldest = [...ttsRecords.entries()]
+      .sort((a, b) => a[1].updatedAt - b[1].updatedAt)[0]?.[0];
+    if (oldest) ttsRecords.delete(oldest);
+  }
+}
+
+function estimateDurationMs(text) {
+  // Fallback only when Piper was cancelled before we know the real duration.
+  // German spoken TTS lands roughly around 11-14 chars/s; use conservative 12.
+  return Math.max(1000, Math.round((String(text || '').length / 12) * 1000));
+}
+
+function playedText(text, msPlayed, durationMs) {
+  const clean = String(text || '').trim();
+  if (!clean) return { text: '', truncated: false, cutIndex: 0 };
+  const total = clean.length;
+  const ratio = durationMs > 0 ? Math.max(0, Math.min(1, msPlayed / durationMs)) : 1;
+  let cut = Math.floor(total * ratio);
+  if (cut >= total) return { text: clean, truncated: false, cutIndex: total };
+
+  const nextWhitespace = clean.slice(cut).search(/\s/);
+  if (nextWhitespace >= 0) cut += nextWhitespace;
+  const remaining = total - cut;
+  if (remaining < 15 || remaining / total < 0.05) {
+    return { text: clean, truncated: false, cutIndex: total };
+  }
+
+  const partial = clean.slice(0, Math.max(0, cut)).trimEnd();
+  return {
+    text: partial ? `${partial} ...` : '...',
+    truncated: true,
+    cutIndex: cut,
+  };
+}
 
 function sendJson(ws, obj) {
   if (ws.readyState !== 1) return false;
@@ -54,9 +93,20 @@ export async function streamTtsToSession(sessionId, text = null, opts = {}) {
   const token = { id, ctrl, cancelled: false };
   activeTtsBySession.set(sessionKey, token);
   const cleanText = String(text || defaultDebugTtsText()).trim();
+  rememberTtsRecord(id, {
+    id,
+    sessionId: sessionKey,
+    turnId: opts.turnId,
+    text: cleanText,
+    frames: 0,
+    durationMs: 0,
+    done: false,
+    cancelled: false,
+  });
   log(`debug-tts: request id=${id} chars=${cleanText.length}`);
   logTranscriptEvent(sid, 'tts_start', {
     id,
+    turnId: opts.turnId,
     text: cleanText,
     chars: cleanText.length,
     model: opts.model,
@@ -103,6 +153,11 @@ export async function streamTtsToSession(sessionId, text = null, opts = {}) {
           payload: frame.toString('base64'),
         });
         seq++;
+        rememberTtsRecord(id, {
+          ...ttsRecords.get(id),
+          frames: seq,
+          durationMs: seq * 20,
+        });
       }
       if (token.cancelled) break;
 
@@ -114,6 +169,12 @@ export async function streamTtsToSession(sessionId, text = null, opts = {}) {
 
     if (token.cancelled) {
       log(`debug-tts: cancelled id=${id} frames=${seq} pcmBytes=${pcmBytes}`);
+      rememberTtsRecord(id, {
+        ...ttsRecords.get(id),
+        frames: seq,
+        durationMs: seq * 20,
+        cancelled: true,
+      });
       return { id, frames: seq, pcmBytes, cancelled: true };
     }
 
@@ -133,10 +194,17 @@ export async function streamTtsToSession(sessionId, text = null, opts = {}) {
     sendToSession(sid, { type: 'tts_done', id });
     logTranscriptEvent(sid, 'tts_done', {
       id,
+      turnId: opts.turnId,
       frames: seq,
       pcmBytes,
       chunks,
       durationMs: seq * 20,
+    });
+    rememberTtsRecord(id, {
+      ...ttsRecords.get(id),
+      frames: seq,
+      durationMs: seq * 20,
+      done: true,
     });
     log(`debug-tts: done id=${id} frames=${seq} pcmBytes=${pcmBytes} chunks=${chunks} durationMs≈${seq * 20}`);
     return { id, frames: seq, pcmBytes };
@@ -159,10 +227,40 @@ export function cancelTtsForSession(sessionId, reason = 'cancel') {
   token.cancelled = true;
   try { token.ctrl.abort(); } catch {}
   activeTtsBySession.delete(sessionKey);
+  rememberTtsRecord(token.id, {
+    ...ttsRecords.get(token.id),
+    cancelled: true,
+  });
   logTranscriptEvent(sessionKey, 'tts_cancel', {
     id: token.id,
     reason,
   });
   log(`debug-tts: cancel id=${token.id} session=${sessionKey} reason=${reason}`);
   return true;
+}
+
+export function recordPlaybackStopped(sessionId, playback = {}) {
+  if (!playback.id) return null;
+  const record = ttsRecords.get(playback.id);
+  if (!record?.text) return null;
+
+  const durationMs = record.durationMs || playback.msReceived || estimateDurationMs(record.text);
+  const msPlayed = Number(playback.msPlayed ?? 0);
+  const partial = playedText(record.text, msPlayed, durationMs);
+  const event = {
+    id: playback.id,
+    turnId: record.turnId,
+    text: partial.text,
+    fullText: record.text,
+    truncated: partial.truncated,
+    cutIndex: partial.cutIndex,
+    msPlayed,
+    durationMs,
+    framesPlayed: playback.framesPlayed,
+    framesReceived: playback.framesReceived,
+    ttsDone: record.done,
+    ttsCancelled: record.cancelled,
+  };
+  logTranscriptEvent(sessionId, 'assistant_response_played', event);
+  return event;
 }

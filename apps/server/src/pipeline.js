@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { sessions } from './state.js';
+import { sessions, ensureSession } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
@@ -244,10 +244,203 @@ const activePipelines = new Map();
 
 // Last LLM response per session — used to add interrupt context to history.
 const lastResponses = new Map(); // sessionId(string) → response text
+const textHistories = new Map();
+
+function wakeWordName() {
+  return process.env.WAKE_WORD ?? 'Rabenauge';
+}
+
+function sessionlessHistory(scope) {
+  const key = scope || 'global';
+  if (!textHistories.has(key)) textHistories.set(key, []);
+  return textHistories.get(key);
+}
+
+function appendHistory(history, userText, assistantText) {
+  history.push({ role: 'user', content: userText });
+  history.push({ role: 'assistant', content: assistantText });
+  const maxTurns = numberEnv('HISTORY_TURNS', 6, 1);
+  const maxMessages = Math.ceil(maxTurns * 2);
+  if (history.length > maxMessages) {
+    history.splice(0, history.length - maxMessages);
+  }
+}
+
+function maxStopWordsWithoutWake() {
+  return Math.floor(numberEnv('STOP_WITHOUT_WAKE_MAX_WORDS', 5, 0));
+}
+
+function maybeStopWithoutWake(text) {
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  return wordCount <= maxStopWordsWithoutWake() && isStopCommand(text);
+}
+
+function handleStopCommand({ sessionId, userId, text, wakeWordDetected = false, query = null, userDisplayName = null, channelId = null, source = 'voice' }) {
+  if (sessionId) cancelTtsForSession(sessionId, 'stopword');
+  broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+  logTranscriptEvent(sessionId ?? `text_${channelId ?? 'global'}`, 'stop_command', {
+    userId,
+    userDisplayName,
+    text,
+    source,
+    wakeWordDetected,
+    query,
+  });
+
+  if (sessionId) {
+    const session = sessions.get(BigInt(sessionId));
+    if (session) {
+      const interrupted = lastResponses.get(String(sessionId));
+      session.conversationHistory.push({
+        role: 'system',
+        content: interrupted
+          ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
+          : 'Der Sprecher hat die Wiedergabe gestoppt.',
+      });
+    }
+  }
+
+  broadcastToAllBots({
+    type: 'chat_message',
+    cmdId: randomUUID(),
+    channelId,
+    question: text,
+    userDisplayName,
+    assistantName: wakeWordName(),
+    isStop: true,
+  });
+  log('pipeline: stop command detected, playback cleared');
+}
+
+async function answerQuestion({
+  sessionId,
+  userId,
+  userDisplayName = null,
+  query,
+  transcript,
+  source = 'voice',
+  channelId = null,
+  tts = true,
+}) {
+  const turnId = randomUUID();
+  const sid = sessionId ? BigInt(sessionId) : null;
+  const history = sid
+    ? sessions.get(sid)?.conversationHistory
+    : sessionlessHistory(channelId ? `channel_${channelId}` : 'global');
+
+  if (!history) {
+    warn('pipeline: session not found', sessionId?.toString?.() ?? String(sessionId));
+    return;
+  }
+
+  let response;
+  try {
+    response = await chat(history, query);
+  } catch (e) {
+    warn('pipeline: llm error:', e.message);
+    return;
+  }
+
+  const { text: responseText, speakerId, model: ttsModel } = response;
+  logTranscriptEvent(sessionId ?? `text_${channelId ?? 'global'}`, 'assistant_response', {
+    turnId,
+    userId,
+    userDisplayName,
+    source,
+    channelId,
+    query,
+    text: responseText,
+    speakerId,
+    model: ttsModel,
+    ttsRequested: tts,
+  });
+
+  appendHistory(history, query, responseText);
+  if (sid) lastResponses.set(sid.toString(), responseText);
+
+  broadcastToAllBots({
+    type: 'chat_message',
+    cmdId: randomUUID(),
+    channelId,
+    question: transcript ?? query,
+    answer: responseText,
+    userDisplayName,
+    assistantName: wakeWordName(),
+    isStop: false,
+  });
+
+  if (!tts) return;
+  if (!sid) {
+    logTranscriptEvent(`text_${channelId ?? 'global'}`, 'tts_skipped', {
+      turnId,
+      reason: 'no active voice session',
+    });
+    return;
+  }
+
+  try {
+    await streamTtsToSession(sid, responseText, {
+      model: ttsModel,
+      speakerId,
+      turnId,
+    });
+  } catch (e) {
+    if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
+  }
+}
 
 // ── Main pipeline ────────────────────────────────────────────────────────────
 
-export async function runPipeline(sessionId, userId) {
+export async function runTextPipeline({
+  sessionId = null,
+  userId = '0',
+  userDisplayName = null,
+  question,
+  channelId = null,
+  tts = false,
+  source = 'text',
+} = {}) {
+  const query = String(question || '').trim();
+  if (!query) return;
+
+  const logSessionId = sessionId ?? `text_${channelId ?? 'global'}`;
+  logTranscriptEvent(logSessionId, 'text_query', {
+    userId,
+    userDisplayName,
+    channelId,
+    text: query,
+    ttsRequested: tts,
+    source,
+  });
+
+  if (maybeStopWithoutWake(query)) {
+    handleStopCommand({
+      sessionId,
+      userId,
+      userDisplayName,
+      channelId,
+      text: query,
+      source,
+    });
+    return;
+  }
+
+  const sid = sessionId ? BigInt(sessionId) : null;
+  if (sid) ensureSession(sid);
+
+  await answerQuestion({
+    sessionId,
+    userId,
+    userDisplayName,
+    channelId,
+    query,
+    transcript: query,
+    source,
+    tts,
+  });
+}
+
+export async function runPipeline(sessionId, userId, metadata = {}) {
   const key = `${sessionId}:${userId}`;
   if (activePipelines.has(key)) {
     debug('pipeline: aborting previous run for', key);
@@ -286,6 +479,7 @@ export async function runPipeline(sessionId, userId) {
     const fullTranscript = transcripts.join(' ');
     logTranscriptEvent(sessionId, 'user_transcript', {
       userId,
+      userDisplayName: metadata.userDisplayName ?? null,
       text: fullTranscript,
       chunks: transcripts,
     });
@@ -303,38 +497,20 @@ export async function runPipeline(sessionId, userId) {
     for (const chunk of transcripts) {
       const wordCount = chunk.trim().split(/\s+/).length;
       const wr        = detectWakeWord(chunk, wakeWord, fuzzy, maxPos);
-      const maxStopWords = Math.floor(numberEnv('STOP_WITHOUT_WAKE_MAX_WORDS', 5, 0));
-
       // Stop-command check (works with or without wake word).
       const isStop = (wr.detected && isStopCommand(wr.query)) ||
-                     (!wr.detected && wordCount <= maxStopWords && isStopCommand(chunk));
+                     (!wr.detected && wordCount <= maxStopWordsWithoutWake() && isStopCommand(chunk));
 
       if (isStop) {
-        cancelTtsForSession(sessionId, 'stopword');
-        broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
-        logTranscriptEvent(sessionId, 'stop_command', {
+        handleStopCommand({
+          sessionId,
           userId,
+          userDisplayName: metadata.userDisplayName ?? null,
           text: chunk,
           wakeWordDetected: wr.detected,
           query: wr.detected ? wr.query : null,
+          source: 'voice',
         });
-
-        const session = sessions.get(BigInt(sessionId));
-        if (session) {
-          const interrupted = lastResponses.get(String(sessionId));
-          session.conversationHistory.push({
-            role: 'system',
-            content: interrupted
-              ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
-              : 'Der Sprecher hat die Wiedergabe gestoppt.',
-          });
-        }
-
-        broadcastToAllBots({
-          type: 'chat_message', cmdId: randomUUID(),
-          question: chunk, isStop: true,
-        });
-        log('pipeline: stop command detected, playback cleared');
         return;
       }
 
@@ -354,50 +530,21 @@ export async function runPipeline(sessionId, userId) {
     log('pipeline: wake word detected, query=', JSON.stringify(query));
     logTranscriptEvent(sessionId, 'wakeword_query', {
       userId,
+      userDisplayName: metadata.userDisplayName ?? null,
       transcript,
       query,
     });
 
-    // 7. LLM.
-    const session = sessions.get(BigInt(sessionId));
-    if (!session) {
-      warn('pipeline: session not found', sessionId.toString());
-      return;
-    }
-
-    let response;
-    try {
-      response = await chat(session.conversationHistory, query);
-    } catch (e) {
-      warn('pipeline: llm error:', e.message);
-      return;
-    }
-
-    const { text: responseText, speakerId, model: ttsModel } = response;
-    logTranscriptEvent(sessionId, 'assistant_response', {
+    // 7. LLM + optional TTS.
+    await answerQuestion({
+      sessionId,
       userId,
+      userDisplayName: metadata.userDisplayName ?? null,
       query,
-      text: responseText,
-      speakerId,
-      model: ttsModel,
+      transcript,
+      source: 'voice',
+      tts: true,
     });
-
-    // Persist turn to history using the spoken text (not raw JSON).
-    session.conversationHistory.push({ role: 'user',      content: query        });
-    session.conversationHistory.push({ role: 'assistant', content: responseText });
-    lastResponses.set(String(sessionId), responseText);
-
-    // Always send the Q&A to the Discord text channel.
-    broadcastToAllBots({
-      type: 'chat_message', cmdId: randomUUID(),
-      question: transcript, answer: responseText, isStop: false,
-    });
-
-    try {
-      await streamTtsToSession(sessionId, responseText, { model: ttsModel, speakerId });
-    } catch (e) {
-      if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
-    }
   } finally {
     // Only clean up if this run is still the active one (a newer run may have replaced it).
     if (activePipelines.get(key) === ctrl) activePipelines.delete(key);

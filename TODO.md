@@ -24,24 +24,25 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 ## Phase 2 — Core Workflows
 
-- [ ] **Type-to-Ask (`/ask "Frage" tts:false`)** — Slash-Command für Text-Queries.
-  - Bot: neuer Slash-Command mit `question` (string, required) + `tts` (bool, default false)
-  - Bot: Handler sendet `text_query`-Message über Control-Plane
-  - Server: neue `runTextPipeline()` skippt STT, startet bei LLM, reuse `chat()` + `synthesize()` + History-Management
-  - History-Mixing: Text- und Voice-Queries teilen sich `conversationHistory`
+- [x] **Type-to-Ask (`/ask "Frage" tts:false`)** — Slash-Command und Mention-Trigger für Text-Queries.
+  - Bot: `/ask frage:<text> tts:<bool>` + `@Botname Frage`
+  - Bot: Handler sendet `text_query` über Control-Plane
+  - Server: `runTextPipeline()` skippt STT/Wake-Word und nutzt dieselbe LLM-/History-/TTS-Pipeline
+  - History-Mixing: Text- und Voice-Queries teilen sich bei aktiver Session `conversationHistory`
   - Sessionless erlaubt (Antwort nur als Discord-Text wenn Bot nicht im Voice-Channel)
 
-- [ ] **Server-Auto-Start via SSH bei `/join`** — Bot prüft Server-Erreichbarkeit, startet bei Bedarf via SSH.
-  - SSH-Infra existiert bereits (anderweitig genutzt) — kein WoL nötig
-  - Beim `/join`: Ping → falls offline: SSH-Aufruf von `Start-VoiceAssistant.ps1`
-  - Discord-Feedback: „Server wird gestartet, Moment …" → später „Bereit, Aufnahme läuft."
-  - Timeout-Handling: nach X Sekunden ohne Server → Offline-Cache-Modus, Hinweis im Chat
+- [x] **Server-Auto-Start via SSH bei `/join`** — Bot prüft Server-Erreichbarkeit, startet bei Bedarf via SSH.
+  - Beim `/join`: TCP-Probe → falls offline: `SERVER_START_CMD`
+  - Getestete Konfiguration: SSH auf Windows-Server, `Start-VoiceAssistant.ps1 -Mode silent`
+  - Discord-Feedback während Start/Wartezeit
+  - Timeout-Handling: nach 30 s ohne Server → Offline-Cache-Modus, Hinweis im Chat
   - Macht Feature `Autostart via Task Scheduler` (5.1) damit weitgehend obsolet
 
 - [ ] **Session-Log enriched (JSONL)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
-  - Erster Roh-Event-Stand existiert: `user_transcript`, `wakeword_query`, `assistant_response`, `stop_command`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`, `playback_stopped`
+  - Erster Roh-Event-Stand existiert: `user_transcript`, `text_query`, `wakeword_query`, `assistant_response`, `stop_command`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`, `playback_stopped`, `assistant_response_played`
   - Pro Turn finalisieren: Timestamp, Speaker-ID, ggf. Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
-  - Stop-Transcript später natürlich kürzen: `playback_stopped.msPlayed` gegen `tts_done.durationMs` schätzen und Assistant-Text mit `...` abschneiden
+  - Stop-Transcript: `assistant_response_played` wird bei Stop bereits aus Playback-Dauer approximiert und gekürzt geloggt
+  - User-Mapping noch offen: Discord-ID/Name → Spieler-/Charaktername, optional phonetischer Name für spätere Ausgabe
   - Optionale Bot-Events (join/leave, wer spricht wann)
   - Periodische Checkpoint-Snapshots (alle 30 min) — kompakter Kontext-Stand
   - Format-Standard hier festlegen, weil Phase-3-Finalize und Phase-4-RAG darauf aufbauen

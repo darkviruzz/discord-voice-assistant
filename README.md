@@ -89,6 +89,7 @@ SESSION_IDLE_HOURS=4
 
 SERVER_BASE_URL=ws://192.168.20.101:7440
 CONTROL_BEARER=changeme
+SERVER_START_CMD=ssh -i ~/.ssh/id_ed25519_va -o BatchMode=yes -o StrictHostKeyChecking=accept-new nogar@192.168.20.101 "powershell -ExecutionPolicy Bypass -File C:\Users\nogar\Programme\discord-voice-assistant\scripts\Start-VoiceAssistant.ps1 -Mode silent"
 
 UPLINK_CODEC=opus
 UPLINK_OPUS_BITRATE=32000
@@ -108,6 +109,7 @@ REWIND_MS=1000
 | `DEBUG` | — | Auf `1` setzen für ausführliche Logs (STT-Transkripte, Wake-Word-Ergebnis, LLM-Antworten). |
 | `SESSION_IDLE_HOURS` | `4` | Stunden Inaktivität bis zur automatischen Session-Finalisierung beim Serverneustart. |
 | `SERVER_BASE_URL` | — | Basis-URL des Servers, z. B. `ws://192.168.20.101:7440`. Bevorzugte Einstellung — überschreibt die Ableitung aus `CONTROL_WS_URL`. |
+| `SERVER_START_CMD` | — | Optionaler Startbefehl, den der Bot bei `/join` ausführt, wenn `SERVER_BASE_URL` nicht erreichbar ist. Getestet mit SSH auf den Windows-Server und `Start-VoiceAssistant.ps1 -Mode silent`. |
 | `UPLINK_PROTO` | `ws` | Protokoll für den Uplink-WebSocket. `ws` für LAN, `wss` für TLS. |
 | `UPLINK_HOST` | — | IP-Adresse oder Hostname des Servers. Nur nötig wenn `SERVER_BASE_URL` nicht gesetzt. |
 | `UPLINK_PORT` | — | TCP-Port des Servers (z. B. `7440`). Nur nötig wenn `SERVER_BASE_URL` nicht gesetzt. |
@@ -210,13 +212,15 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 Während Online-Live schreibt der Server rohe Events nach `TRANSCRIPT_DIR` (Default `./transcripts`) in `session_<sessionId>.jsonl`. Aktuell geloggt werden u. a.:
 
 * `user_transcript` — rohes STT-Ergebnis pro abgeschlossener Utterance
+* `text_query` — Textfrage aus `/ask` oder Mention-Trigger
 * `wakeword_query` — erkannter Wake-Word-Trigger und extrahierte Query
 * `assistant_response` — rohe LLM-Antwort inklusive Voice-Metadaten
 * `tts_start`, `tts_done`, `tts_cancel`, `tts_error` — TTS-Lifecycle
 * `stop_command` — erkannte Stop-Phrase
 * `playback_stopped` — Bot-Feedback mit `framesPlayed` und `msPlayed` nach Stop
+* `assistant_response_played` — bei Stop geschätzter tatsächlich gehörter Antworttext, bei Bedarf mit `...` gekürzt
 
-Die spätere gekürzte Assistant-Antwort im finalen Transcript kann daraus heuristisch berechnet werden (`msPlayed / tts_done.durationMs`).
+Die gekürzte Assistant-Antwort wird heuristisch berechnet (`msPlayed / durationMs`) und am nächsten folgenden Whitespace geschnitten. Wenn weniger als 15 Zeichen oder weniger als 5 % Rest übrig bleiben, wird nicht gekürzt.
 
 ### Piper Speaker-IDs (de_DE-thorsten_emotional-medium)
 
@@ -333,6 +337,14 @@ SYSTEM_PROMPT_FILE=./prompt.txt
 * Bot verbindet optional `/uplink` (per-Speaker), `/downlink` (Abo), `/control`.
 * Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames über den JSON-Downlink an den Bot.
 * Wake-Word sprechen: *„Rabenauge, wer ist Baron Kelthur?"* → Bot antwortet per Sprache im Voice-Channel.
+* Textfrage ohne Vorlesen: `/ask frage:Wer ist Baron Kelthur?` oder `@Botname Wer ist Baron Kelthur?`.
+* Textfrage mit Voice-Ausgabe: `/ask frage:Wer ist Baron Kelthur? tts:true`. Der Textpfad nutzt dieselbe LLM-/History-Pipeline wie Wake-Word-Anfragen, überspringt aber STT/Wake-Word-Erkennung.
+
+Nach Änderungen an Slash-Commands muss der Bot neu registriert werden:
+
+```bash
+npm run register
+```
 
 ## AI Services Setup — Windows 11 / AMD GPU (RX 6800 XT)
 

@@ -17,7 +17,7 @@ import { ensureServerReachable } from './serverAutoStart.js';
 import * as transport from './transport/index.js';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages],
   partials: [Partials.Channel]
 });
 
@@ -40,6 +40,21 @@ function setBotStatus(serverVersion) {
   } catch (e) {
     warn('setActivity failed:', e.message);
   }
+}
+
+function displayNameFor(member, user) {
+  return member?.displayName || member?.nick || user?.globalName || user?.username || user?.id || 'Spieler';
+}
+
+function askServer({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
+  return transport.textQuery({
+    question,
+    tts,
+    channelId,
+    userId,
+    userDisplayName,
+    source,
+  });
 }
 
 async function recoverOldSessions() {
@@ -66,21 +81,48 @@ client.once('clientReady', async () => {
     setBotStatus(info.connected ? info.version : null);
   });
 
-  transport.onChatMessage((msg) => {
-    if (!_textChannel) return;
+  transport.onChatMessage(async (msg) => {
+    const targetChannel = msg.channelId
+      ? await client.channels.fetch(msg.channelId).catch(() => null)
+      : _textChannel;
+    if (!targetChannel?.send) return;
+    const speaker = msg.userDisplayName || 'Spieler';
+    const assistant = msg.assistantName || 'Rabenauge';
     let text;
     if (msg.isStop) {
-      text = `**[Spieler]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
+      text = `**[${speaker}]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
     } else {
-      text = `**[Spieler]** ${msg.question}\n**[Rabenauge]** ${msg.answer ?? ''}`;
+      text = `**[${speaker}]** ${msg.question}\n**[${assistant}]** ${msg.answer ?? ''}`;
     }
-    _textChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
+    targetChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
   });
 });
 
 client.on('interactionCreate', async (i) => {
   try {
     if (!i.isChatInputCommand()) return;
+
+    if (i.commandName === 'ask') {
+      _textChannel = i.channel;
+      const question = i.options.getString('frage', true).trim();
+      if (!question) {
+        return i.reply({ content: 'Bitte eine Frage angeben.', flags: MessageFlags.Ephemeral });
+      }
+      const tts = i.options.getBoolean('tts') ?? false;
+      const member = i.member;
+      const sent = askServer({
+        question,
+        tts,
+        channelId: i.channelId,
+        userId: i.user.id,
+        userDisplayName: displayNameFor(member, i.user),
+        source: 'slash',
+      });
+      if (!sent) {
+        return i.reply({ content: 'Server ist noch nicht verbunden. Bitte gleich erneut versuchen oder /join nutzen.', flags: MessageFlags.Ephemeral });
+      }
+      return i.reply({ content: tts ? 'Frage gesendet. Antwort wird auch vorgelesen.' : 'Frage gesendet.', flags: MessageFlags.Ephemeral });
+    }
 
     if (i.commandName === 'join') {
       _textChannel = i.channel;
@@ -197,7 +239,12 @@ client.on('interactionCreate', async (i) => {
           debug('already recording, skip start for', userId);
           return;
         }
-        const user = client.users.cache.get(userId) || { id: userId, username: 'unknown' };
+        const discordUser = client.users.cache.get(userId) || { id: userId, username: 'unknown' };
+        const guildMember = channel.guild.members.cache.get(userId);
+        const user = {
+          id: userId,
+          username: displayNameFor(guildMember, discordUser),
+        };
         const rec = new UtteranceRecorder(sessions.active, connection, receiver, user, {
           silenceMs: 1500,
           onChunkDone: (u) => {
@@ -250,6 +297,32 @@ client.on('interactionCreate', async (i) => {
   } catch (e) {
     error(e);
     try { await (i.deferred || i.replied ? i.followUp('Fehler.') : i.reply('Fehler.')); } catch {}
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  try {
+    if (!client.user || message.author?.bot) return;
+    if (!message.mentions.users.has(client.user.id)) return;
+
+    const mentionRe = new RegExp(`<@!?${client.user.id}>`, 'g');
+    const question = message.content.replace(mentionRe, '').replace(/^[\s,;:!?]+/, '').trim();
+    if (!question) return;
+
+    _textChannel = message.channel;
+    const sent = askServer({
+      question,
+      tts: false,
+      channelId: message.channelId,
+      userId: message.author.id,
+      userDisplayName: displayNameFor(message.member, message.author),
+      source: 'mention',
+    });
+    if (!sent) {
+      await message.reply('Server ist noch nicht verbunden. Bitte gleich erneut versuchen oder /join nutzen.');
+    }
+  } catch (e) {
+    warn('messageCreate ask failed:', e.message);
   }
 });
 

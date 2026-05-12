@@ -19,6 +19,24 @@ const commands = [
     name: 'save-session',
     description: 'Finalisiert die aktuelle Session und mischt eine Session-Datei',
   },
+  {
+    name: 'ask',
+    description: 'Stellt Rabenauge eine Textfrage',
+    options: [
+      {
+        name: 'frage',
+        description: 'Deine Frage',
+        type: 3,
+        required: true,
+      },
+      {
+        name: 'tts',
+        description: 'Antwort zusätzlich im Voice-Channel vorlesen',
+        type: 5,
+        required: false,
+      },
+    ],
+  },
 ];
 
 async function main() {

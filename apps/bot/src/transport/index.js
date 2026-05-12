@@ -132,9 +132,9 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
 }
 
-export function sendUtteranceEnd({ sessionId, userId, durationMs }) {
+export function sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName }) {
   if (!_instance) return;
-  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs }); }
+  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName }); }
   catch (e) { warn('transport.sendUtteranceEnd:', e.message); }
 }
 
@@ -147,6 +147,25 @@ export function debugTts({ sessionId, text } = {}) {
   }
   try { _instance.control.debugTts({ sessionId: sid, text }); }
   catch (e) { warn('transport.debugTts:', e.message); }
+}
+
+export function textQuery({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' } = {}) {
+  if (!_instance) return false;
+  const sessionId = _instance.currentSessionId ?? undefined;
+  try {
+    return _instance.control.textQuery({
+      sessionId,
+      question,
+      tts,
+      channelId,
+      userId,
+      userDisplayName,
+      source,
+    });
+  } catch (e) {
+    warn('transport.textQuery:', e.message);
+    return false;
+  }
 }
 
 export function setVoiceConnection(conn) {

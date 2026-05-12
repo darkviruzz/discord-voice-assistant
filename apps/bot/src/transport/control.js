@@ -82,12 +82,26 @@ export class ControlClient extends EventEmitter {
 
   // Notify the server that a speaker's utterance has finished.
   // { sessionId: string, userId: string, durationMs: number }
-  sendUtteranceEnd({ sessionId, userId, durationMs }) {
-    this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs });
+  sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName }) {
+    this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs, userDisplayName });
   }
 
   debugTts({ sessionId, text }) {
     this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
+  }
+
+  textQuery({ sessionId, question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
+    return this._sendIfReady({
+      type: 'text_query',
+      cmdId: randomUUID(),
+      sessionId,
+      question,
+      tts,
+      channelId,
+      userId,
+      userDisplayName,
+      source,
+    });
   }
 
   _sendIfReady(obj) {

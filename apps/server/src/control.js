@@ -4,8 +4,8 @@ import { log, debug, warn } from './logger.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
-import { runPipeline } from './pipeline.js';
-import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession } from './ttsStream.js';
+import { runPipeline, runTextPipeline } from './pipeline.js';
+import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections } from './broadcast.js';
 import { getVersion } from './version.js';
@@ -105,6 +105,7 @@ export function initControlWSS({ bearer } = {}) {
             // Bot acknowledges a server→bot command (e.g. set_params routed from a controller).
             if (msg.playback?.id && msg.playback?.sessionId) {
               logTranscriptEvent(msg.playback.sessionId, 'playback_stopped', msg.playback);
+              recordPlaybackStopped(msg.playback.sessionId, msg.playback);
               debug('control: playback stopped', JSON.stringify(msg.playback));
             }
             debug('control: bot ack', msg.cmdId, msg.ok);
@@ -135,6 +136,28 @@ export function initControlWSS({ bearer } = {}) {
               : defaultDebugTtsText();
             streamTtsToSession(sid, text).catch((e) => warn('debug_tts failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'debug_tts' });
+            return;
+          }
+          case 'text_query': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            const question = typeof msg.question === 'string' ? msg.question.trim() : '';
+            if (!question) {
+              send(ws, { type: 'error', code: 'EMPTY_QUERY', cmdId: msg.cmdId });
+              return;
+            }
+            const sid = typeof msg.sessionId === 'string' && /^\d+$/.test(msg.sessionId)
+              ? msg.sessionId
+              : (activeSessionId ? activeSessionId.toString() : null);
+            runTextPipeline({
+              sessionId: sid,
+              userId: typeof msg.userId === 'string' ? msg.userId : '0',
+              userDisplayName: typeof msg.userDisplayName === 'string' ? msg.userDisplayName : null,
+              channelId: typeof msg.channelId === 'string' ? msg.channelId : null,
+              question,
+              tts: msg.tts === true,
+              source: msg.source === 'mention' ? 'mention' : 'slash',
+            }).catch((e) => warn('text_query failed:', e.message));
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'text_query' });
             return;
           }
           case 'set_params':
@@ -173,7 +196,9 @@ export function initControlWSS({ bearer } = {}) {
             const uid = BigInt(msg.userId ?? '0');
             log('control: utterance_end sid=', sid.toString(), 'userId=', uid.toString(), 'durationMs=', msg.durationMs);
             // Fire-and-forget — pipeline errors are logged internally.
-            runPipeline(sid, uid).catch((e) => warn('pipeline error:', e.message));
+            runPipeline(sid, uid, {
+              userDisplayName: typeof msg.userDisplayName === 'string' ? msg.userDisplayName : null,
+            }).catch((e) => warn('pipeline error:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'utterance_end' });
             return;
           }

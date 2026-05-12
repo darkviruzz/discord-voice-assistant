@@ -68,7 +68,7 @@ export class UtteranceRecorder {
           file,
         };
         this.onChunkDone(rec);
-        sendUtteranceEnd({ sessionId, userId, durationMs });
+        sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName: this.user.username });
         debug('recorder: utterance_end sent userId=', userId, 'durationMs=', durationMs);
         resolve(rec);
       });

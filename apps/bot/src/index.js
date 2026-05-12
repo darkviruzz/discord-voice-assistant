@@ -17,7 +17,12 @@ import { ensureServerReachable } from './serverAutoStart.js';
 import * as transport from './transport/index.js';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Channel]
 });
 
@@ -199,7 +204,10 @@ client.on('interactionCreate', async (i) => {
       transport.sessionStart({
         sessionId: sessions.wireSessionId(),
         guildId: channel.guild.id,
+        guildName: channel.guild.name,
         channelId: channel.id,
+        channelName: channel.name,
+        botVersion: getVersion(),
         startedAt: sessions.active.startedAt,
       });
       transport.setVoiceConnection(connection);

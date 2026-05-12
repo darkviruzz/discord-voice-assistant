@@ -21,6 +21,9 @@ export class DownlinkClient {
     this._speakTimers = new Map();
     this._activeSpeakers = new Set();
     this._resumeTimer = null;
+    this._playbackEventHandler = () => {};
+    this._pauseStartedAt = null;
+    this._pauseUserId = null;
   }
 
   open(sessionId) {
@@ -104,6 +107,8 @@ export class DownlinkClient {
       clearTimeout(this._resumeTimer);
       this._resumeTimer = null;
     }
+    this._pauseStartedAt = null;
+    this._pauseUserId = null;
 
     this._playback.stop();
     this._sessionId = null;
@@ -112,6 +117,10 @@ export class DownlinkClient {
 
   setVoiceConnection(conn) {
     this._playback.subscribe(conn);
+  }
+
+  setPlaybackEventHandler(handler) {
+    this._playbackEventHandler = typeof handler === 'function' ? handler : () => {};
   }
 
   clearVoiceConnection() {
@@ -154,7 +163,17 @@ export class DownlinkClient {
     const timer = setTimeout(() => {
       this._speakTimers.delete(_userId);
       this._activeSpeakers.add(_userId);
-      this._playback.pause(`speaker ${_userId}`);
+      const stats = this._playback.pause(`speaker ${_userId}`);
+      if (stats) {
+        this._pauseStartedAt = Date.now();
+        this._pauseUserId = _userId;
+        this._emitPlaybackEvent('playback_paused', {
+          interruptedByUserId: _userId,
+          interruptMinMs: this.interruptMinMs,
+          rewindMs: this.rewindMs,
+          ...stats,
+        });
+      }
     }, this.interruptMinMs);
     this._speakTimers.set(_userId, timer);
   }
@@ -180,8 +199,33 @@ export class DownlinkClient {
     if (this._resumeTimer) clearTimeout(this._resumeTimer);
     this._resumeTimer = setTimeout(() => {
       this._resumeTimer = null;
-      this._playback.resume('speakers ended');
+      const pauseStartedAt = this._pauseStartedAt;
+      const pauseUserId = this._pauseUserId;
+      const stats = this._playback.resume('speakers ended');
+      if (stats) {
+        this._emitPlaybackEvent('playback_resumed', {
+          interruptedByUserId: pauseUserId,
+          pauseDurationMs: pauseStartedAt ? Date.now() - pauseStartedAt : null,
+          resumeGateMs: this.resumeGateMs,
+          rewindMs: this.rewindMs,
+          rewindFrames: stats.rewindFrames,
+          rewoundMs: (stats.rewindFrames ?? 0) * 20,
+          ...stats,
+        });
+      }
+      this._pauseStartedAt = null;
+      this._pauseUserId = null;
     }, this.resumeGateMs);
+  }
+
+  _emitPlaybackEvent(eventType, payload) {
+    const sessionId = this._sessionId?.toString?.() ?? String(this._sessionId ?? '');
+    if (!sessionId || !payload?.id) return;
+    this._playbackEventHandler({
+      eventType,
+      sessionId,
+      ...payload,
+    });
   }
 
   _handleMessage(msg) {

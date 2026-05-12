@@ -128,24 +128,27 @@ export class TtsPlayback {
   }
 
   pause(reason = 'interrupt') {
-    if (!this.currentId || this.paused) return;
+    if (!this.currentId || this.paused) return null;
     this.paused = true;
     this.pauseLogged = false;
     debug('tts-playback: paused id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
+    return this.stats();
   }
 
   resume(reason = 'resume') {
-    if (!this.paused) return;
+    if (!this.paused) return null;
     this.paused = false;
     this.pauseLogged = false;
     debug('tts-playback: resumed id=', this.currentId, 'reason=', reason, 'queue=', this.queue.length);
-    this._rewind();
+    const rewindFrames = this._rewind();
+    const stats = this.stats();
     if (!this.active && this.currentId && (this.queue.length > 0 || !this.done)) {
       debug('tts-playback: restarting player after pause idle');
       this.start();
-      return;
+      return { ...stats, rewindFrames };
     }
     this._notify();
+    return { ...stats, rewindFrames };
   }
 
   start() {
@@ -232,10 +235,11 @@ export class TtsPlayback {
 
   _rewind() {
     const frames = Math.min(Math.ceil(this.rewindMs / 20), this.history.length);
-    if (frames <= 0) return;
+    if (frames <= 0) return 0;
     const rewindFrames = this.history.slice(-frames);
     this.queue.unshift(...rewindFrames);
     debug(`tts-playback: rewound ${frames} frames (${frames * 20} ms), queue=${this.queue.length}`);
+    return frames;
   }
 
   _trimHistory() {

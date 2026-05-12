@@ -15,10 +15,11 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
   - `apps/bot/src/transport/control.js`: `hello`-Message auswerten und Server-Version weitergeben
   - Hilfsfunktion `getVersionString()` jeweils einmal in bot und server
 
-- [ ] **Whisper `temperature=0.2` + `no_speech_prob`-Filter (Kombo)** — bereits informell verifiziert: T>0.0 liefert deutlich korrektere `no_speech_prob`-Werte. Reasonable conservative estimates ohne weiteren Test-Aufwand:
-  - Whisper-Aufruf-Parameter: `temperature: 0.2`
-  - In `apps/server/src/stt.js` (oder pipeline): wenn `no_speech_prob > 0.67` → Transkript verwerfen, leeren String zurückgeben
-  - Spätere Feintuning-Tests (Test-Matrix mit mehr Audio-Samples) verschoben auf „Optimierungen"
+- [x] **Whisper `temperature` + `no_speech_prob`-Diagnostik** — T>0.0 liefert deutlich korrektere `no_speech_prob`-Werte.
+  - Whisper-Aufruf-Parameter: `temperature` über `WHISPER_TEMPERATURE`
+  - Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`
+  - `noSpeechProbAvg`/`noSpeechProbMax` werden pro `user_transcript` im JSONL gespeichert
+  - Spätere Feintuning-/Filtertests bleiben Aufgabe der Finalize-/Offline-Pipeline
 
 ---
 
@@ -38,14 +39,15 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
   - Timeout-Handling: nach 30 s ohne Server → Offline-Cache-Modus, Hinweis im Chat
   - Macht Feature `Autostart via Task Scheduler` (5.1) damit weitgehend obsolet
 
-- [ ] **Session-Log enriched (JSONL)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
-  - Erster Roh-Event-Stand existiert: `user_transcript`, `text_query`, `wakeword_query`, `assistant_response`, `stop_command`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`, `playback_stopped`, `assistant_response_played`
-  - Pro Turn finalisieren: Timestamp, Speaker-ID, ggf. Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
-  - Stop-Transcript: `assistant_response_played` wird bei Stop bereits aus Playback-Dauer approximiert und gekürzt geloggt
-  - User-Mapping noch offen: Discord-ID/Name → Spieler-/Charaktername, optional phonetischer Name für spätere Ausgabe
-  - Optionale Bot-Events (join/leave, wer spricht wann)
-  - Periodische Checkpoint-Snapshots (alle 30 min) — kompakter Kontext-Stand
-  - Format-Standard hier festlegen, weil Phase-3-Finalize und Phase-4-RAG darauf aufbauen
+- [x] **Session-Log enriched (JSONL Schema v1)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
+  - Common fields: `tsMs`, `type`, `sessionId`
+  - `session_meta` wird einmal pro Session geloggt: Discord-Kontext, Bot-/Server-Version, LLM-/STT-/TTS-Konfig, Wake-Word, Stop-Phrases, vorbereitetes `users`-Mapping
+  - `user_transcript` enthält `startTsMs`, `endTsMs`, `durationMs`, STT-Chunks und `no_speech_prob`-Diagnostik; auch leere Whisper-Texte behalten Diagnostik; kein separates `utterance_end` im JSONL
+  - Turn-/TTS-Lifecycle: `text_query`, `wakeword_query`, `assistant_response`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`
+  - Unterbrechungen: `playback_paused`/`playback_resumed` mit `framesPlayed`, `msPlayed`, Pause-/Resume-/Rewind-Daten
+  - Stop-Transcript: `assistant_response_played` wird bei Stop aus Playback-Dauer approximiert und natürlich gekürzt geloggt
+  - Bewusst vorbereitet: `users`-Mapping für Discord-ID/Name → Spieler-/Charakter-/phonetischer Name; konkrete Mapping-Konfig später
+  - Bewusst nicht enthalten: separate Join-/Leave-/Speaking-Dauer-Events, damit das Textlog nicht mit Transportereignissen überfüllt
 
 ---
 

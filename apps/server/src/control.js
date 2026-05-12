@@ -13,6 +13,13 @@ import { getVersion } from './version.js';
 const PROTO_VERSION = 1;
 const SERVER_ID = randomUUID();
 
+function envList(name, fallback = []) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const values = raw.split(',').map((item) => item.trim()).filter(Boolean);
+  return values.length > 0 ? values : fallback;
+}
+
 // Default playout/gating params advertised to bots; bots may apply them
 // locally. These mirror the env-documented defaults from the README.
 function serverParams() {
@@ -27,6 +34,55 @@ function serverParams() {
     hbIntervalMs:  15000,
   };
 }
+
+function logSessionMeta(sessionId, msg) {
+  const session = ensureSession(sessionId);
+  if (session.metaLogged) return;
+  session.metaLogged = true;
+  logTranscriptEvent(sessionId, 'session_meta', {
+    schemaVersion: 1,
+    protoVersion: PROTO_VERSION,
+    guildId: msg.guildId ?? null,
+    guildName: msg.guildName ?? null,
+    channelId: msg.channelId ?? null,
+    channelName: msg.channelName ?? null,
+    botVersion: msg.botVersion ?? null,
+    serverVersion: getVersion(),
+    llm: {
+      provider: 'ollama',
+      url: process.env.OLLAMA_URL ?? 'http://localhost:11434',
+      model: process.env.OLLAMA_MODEL ?? 'llama3',
+      historyTurns: Number(process.env.HISTORY_TURNS ?? 6),
+      systemPromptFile: process.env.SYSTEM_PROMPT_FILE ?? null,
+      systemPromptInline: !!process.env.SYSTEM_PROMPT,
+    },
+    stt: {
+      provider: 'whisper.cpp',
+      url: process.env.WHISPER_URL ?? 'http://localhost:8080',
+      language: process.env.WHISPER_LANGUAGE ?? 'auto',
+      temperature: Number(process.env.WHISPER_TEMPERATURE ?? 0.2),
+      noSpeechProbStored: true,
+      noSpeechProbFiltersLive: false,
+      maxChunkSeconds: Number(process.env.STT_MAX_CHUNK_SECONDS ?? 30),
+      silenceThresh: Number(process.env.STT_SILENCE_THRESH ?? 300),
+    },
+    tts: {
+      provider: process.env.TTS_PROVIDER ?? 'piper',
+      url: process.env.TTS_URL ?? 'http://localhost:5000',
+    },
+    wakeword: {
+      word: process.env.WAKE_WORD ?? 'Rabenauge',
+      fuzzy: (process.env.WAKE_WORD_FUZZY ?? 'true') !== 'false',
+      position: Number(process.env.WAKE_WORD_POSITION ?? 3),
+    },
+    stopPhrases: envList('STOP_PHRASES', [
+      'stop', 'stopp', 'abbrechen', 'beenden', 'hör auf', 'aufhören', 'halt', 'halte an', 'halte ein',
+    ]),
+    stopWithoutWakeMaxWords: Number(process.env.STOP_WITHOUT_WAKE_MAX_WORDS ?? 5),
+    users: {},
+  });
+}
+
 
 function send(ws, obj) {
   if (ws.readyState !== ws.OPEN) return;
@@ -80,6 +136,7 @@ export function initControlWSS({ bearer } = {}) {
             }
             activeSessionId = BigInt(msg.sessionId);
             ensureSession(activeSessionId);
+            logSessionMeta(activeSessionId, msg);
             log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
@@ -186,6 +243,18 @@ export function initControlWSS({ bearer } = {}) {
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: msg.type });
             return;
           }
+          case 'playback_event': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            const eventType = msg.eventType === 'playback_resumed' ? 'playback_resumed' : 'playback_paused';
+            const { type, cmdId, eventType: _eventType, ...fields } = msg;
+            logTranscriptEvent(msg.sessionId, eventType, fields);
+            send(ws, { type: 'ack', cmdId, ok: true, op: eventType });
+            return;
+          }
           case 'utterance_end': {
             if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED' }); return; }
             if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
@@ -198,6 +267,9 @@ export function initControlWSS({ bearer } = {}) {
             // Fire-and-forget — pipeline errors are logged internally.
             runPipeline(sid, uid, {
               userDisplayName: typeof msg.userDisplayName === 'string' ? msg.userDisplayName : null,
+              startTsMs: typeof msg.startTsMs === 'number' ? msg.startTsMs : null,
+              endTsMs: typeof msg.endTsMs === 'number' ? msg.endTsMs : null,
+              durationMs: typeof msg.durationMs === 'number' ? msg.durationMs : null,
             }).catch((e) => warn('pipeline error:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'utterance_end' });
             return;

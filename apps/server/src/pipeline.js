@@ -216,7 +216,42 @@ function stitchOverlap(t1, t2) {
   return t1.trim() + ' ' + t2.trim();
 }
 
-// Transcribe PCM split at silence boundaries. Returns one string per logical chunk.
+function summarizeStt(chunks, chunkResults) {
+  let weightedNoSpeech = 0;
+  let totalWeight = 0;
+  let noSpeechProbMax = null;
+
+  for (const result of chunkResults) {
+    const avg = result.meta?.noSpeechProbAvg;
+    if (typeof avg !== 'number') continue;
+    const weight = Math.max(1, result.text.length || result.durationMs || 1);
+    weightedNoSpeech += avg * weight;
+    totalWeight += weight;
+    const max = result.meta?.noSpeechProbMax;
+    if (typeof max === 'number') noSpeechProbMax = noSpeechProbMax === null ? max : Math.max(noSpeechProbMax, max);
+  }
+
+  return {
+    provider: 'whisper.cpp',
+    noSpeechProbAvg: totalWeight > 0 ? weightedNoSpeech / totalWeight : null,
+    noSpeechProbMax,
+    chunkDurationsMs: chunks.map((chunk) => Math.round((chunk.pcm.length / 2 / SAMPLE_RATE) * 1000)),
+    splitTypes: chunks.map((chunk) => chunk.split),
+    chunks: chunkResults.map((result, i) => ({
+      index: i,
+      durationMs: result.durationMs,
+      splitType: chunks[i]?.split ?? 'unknown',
+      hasOverlap: !!chunks[i]?.hasOverlap,
+      textLength: result.text.length,
+      segmentCount: result.meta?.segmentCount ?? 0,
+      noSpeechProbAvg: result.meta?.noSpeechProbAvg ?? null,
+      noSpeechProbMax: result.meta?.noSpeechProbMax ?? null,
+      language: result.meta?.language ?? null,
+    })),
+  };
+}
+
+// Transcribe PCM split at silence boundaries. Returns text chunks plus STT metadata.
 async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
   logSilenceSplitDebug(pcm48k, chunks);
@@ -224,16 +259,23 @@ async function transcribeChunked(pcm48k) {
     log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
   }
   const parts = [];
+  const chunkResults = [];
   for (const { pcm, hasOverlap } of chunks) {
-    const t = await transcribe(pcmToWav(pcm));
-    if (!t) continue;
+    const { text, meta } = await transcribe(pcmToWav(pcm));
+    const result = {
+      text,
+      meta,
+      durationMs: Math.round((pcm.length / 2 / SAMPLE_RATE) * 1000),
+    };
+    chunkResults.push(result);
+    if (!text) continue;
     if (hasOverlap && parts.length > 0) {
-      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], t);
+      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], text);
     } else {
-      parts.push(t);
+      parts.push(text);
     }
   }
-  return parts;
+  return { transcripts: parts, stt: summarizeStt(chunks, chunkResults) };
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -463,15 +505,13 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     // 3. STT — split at silence boundaries, transcribe each chunk independently.
     let transcripts;
+    let stt;
     try {
-      transcripts = await transcribeChunked(pcm48k);
+      const result = await transcribeChunked(pcm48k);
+      transcripts = result.transcripts;
+      stt = result.stt;
     } catch (e) {
       warn('pipeline: stt error:', e.message);
-      return;
-    }
-
-    if (transcripts.length === 0) {
-      debug('pipeline: empty transcript, skipping');
       return;
     }
 
@@ -480,9 +520,18 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     logTranscriptEvent(sessionId, 'user_transcript', {
       userId,
       userDisplayName: metadata.userDisplayName ?? null,
+      startTsMs: metadata.startTsMs ?? null,
+      endTsMs: metadata.endTsMs ?? null,
+      durationMs: metadata.durationMs ?? null,
       text: fullTranscript,
       chunks: transcripts,
+      stt,
     });
+
+    if (!fullTranscript) {
+      debug('pipeline: empty transcript, skipping wake-word processing');
+      return;
+    }
 
     // 4. Read wake-word config.
     const wakeWord = process.env.WAKE_WORD        ?? 'Rabenauge';

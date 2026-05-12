@@ -124,6 +124,8 @@ REWIND_MS=1000
 | `RESUME_GATE_MS` | `1200` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Wird bei erneuter User-Sprache während Pause neu gestartet. |
 | `REWIND_MS` | `1000` | Beim Fortsetzen nach einer Unterbrechung werden so viele Millisekunden aus der Playback-History erneut vor die Queue gelegt. |
 
+Für den Mention-Trigger `@Botname Frage` muss im Discord Developer Portal der privilegierte **Message Content Intent** für den Bot aktiviert sein. Der Slash-Command `/ask` funktioniert unabhängig davon.
+
 ### Server – `apps/server/.env`
 
 ```env
@@ -136,7 +138,9 @@ DEBUG=1
 WHISPER_URL=http://localhost:8080
 WHISPER_LANGUAGE=de
 WHISPER_TEMPERATURE=0.1
-WHISPER_NO_SPEECH_THRESHOLD=0.67
+# no_speech_prob wird gespeichert, aber im Live-Pfad nicht verworfen.
+# Optionaler Zukunftswert fuer Finalize/offline-Filtertests:
+# WHISPER_NO_SPEECH_THRESHOLD=0.67
 STT_MAX_CHUNK_SECONDS=30
 STT_SILENCE_THRESH=300
 
@@ -172,7 +176,7 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 | `WHISPER_URL` | `http://localhost:8080` | URL des whisper.cpp HTTP-Servers (`/inference`-Endpoint). |
 | `WHISPER_LANGUAGE` | `auto` | Sprache für Whisper. `de` für Deutsch, `en` für Englisch, `auto` für automatische Erkennung. `auto` ist etwas langsamer. |
 | `WHISPER_TEMPERATURE` | `0.2` | Sampling-Temperature für Whisper. Lokale `.env.example` nutzt konservativ `0.1`; Werte >0 liefern brauchbarere `no_speech_prob`-Werte als deterministisches `0`. |
-| `WHISPER_NO_SPEECH_THRESHOLD` | `0.67` | Length-weighted Durchschnitt über Whisper-`no_speech_prob`. Transkripte oberhalb des Thresholds werden als Geräusch verworfen. |
+| `WHISPER_NO_SPEECH_THRESHOLD` | — | Der Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`; die Werte werden im JSONL gespeichert. Ein Threshold ist nur als späterer Finalize-/Offline-Filter vorgesehen. |
 | `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks. Längere Utterances werden an Stille geteilt; wenn keine passende Stille gefunden wird, wird mit `OVERLAP=2s` forced gesplittet. |
 | `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
 
@@ -209,18 +213,42 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 
 ### Live-JSONL-Events
 
-Während Online-Live schreibt der Server rohe Events nach `TRANSCRIPT_DIR` (Default `./transcripts`) in `session_<sessionId>.jsonl`. Aktuell geloggt werden u. a.:
+Während Online-Live schreibt der Server rohe Events nach `TRANSCRIPT_DIR` (Default `./transcripts`) in `session_<sessionId>.jsonl`. Jede Zeile ist ein eigenständiges JSON-Objekt mit gemeinsamen Feldern:
 
-* `user_transcript` — rohes STT-Ergebnis pro abgeschlossener Utterance
-* `text_query` — Textfrage aus `/ask` oder Mention-Trigger
-* `wakeword_query` — erkannter Wake-Word-Trigger und extrahierte Query
-* `assistant_response` — rohe LLM-Antwort inklusive Voice-Metadaten
-* `tts_start`, `tts_done`, `tts_cancel`, `tts_error` — TTS-Lifecycle
-* `stop_command` — erkannte Stop-Phrase
-* `playback_stopped` — Bot-Feedback mit `framesPlayed` und `msPlayed` nach Stop
-* `assistant_response_played` — bei Stop geschätzter tatsächlich gehörter Antworttext, bei Bedarf mit `...` gekürzt
+```json
+{"tsMs":1778600001000,"type":"user_transcript","sessionId":"1778422813219"}
+```
+
+`tsMs` ist ein absoluter Unix-Zeitstempel in Millisekunden und gilt für alle Event-Typen. Zusätzliche relative Zeitfelder werden bewusst vermieden, solange eine absolute Zeitangabe reicht.
+
+#### Schema v1
+
+* `session_meta` — einmal pro Session, direkt nach `session_start`. Enthält statische Session-Konfiguration: Discord-Guild/Channel, Bot-/Server-Version, LLM-/STT-/TTS-Konfiguration, Wake-Word, Stop-Phrases und ein vorbereitetes `users`-Objekt. Dieses Event macht spätere Finalize-/RAG-Schritte reproduzierbar, auch wenn `.env` oder Prompts später geändert wurden.
+* `user_transcript` — eine Zeile pro abgeschlossener User-Audioaufnahme nach erfolgreichem STT-Aufruf. Enthält `userId`, `userDisplayName`, `startTsMs`, `endTsMs`, `durationMs`, `text`, `chunks` und `stt`. Wenn Whisper leeren Text liefert, bleibt `text` leer, aber die STT-Diagnostik wird gespeichert. Ein separates `utterance_end`-Event wird nicht ins JSONL geschrieben, damit das Transkript nicht mit Transportereignissen verstopft.
+* `text_query` — Textfrage aus `/ask` oder Mention-Trigger. Der Mention-Trigger benötigt in Discord den Message-Content-Intent.
+* `wakeword_query` — erkannter Wake-Word-Trigger und extrahierte Query.
+* `assistant_response` — rohe LLM-Antwort inklusive `turnId`, Text und Voice-Metadaten.
+* `tts_start`, `tts_done`, `tts_cancel`, `tts_error` — TTS-Lifecycle. `turnId` verbindet Assistant-Antwort und TTS-Ausgabe.
+* `playback_paused`, `playback_resumed` — kompakte Bot-Playback-Events bei User-Unterbrechung. Enthalten u. a. `id`, `framesPlayed`, `msPlayed`, Queue-/Duration-Werte, Unterbrecher-User, Pause-Dauer und Rewind-Info. Sie sind strukturiert, damit später sichtbar ist, wo User-Audio in Bot-Audio fiel, ohne den normalen Textfluss künstlich aufzublähen.
+* `stop_command` — erkannte Stop-Phrase. Stop-Phrases funktionieren ohne Wake-Word nur bei kurzen Äußerungen bis `STOP_WITHOUT_WAKE_MAX_WORDS`; mit Wake-Word wird die Stop-Phrase nicht als neue LLM-Anfrage weitergereicht.
+* `playback_stopped` — Bot-Feedback mit `framesPlayed` und `msPlayed` nach Stop.
+* `assistant_response_played` — bei Stop geschätzter tatsächlich gehörter Antworttext, bei Bedarf mit `...` gekürzt.
+
+`stt.noSpeechProbAvg` und `stt.noSpeechProbMax` werden gespeichert, aber im Live-Pfad nicht zum Verwerfen genutzt. Auch wahrscheinlich verrauschte Transkripte bleiben damit für spätere Filtertests und Finalize-Entscheidungen nachvollziehbar.
+
+Das vorbereitete `users`-Objekt in `session_meta` ist absichtlich leer. Es reserviert das Format für eine spätere konfigurierbare Zuordnung `Discord-User-ID -> Discord-Name / Spielername / Charaktername / phonetischer Name`, ohne jetzt schon eine feste Mapping-Datei zu erzwingen.
 
 Die gekürzte Assistant-Antwort wird heuristisch berechnet (`msPlayed / durationMs`) und am nächsten folgenden Whitespace geschnitten. Wenn weniger als 15 Zeichen oder weniger als 5 % Rest übrig bleiben, wird nicht gekürzt.
+
+Beispielhafte Zeilen:
+
+```jsonl
+{"tsMs":1778600000000,"type":"session_meta","sessionId":"1778422813219","schemaVersion":1,"guildName":"Jn","channelName":"Session","llm":{"provider":"ollama","model":"llama3.2","historyTurns":6},"stt":{"provider":"whisper.cpp","language":"de","temperature":0.1,"noSpeechProbStored":true,"noSpeechProbFiltersLive":false,"maxChunkSeconds":30,"silenceThresh":300},"wakeword":{"word":"Rabenauge","fuzzy":true,"position":3},"stopPhrases":["stop","stopp"],"users":{}}
+{"tsMs":1778600004123,"type":"user_transcript","sessionId":"1778422813219","userId":"696665320185659453","userDisplayName":"Nogâr","startTsMs":1778600001000,"endTsMs":1778600003900,"durationMs":2900,"text":"Hey Rabenauge, wer ist Baron Kelthur?","chunks":["Hey Rabenauge, wer ist Baron Kelthur?"],"stt":{"provider":"whisper.cpp","noSpeechProbAvg":0.03,"noSpeechProbMax":0.05,"chunkDurationsMs":[2900],"splitTypes":["single"]}}
+{"tsMs":1778600004300,"type":"assistant_response","sessionId":"1778422813219","turnId":"turn-...","text":"Baron Kelthur ist ein Halbork-Söldner.","speakerId":4,"model":"high"}
+{"tsMs":1778600006000,"type":"playback_paused","sessionId":"1778422813219","id":"tts-...","framesPlayed":80,"msPlayed":1600,"interruptedByUserId":"696665320185659453","interruptMinMs":800,"rewindMs":1000}
+{"tsMs":1778600008500,"type":"playback_resumed","sessionId":"1778422813219","id":"tts-...","framesPlayed":80,"msPlayed":1600,"pauseDurationMs":2500,"resumeGateMs":1200,"rewindFrames":50,"rewoundMs":1000}
+```
 
 ### Piper Speaker-IDs (de_DE-thorsten_emotional-medium)
 
@@ -784,8 +812,8 @@ Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Mo
 
 **Aktuelle Phasen (grob):**
 
-1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Filter.
-2. **Phase 2 — Core Workflows**: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log.
+1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Diagnostik.
+2. **Phase 2 — Core Workflows** *(implementiert, Praxistest ausstehend)*: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log mit Schema-v1-Struktur.
 3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
 4. **Phase 4 — RAG + Obsidian**: Python-RAG-Service (FastAPI + ChromaDB + Ollama-Embeddings), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
 5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).

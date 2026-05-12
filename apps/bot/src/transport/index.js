@@ -51,6 +51,7 @@ export function start({ botId } = {}) {
   const uplink   = new UplinkClient({ baseUrl, bearer });
   const downlink = new DownlinkClient({ baseUrl, bearer, params });
   const control  = new ControlClient({ baseUrl, bearer, botId, fsm });
+  downlink.setPlaybackEventHandler((event) => control.playbackEvent(event));
 
   fsm.on('change', (next, prev) => log(`transport: ${prev} -> ${next}`));
 
@@ -132,9 +133,9 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
 }
 
-export function sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName }) {
+export function sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
   if (!_instance) return;
-  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, userDisplayName }); }
+  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }); }
   catch (e) { warn('transport.sendUtteranceEnd:', e.message); }
 }
 

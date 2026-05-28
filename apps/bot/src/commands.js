@@ -40,6 +40,17 @@ const commands = [
           { name: 'session', description: 'Session-ID', type: 3, required: true },
         ],
       },
+      {
+        name: 'map',
+        description: 'Sprecher-Zuordnung anzeigen/setzen (Discord-Nutzer → Spieler/Charakter)',
+        type: 1, // SUB_COMMAND
+        options: [
+          { name: 'user', description: 'Discord-Nutzer (leer = alle anzeigen)', type: 6, required: false },
+          { name: 'player', description: 'Spielername', type: 3, required: false },
+          { name: 'character', description: 'Charaktername', type: 3, required: false },
+          { name: 'phonetic', description: 'Phonetische Schreibweise (für TTS)', type: 3, required: false },
+        ],
+      },
     ],
   },
   {

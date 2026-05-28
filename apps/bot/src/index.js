@@ -292,6 +292,19 @@ client.on('interactionCreate', async (i) => {
       statusLines.push(resumed
         ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (${sessions.active.id}).`
         : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session ${sessions.active.id}).`);
+
+      // Reminder: speakers currently in the channel without a mapping (best
+      // effort — needs the server online; falls back silently otherwise).
+      try {
+        const map = await transport.getSpeakerMap(channel.guild.id);
+        const unmapped = [...channel.members.values()]
+          .filter((m) => !m.user.bot && !map[m.id])
+          .map((m) => m.displayName);
+        if (unmapped.length) {
+          statusLines.push(`ℹ️ Ohne Sprecher-Zuordnung: ${unmapped.join(', ')} — mit \`/finalize map\` zuordnen (sonst wird der Anzeigename verwendet).`);
+        }
+      } catch { /* server offline — skip reminder */ }
+
       await i.editReply({ content: statusLines.join('\n') });
     }
 
@@ -341,6 +354,47 @@ client.on('interactionCreate', async (i) => {
           lines.push(`Archiv: \`${s.finalize.archiveDir}\``);
         }
         return i.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
+      }
+
+      if (sub === 'map') {
+        const guildId = i.guildId;
+        const user = i.options.getUser('user');
+        if (!user) {
+          let map;
+          try { map = await transport.getSpeakerMap(guildId); }
+          catch { return i.reply({ content: 'Server nicht verbunden – Zuordnungen liegen serverseitig.', flags: MessageFlags.Ephemeral }); }
+          const entries = Object.entries(map);
+          if (entries.length === 0) return i.reply({ content: 'Keine Sprecher-Zuordnungen. Setzen mit `/finalize map user:@… player:…`.', flags: MessageFlags.Ephemeral });
+          const lines = entries.map(([uid, e]) =>
+            `• <@${uid}> → **${e.player ?? '—'}**${e.character ? ` (${e.character})` : ''}${e.phonetic ? ` _[${e.phonetic}]_` : ''}`);
+          return i.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
+        }
+        const player = i.options.getString('player');
+        const character = i.options.getString('character');
+        const phonetic = i.options.getString('phonetic');
+        if (!player && !character && !phonetic) {
+          let map = {};
+          try { map = await transport.getSpeakerMap(guildId); } catch { /* offline */ }
+          const e = map[user.id];
+          return i.reply({
+            content: e ? `<@${user.id}> → **${e.player ?? '—'}**${e.character ? ` (${e.character})` : ''}${e.phonetic ? ` _[${e.phonetic}]_` : ''}`
+                       : `Keine Zuordnung für <@${user.id}>. Setzen: \`/finalize map user:@… player:…\`.`,
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        const entry = {};
+        if (player) entry.player = player;
+        if (character) entry.character = character;
+        if (phonetic) entry.phonetic = phonetic;
+        try {
+          await transport.setSpeakerMapping(guildId, user.id, entry);
+        } catch (e) {
+          return i.reply({ content: `Konnte Zuordnung nicht speichern: ${e.message}`, flags: MessageFlags.Ephemeral });
+        }
+        return i.reply({
+          content: `✅ Zuordnung gespeichert: <@${user.id}> → **${player ?? '—'}**${character ? ` (${character})` : ''}${phonetic ? ` _[${phonetic}]_` : ''}`,
+          flags: MessageFlags.Ephemeral,
+        });
       }
 
       // sub === 'run'

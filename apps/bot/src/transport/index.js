@@ -185,6 +185,16 @@ export function onFinalizeProgress(cb) {
   _instance.control.on('finalizeProgress', cb);
 }
 
+export function getSpeakerMap(guildId) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.speakerMapGet(guildId);
+}
+
+export function setSpeakerMapping(guildId, userId, entry) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.speakerMapSet(guildId, userId, entry);
+}
+
 export function setVoiceConnection(conn) {
   if (!_instance) return;
   try { _instance.downlink.setVoiceConnection(conn); }

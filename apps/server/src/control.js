@@ -4,7 +4,7 @@ import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import { log, debug, warn } from './logger.js';
 import { finalizeSession } from './finalize/index.js';
-import { loadSpeakerMap } from './speakerMap.js';
+import { loadSpeakerMap, setSpeakerMapping } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
@@ -373,6 +373,22 @@ export function initControlWSS({ bearer } = {}) {
               durationMs: typeof msg.durationMs === 'number' ? msg.durationMs : null,
             }).catch((e) => warn('pipeline error:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'utterance_end' });
+            return;
+          }
+          case 'speaker_map_get': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            const map = loadSpeakerMap(msg.guildId);
+            send(ws, { type: 'speaker_map', cmdId: msg.cmdId, ok: true, guildId: msg.guildId ?? null, map });
+            return;
+          }
+          case 'speaker_map_set': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (msg.guildId == null || msg.userId == null) {
+              send(ws, { type: 'error', code: 'BAD_ARGS', message: 'guildId and userId required', cmdId: msg.cmdId });
+              return;
+            }
+            const entry = setSpeakerMapping(msg.guildId, msg.userId, msg.entry || {});
+            send(ws, { type: 'speaker_map_result', cmdId: msg.cmdId, ok: true, userId: String(msg.userId), entry });
             return;
           }
           case 'finalize_session': {

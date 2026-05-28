@@ -49,8 +49,42 @@ export class ControlClient extends EventEmitter {
     this.reconnectTimer = null;
 
     this.pendingSession = null;
-    // cmdId → { resolve, reject, timer } for in-flight finalize requests.
-    this.pendingFinalize = new Map();
+    // cmdId → { resolve, reject, timer } for in-flight request/response calls.
+    this.pending = new Map();
+  }
+
+  // Generic request/response over the control socket, matched by cmdId.
+  _request(type, payload = {}, { timeoutMs = 15_000 } = {}) {
+    const cmdId = randomUUID();
+    if (!this._sendIfReady({ type, cmdId, ...payload })) {
+      return Promise.reject(new Error('Server nicht verbunden'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(cmdId);
+        reject(new Error(`${type}: Timeout`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(cmdId, { resolve, reject, timer });
+    });
+  }
+
+  _resolvePending(cmdId, value) {
+    const p = this.pending.get(cmdId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(cmdId);
+    p.resolve(value);
+    return true;
+  }
+
+  _rejectPending(cmdId, err) {
+    const p = this.pending.get(cmdId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(cmdId);
+    p.reject(err);
+    return true;
   }
 
   start() {
@@ -122,21 +156,18 @@ export class ControlClient extends EventEmitter {
     });
   }
 
-  // Request server-side finalize. Resolves with the server's finalize_result
-  // (matched by cmdId). Re-STT of long sessions can take minutes → long timeout.
+  // Request server-side finalize. Resolves with the server's finalize_result.
+  // Re-STT of long sessions can take minutes → long timeout.
   finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
-    const cmdId = randomUUID();
-    if (!this._sendIfReady({ type: 'finalize_session', cmdId, ...payload })) {
-      return Promise.reject(new Error('Server nicht verbunden'));
-    }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingFinalize.delete(cmdId);
-        reject(new Error('Finalize-Timeout (Server hat nicht geantwortet)'));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pendingFinalize.set(cmdId, { resolve, reject, timer });
-    });
+    return this._request('finalize_session', payload, { timeoutMs });
+  }
+
+  // Speaker-map read/write (server-persisted, per guild).
+  speakerMapGet(guildId) {
+    return this._request('speaker_map_get', { guildId }).then((m) => m.map || {});
+  }
+  speakerMapSet(guildId, userId, entry) {
+    return this._request('speaker_map_set', { guildId, userId, entry });
   }
 
   _sendIfReady(obj) {
@@ -279,17 +310,17 @@ export class ControlClient extends EventEmitter {
       }
       case 'error': {
         warn('control: server error', msg.code, msg.message || '', 'cmdId=', msg.cmdId);
-        const pf = this.pendingFinalize.get(msg.cmdId);
-        if (pf) { clearTimeout(pf.timer); this.pendingFinalize.delete(msg.cmdId); pf.reject(new Error(msg.message || msg.code || 'server error')); }
+        this._rejectPending(msg.cmdId, new Error(msg.message || msg.code || 'server error'));
         return;
       }
       case 'finalize_progress': {
         this.emit('finalizeProgress', msg);
         return;
       }
-      case 'finalize_result': {
-        const p = this.pendingFinalize.get(msg.cmdId);
-        if (p) { clearTimeout(p.timer); this.pendingFinalize.delete(msg.cmdId); p.resolve(msg); }
+      case 'finalize_result':
+      case 'speaker_map':
+      case 'speaker_map_result': {
+        this._resolvePending(msg.cmdId, msg);
         return;
       }
       // Server→bot commands: dispatch to transport/index.js via event.

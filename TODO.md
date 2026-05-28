@@ -151,22 +151,25 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Power-User Features
 
-- [ ] **`/model <name>` + `/list-models`** — LLM-Modell zur Laufzeit wechseln.
-  - Server liefert Liste verfügbarer Ollama-Modelle (`/api/tags`)
-  - Bot zeigt sie als Auto-Complete-Choices im Slash-Command
-  - Switch in `runPipeline` ohne Server-Neustart
+> **Design-Richtlinie: so wenige Slash-Commands wie möglich.**
+> Discord zeigt alle registrierten Commands in einer Liste — zu viele (`/model`, `/debug`, `/config`, `/sleep`, …) wirken unübersichtlich.
+> Neue Funktionen wo möglich als **Subcommands** eines bestehenden Commands bündeln, nicht als eigene Top-Level-Commands.
+> Angestrebte Command-Liste gesamt: `/join`, `/leave`, `/ask`, `/config`, `/finalize` — alles andere als Subcommand darunter.
+> Beispiel: `WAKE_WORD`-Änderung → `/config set wake_word …`; Modell-Wechsel → `/config set model …`; Debug-Toggle → `/config debug on`.
 
-- [ ] **`/config`** — Settings zur Laufzeit über Discord ändern (z. B. WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice, LLM-Modell, Stop-Phrases, Whisper-Temperature).
+- [ ] **`/config`** — alle Laufzeit-Settings in einem Command (ersetzt geplante Einzelcommands `/model`, `/list-models`, `/debug`, `/sleep`/`/wake`).
+  - Subcommands: `/config list`, `/config set <key> <value>`, `/config debug on|off`
+  - Konfigurierbare Keys: WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice, LLM-Modell (inkl. Auto-Complete via `/api/tags`), Stop-Phrases, Whisper-Temperature
   - Permission-Check (Admin only?)
   - In-Memory-State sofort; **Persistenz prüfen**: nötig wenn Änderungen Server-Restart überleben sollen — JSON-File in `apps/server/data/` als Override über `.env`, beim Start einlesen
   - Alternativ ohne Persistenz: Änderungen gelten nur bis zum nächsten Server-Restart (einfacher, evtl. ausreichend wenn `/config` selten genutzt wird)
-  - Auflisten + Setzen einzelner Keys (`/config list`, `/config set <key> <value>`)
 
-- [ ] **`/sleep` / `/wake`** — niedrige Priorität (laut Diskussion).
+- [ ] **Sleep/Wake als `/config`-Subcommand** — niedrige Priorität.
+  - `config set sleep true/false` oder eigener Subcommand `/config sleep`
   - Wake-Word vorübergehend deaktivieren (z. B. während privater Plauderei)
-  - **Begründung für niedrige Prio**: Stop-Command unterbricht False-Positives bereits sehr gut; eigener Sleep-Modus ist nicht kritisch
+  - **Begründung für niedrige Prio**: Stop-Command unterbricht False-Positives bereits sehr gut
 
-- [ ] **`/debug on|off`** — Live-Debug-Output für den auslösenden User.
+- [ ] **`/config debug on|off`** — Live-Debug-Output für den auslösenden User (kein eigener Top-Level-Command).
   - **Ziel**: alle Transkripte (STT, Wake-Word-Treffer, LLM-Antworten, Latenz/Buffer-Metriken) sieht **nur der auslösende User**, idealerweise als fortlaufend editierte Ephemeral-Message (oder DM) — kein Channel-Spam
   - `/debug on` öffnet einen Ephemeral-Slot, der bei jedem Server-Event aktualisiert wird (oder rotierend ein paar Messages, falls 4000-Zeichen-Limit gerissen wird)
   - `/debug off` schließt den Slot

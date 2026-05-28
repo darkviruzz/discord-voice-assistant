@@ -2,9 +2,11 @@
 
 Endpoints
 ---------
-POST /synthesize          – returns a complete WAV file (backward-compatible)
+POST /synthesize          – returns a complete WAV file (debug / backward-compat)
 POST /tts/synthesize      – streams raw int16LE PCM per sentence; headers carry
-                            X-Sample-Rate, X-Channels, X-Bit-Depth
+                            Content-Type: audio/pcm-s16le, X-Sample-Rate,
+                            X-Channels, X-Bit-Depth
+GET  /voices              – list available voice models (Pipecat-style discovery)
 GET  /health              – {"status": "ok"}
 POST /shutdown            – graceful shutdown
 
@@ -153,13 +155,27 @@ async def synthesize_stream(req: TTSRequest) -> StreamingResponse:
 
     return StreamingResponse(
         _generate(),
-        media_type="application/octet-stream",
+        media_type="audio/pcm-s16le",
         headers={
             "X-Sample-Rate": str(sample_rate),
             "X-Channels":    "1",
             "X-Bit-Depth":   "16",
         },
     )
+
+
+@app.get("/voices")
+async def voices() -> list:
+    """List available voice models (Pipecat-style service discovery)."""
+    result = []
+    for voice_id, voice in VOICES.items():
+        result.append({
+            "id":       voice_id,
+            "name":     voice.config.key if hasattr(voice.config, "key") else voice_id,
+            "lang":     voice.config.espeak.voice if hasattr(voice.config, "espeak") else "de-DE",
+            "speakers": voice.config.num_speakers,
+        })
+    return result
 
 
 @app.get("/health")

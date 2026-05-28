@@ -1,124 +1,33 @@
-import { Readable } from 'stream';
 import WebSocket from 'ws';
-import {
-  createAudioPlayer,
-  createAudioResource,
-  StreamType,
-  AudioPlayerStatus,
-  NoSubscriberBehavior,
-} from '@discordjs/voice';
-import { parseFrame, MAGIC_DNLK } from './protocol.js';
-import { JitterBuffer } from './jitter.js';
-import { log, debug, warn } from '../logger.js';
+import { TtsPlayback } from '../audio/ttsPlayback.js';
+import { debug, warn } from '../logger.js';
 
-// Three-byte Opus silence frame (20ms, 48kHz mono). Discord does not mark
-// the bot as "speaking" when it receives these.
-const SILENCE_FRAME = Buffer.from([0xf8, 0xff, 0xfe]);
-
-// PlaybackStream is the pull-based Readable that the AudioPlayer consumes.
-// It returns one Opus Buffer per _read() call (every ~20ms). When the gate is
-// closed or the buffer is empty, it returns a silence frame so the AudioPlayer
-// stays in Playing state without startup latency when audio resumes.
-class PlaybackStream extends Readable {
-  constructor(jitterBuffer, gating) {
-    super({ objectMode: true });
-    this._jitter  = jitterBuffer;
-    this._gating  = gating;
-    this._active  = true;
-  }
-
-  _read() {
-    if (!this._active) { this.push(null); return; }
-    const packet = this._gating.isOpen()
-      ? (this._jitter.shift(this._gating.playoutMaxMs) ?? SILENCE_FRAME)
-      : SILENCE_FRAME;
-    this.push(packet);
-  }
-
-  destroy(err) {
-    this._active = false;
-    super.destroy(err);
-  }
-}
+const RECONNECT_DELAY_MS = 3000;
 
 export class DownlinkClient {
   constructor({ baseUrl, bearer, params = {} }) {
-    this.url    = `${baseUrl}/downlink`;
+    this.url = `${baseUrl}/downlink`;
     this.bearer = bearer || null;
 
-    this.gateMs         = params.gateMs         ?? 80;
-    this.playoutMaxMs   = params.playoutMaxMs    ?? 1500;
-    // Minimum continuous speaking time before the gate closes.
-    // Sounds shorter than this (laughs, coughs) will not interrupt playback.
-    this.interruptMinMs = params.interruptMinMs  ?? 400;
-    // After a real interruption ends, wait this long before resuming.
-    this.resumeGateMs   = params.resumeGateMs    ?? 900;
+    this._ws = null;
+    this._sessionId = null;
+    this._closing = false;
+    this._reconnectTimer = null;
+    this._playback = new TtsPlayback({ rewindMs: params.rewindMs ?? 1000 });
 
-    this._jitter         = new JitterBuffer();
+    this.interruptMinMs = params.interruptMinMs ?? 800;
+    this.resumeGateMs = params.resumeGateMs ?? 1200;
+    this.rewindMs = params.rewindMs ?? 1000;
+    this._speakTimers = new Map();
     this._activeSpeakers = new Set();
-    this._lastSpeakEnd   = 0;
-    // Pending timers before a speaking event is treated as a real interruption.
-    this._speakTimers    = new Map(); // userId → setTimeout handle
-    // Gate duration to use after the next silence (null = use gateMs).
-    this._nextGateMs     = null;
-    // True when the jitter buffer was non-empty at the start of the current interruption.
-    // Prevents rewind after the bot has already finished speaking.
-    this._interruptedWhilePlaying = false;
-
-    // Gating interface passed to PlaybackStream.
-    this._gating = {
-      isOpen: () => {
-        if (this._activeSpeakers.size > 0) return false;
-        const needed  = this._nextGateMs ?? this.gateMs;
-        const elapsed = Date.now() - this._lastSpeakEnd;
-        if (elapsed >= needed) {
-          const wasInterrupted = this._nextGateMs !== null;
-          this._nextGateMs = null; // consumed
-          if (wasInterrupted && this._interruptedWhilePlaying) {
-            this._jitter.rewind(1000);
-            this._interruptedWhilePlaying = false;
-          }
-          return true;
-        }
-        return false;
-      },
-      get playoutMaxMs() { return 1500; }, // placeholder — overridden below
-    };
-    Object.defineProperty(this._gating, 'playoutMaxMs', { get: () => this.playoutMaxMs, configurable: true });
-
-    this._ws            = null;
-    this._playStream    = null;
-    this._player        = this._createPlayer();
-    this._connection    = null;
-    this._sessionId     = null;
+    this._resumeTimer = null;
+    this._playbackEventHandler = () => {};
+    this._pauseStartedAt = null;
+    this._pauseUserId = null;
   }
 
-  _createPlayer() {
-    const player = createAudioPlayer({
-      behaviors: { noSubscriber: NoSubscriberBehavior.Play },
-    });
-    player.on('error', (e) => {
-      warn('downlink: AudioPlayer error:', e.message);
-      // Resource errored; recreate on the next open() call.
-      this._playStream = null;
-    });
-    player.on(AudioPlayerStatus.Idle, () => debug('downlink: player idle'));
-    return player;
-  }
-
-  _startPlayback() {
-    if (this._playStream) return; // already playing
-    this._playStream = new PlaybackStream(this._jitter, this._gating);
-    const resource = createAudioResource(this._playStream, {
-      inputType: StreamType.Opus,
-    });
-    this._player.play(resource);
-    debug('downlink: playback started');
-  }
-
-  // Open WS connection and begin subscribing to a session.
   open(sessionId) {
-    this.close(); // tear down any previous connection first
+    this.close();
     this._sessionId = sessionId;
 
     const headers = this.bearer ? { Authorization: `Bearer ${this.bearer}` } : {};
@@ -135,100 +44,93 @@ export class DownlinkClient {
       debug('downlink: connected, subscribing to session', sessionId);
       try {
         ws.send(JSON.stringify({ subscribe: true, sessionId }));
-      } catch (e) { warn('downlink: subscribe send failed:', e.message); }
-      this._startPlayback();
+      } catch (e) {
+        warn('downlink: subscribe send failed:', e.message);
+      }
     });
 
-    let downlinkFrames = 0;
     ws.on('message', (data, isBinary) => {
-      if (!isBinary) return;
-      try {
-        const f = parseFrame(Buffer.from(data));
-        if (!f.magic.equals(MAGIC_DNLK)) return;
-        if (++downlinkFrames === 1) debug('downlink: first frame received from server');
-        this._jitter.add(f.payload, f.tsMs);
-      } catch (e) {
-        warn('downlink: parse error:', e.message);
+      if (isBinary) {
+        debug('downlink: ignoring legacy binary frame');
+        return;
       }
+
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch (e) {
+        warn('downlink: bad json:', e.message);
+        return;
+      }
+
+      this._handleMessage(msg);
     });
 
     ws.on('close', (code) => {
       debug('downlink: ws closed', code);
-      if (this._ws === ws) this._ws = null;
+      if (this._ws !== ws) return;
+      this._ws = null;
+      if (!this._closing && this._sessionId) {
+        debug('downlink: scheduling reconnect in', RECONNECT_DELAY_MS, 'ms');
+        this._reconnectTimer = setTimeout(() => {
+          this._reconnectTimer = null;
+          if (!this._closing && this._sessionId) {
+            debug('downlink: reconnecting to session', this._sessionId.toString());
+            this.open(this._sessionId);
+          }
+        }, RECONNECT_DELAY_MS);
+      }
     });
+
     ws.on('error', (e) => {
       warn('downlink: ws error:', e.message);
-      if (this._ws === ws) this._ws = null;
     });
   }
 
   close() {
+    this._closing = true;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+
     const ws = this._ws;
     this._ws = null;
-    if (ws) try { ws.close(); } catch {}
-
-    if (this._playStream) {
-      this._playStream._active = false;
-      this._playStream = null;
+    if (ws) {
+      try { ws.close(); } catch {}
     }
-    this._jitter.clear();
-    this._interruptedWhilePlaying = false;
+
+    for (const timer of this._speakTimers.values()) clearTimeout(timer);
+    this._speakTimers.clear();
+    this._activeSpeakers.clear();
+    if (this._resumeTimer) {
+      clearTimeout(this._resumeTimer);
+      this._resumeTimer = null;
+    }
+    this._pauseStartedAt = null;
+    this._pauseUserId = null;
+
+    this._playback.stop();
     this._sessionId = null;
+    this._closing = false;
   }
 
-  // Bind the AudioPlayer to a VoiceConnection so it can output audio.
   setVoiceConnection(conn) {
-    this._connection = conn;
-    conn.subscribe(this._player);
-    debug('downlink: subscribed player to voice connection');
+    this._playback.subscribe(conn);
+  }
+
+  setPlaybackEventHandler(handler) {
+    this._playbackEventHandler = typeof handler === 'function' ? handler : () => {};
   }
 
   clearVoiceConnection() {
-    this._connection = null;
-    // Unsubscribe by stopping the player; the connection's subscription is
-    // managed by @discordjs/voice internally.
-    this._player.stop(true);
+    this._playback.stop();
     debug('downlink: cleared voice connection');
   }
 
-  speakingStart(userId) {
-    if (this._speakTimers.has(userId)) return; // already counting
-    // Capture playback state now; the buffer may drain before the timer fires.
-    const wasPlaying = this._jitter.size > 0;
-    const timer = setTimeout(() => {
-      this._speakTimers.delete(userId);
-      this._activeSpeakers.add(userId);
-      this._interruptedWhilePlaying = wasPlaying;
-    }, this.interruptMinMs);
-    this._speakTimers.set(userId, timer);
-  }
-
-  speakingEnd(userId) {
-    const timer = this._speakTimers.get(userId);
-    if (timer) {
-      // Speech ended before the threshold — treat as noise, ignore.
-      clearTimeout(timer);
-      this._speakTimers.delete(userId);
-      return;
-    }
-    this._activeSpeakers.delete(userId);
-    if (this._activeSpeakers.size === 0) {
-      this._lastSpeakEnd = Date.now();
-      this._nextGateMs   = this.resumeGateMs; // real interruption — use long gap
-    }
-  }
-
-  setParams({ gateMs, playoutMaxMs, interruptMinMs, resumeGateMs }) {
-    if (typeof gateMs         === 'number') this.gateMs         = gateMs;
-    if (typeof playoutMaxMs   === 'number') this.playoutMaxMs   = playoutMaxMs;
-    if (typeof interruptMinMs === 'number') this.interruptMinMs = interruptMinMs;
-    if (typeof resumeGateMs   === 'number') this.resumeGateMs   = resumeGateMs;
-    debug('downlink: params updated', { gateMs: this.gateMs, playoutMaxMs: this.playoutMaxMs, interruptMinMs: this.interruptMinMs, resumeGateMs: this.resumeGateMs });
-  }
-
   stopPlayback() {
-    this._jitter.clear();
-    debug('downlink: playback buffer flushed');
+    const stats = this._playback.stop();
+    return stats ? { ...stats, sessionId: this._sessionId?.toString?.() ?? String(this._sessionId ?? '') } : null;
   }
 
   updateSession(sessionId) {
@@ -236,5 +138,130 @@ export class DownlinkClient {
     const wasOpen = !!this._ws;
     this.close();
     if (wasOpen) this.open(sessionId);
+  }
+
+  setParams({ interruptMinMs, resumeGateMs, rewindMs } = {}) {
+    if (typeof interruptMinMs === 'number') this.interruptMinMs = interruptMinMs;
+    if (typeof resumeGateMs === 'number') this.resumeGateMs = resumeGateMs;
+    if (typeof rewindMs === 'number') {
+      this.rewindMs = rewindMs;
+      this._playback.setParams({ rewindMs });
+    }
+    debug('downlink: params updated', {
+      interruptMinMs: this.interruptMinMs,
+      resumeGateMs: this.resumeGateMs,
+      rewindMs: this.rewindMs,
+    });
+  }
+
+  speakingStart(_userId) {
+    if (this._speakTimers.has(_userId) || this._activeSpeakers.has(_userId)) return;
+    if (this._resumeTimer) {
+      clearTimeout(this._resumeTimer);
+      this._resumeTimer = null;
+    }
+    const timer = setTimeout(() => {
+      this._speakTimers.delete(_userId);
+      this._activeSpeakers.add(_userId);
+      const stats = this._playback.pause(`speaker ${_userId}`);
+      if (stats) {
+        this._pauseStartedAt = Date.now();
+        this._pauseUserId = _userId;
+        this._emitPlaybackEvent('playback_paused', {
+          interruptedByUserId: _userId,
+          interruptMinMs: this.interruptMinMs,
+          rewindMs: this.rewindMs,
+          ...stats,
+        });
+      }
+    }, this.interruptMinMs);
+    this._speakTimers.set(_userId, timer);
+  }
+
+  speakingEnd(_userId) {
+    const timer = this._speakTimers.get(_userId);
+    if (timer) {
+      clearTimeout(timer);
+      this._speakTimers.delete(_userId);
+      if (this._playback.isPaused() && this._activeSpeakers.size === 0) {
+        this._scheduleResume();
+      }
+      return;
+    }
+
+    this._activeSpeakers.delete(_userId);
+    if (this._activeSpeakers.size > 0) return;
+
+    if (this._playback.isPaused()) this._scheduleResume();
+  }
+
+  _scheduleResume() {
+    if (this._resumeTimer) clearTimeout(this._resumeTimer);
+    this._resumeTimer = setTimeout(() => {
+      this._resumeTimer = null;
+      const pauseStartedAt = this._pauseStartedAt;
+      const pauseUserId = this._pauseUserId;
+      const stats = this._playback.resume('speakers ended');
+      if (stats) {
+        this._emitPlaybackEvent('playback_resumed', {
+          interruptedByUserId: pauseUserId,
+          pauseDurationMs: pauseStartedAt ? Date.now() - pauseStartedAt : null,
+          resumeGateMs: this.resumeGateMs,
+          rewindMs: this.rewindMs,
+          rewindFrames: stats.rewindFrames,
+          rewoundMs: (stats.rewindFrames ?? 0) * 20,
+          ...stats,
+        });
+      }
+      this._pauseStartedAt = null;
+      this._pauseUserId = null;
+    }, this.resumeGateMs);
+  }
+
+  _emitPlaybackEvent(eventType, payload) {
+    const sessionId = this._sessionId?.toString?.() ?? String(this._sessionId ?? '');
+    if (!sessionId || !payload?.id) return;
+    this._playbackEventHandler({
+      eventType,
+      sessionId,
+      ...payload,
+    });
+  }
+
+  _handleMessage(msg) {
+    switch (msg.type) {
+      case 'tts_start': {
+        if (typeof msg.id !== 'string') {
+          warn('downlink: tts_start without id');
+          return;
+        }
+        this._playback.begin(msg.id);
+        return;
+      }
+      case 'tts_frame': {
+        if (typeof msg.id !== 'string' || typeof msg.payload !== 'string') {
+          warn('downlink: bad tts_frame');
+          return;
+        }
+        const frame = Buffer.from(msg.payload, 'base64');
+        this._playback.pushFrame(msg.id, frame, msg.seq);
+        return;
+      }
+      case 'tts_done': {
+        if (typeof msg.id !== 'string') {
+          warn('downlink: tts_done without id');
+          return;
+        }
+        this._playback.markDone(msg.id);
+        return;
+      }
+      case 'tts_error': {
+        warn('downlink: tts_error', msg.id || '', msg.message || '');
+        this._playback.stop();
+        return;
+      }
+      default:
+        debug('downlink: ignored message type', msg.type);
+    }
   }
 }

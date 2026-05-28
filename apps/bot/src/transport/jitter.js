@@ -1,6 +1,8 @@
 // Jitter buffer for downlink Opus frames.
 // Frames are stored with their receive timestamp and dropped if too stale.
 
+import { warn, debug } from '../logger.js';
+
 export class JitterBuffer {
   constructor() {
     this._frames  = []; // { opus: Buffer, tsMs: number }[]
@@ -14,11 +16,18 @@ export class JitterBuffer {
   }
 
   // Returns the oldest frame whose age is <= maxAgeMs, or null.
-  // Silently discards frames that are too old.
+  // Frames whose tsMs is older than (Date.now() - maxAgeMs) are silently
+  // discarded as stale.  If this fires it means either the server sent
+  // overlapping/wrong timestamps, or the player is running behind real-time.
   shift(maxAgeMs = 1500) {
     const cutoff = Date.now() - maxAgeMs;
+    let dropped  = 0;
     while (this._frames.length > 0 && this._frames[0].tsMs < cutoff) {
       this._frames.shift();
+      dropped++;
+    }
+    if (dropped > 0) {
+      warn(`jitter: dropped ${dropped} stale frames (maxAge=${maxAgeMs}ms, remaining=${this._frames.length})`);
     }
     if (this._frames.length === 0) return null;
     const frame = this._frames.shift();

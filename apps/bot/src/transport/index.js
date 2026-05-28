@@ -42,14 +42,16 @@ export function start({ botId } = {}) {
   const params = {
     gateMs:         Number(process.env.GATE_MS           ?? 80),
     playoutMaxMs:   Number(process.env.PLAYOUT_MAX_MS    ?? 1500),
-    interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 400),
-    resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 900),
+    interruptMinMs: Number(process.env.INTERRUPT_MIN_MS  ?? 800),
+    resumeGateMs:   Number(process.env.RESUME_GATE_MS    ?? 1200),
+    rewindMs:       Number(process.env.REWIND_MS         ?? 1000),
   };
 
   const fsm      = new TransportState();
   const uplink   = new UplinkClient({ baseUrl, bearer });
   const downlink = new DownlinkClient({ baseUrl, bearer, params });
   const control  = new ControlClient({ baseUrl, bearer, botId, fsm });
+  downlink.setPlaybackEventHandler((event) => control.playbackEvent(event));
 
   fsm.on('change', (next, prev) => log(`transport: ${prev} -> ${next}`));
 
@@ -84,14 +86,14 @@ export function start({ botId } = {}) {
         break;
       case 'set_params':
         downlink.setParams({
-          gateMs:       msg.gateMs,
-          playoutMaxMs: msg.playoutMaxMs,
+          interruptMinMs: msg.interruptMinMs,
+          resumeGateMs:   msg.resumeGateMs,
+          rewindMs:       msg.rewindMs,
         });
         control.ack(msg.cmdId, true);
         break;
       case 'stop_playback':
-        downlink.stopPlayback();
-        control.ack(msg.cmdId, true);
+        control.ack(msg.cmdId, true, null, { playback: downlink.stopPlayback() });
         break;
       case 'chat_message':
         if (_chatMessageCallback) _chatMessageCallback(msg);
@@ -131,10 +133,40 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
 }
 
-export function sendUtteranceEnd({ sessionId, userId, durationMs }) {
+export function sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
   if (!_instance) return;
-  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs }); }
+  try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }); }
   catch (e) { warn('transport.sendUtteranceEnd:', e.message); }
+}
+
+export function debugTts({ sessionId, text } = {}) {
+  if (!_instance) return;
+  const sid = sessionId ?? _instance.currentSessionId;
+  if (!sid) {
+    warn('transport.debugTts: no active session');
+    return;
+  }
+  try { _instance.control.debugTts({ sessionId: sid, text }); }
+  catch (e) { warn('transport.debugTts:', e.message); }
+}
+
+export function textQuery({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' } = {}) {
+  if (!_instance) return false;
+  const sessionId = _instance.currentSessionId ?? undefined;
+  try {
+    return _instance.control.textQuery({
+      sessionId,
+      question,
+      tts,
+      channelId,
+      userId,
+      userDisplayName,
+      source,
+    });
+  } catch (e) {
+    warn('transport.textQuery:', e.message);
+    return false;
+  }
 }
 
 export function setVoiceConnection(conn) {

@@ -6,6 +6,24 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 ---
 
+## Performance / Stabilität
+
+- [ ] **LLM-Keep-Warm beim Server-Start + `/join`** — aktuelle Symptome: Server-Start dauert lang; Ollama-Modell wird nach wenigen Minuten Idle aus dem VRAM entladen und muss bei der nächsten Wake-Word-Query erneut geladen werden (mehrere Sekunden Latenz).
+  - Beim Server-Start: leeren Chat-Call gegen das konfigurierte `OLLAMA_MODEL` absetzen, damit das Modell in den VRAM kommt
+  - Bei `/join`: erneut einen „warm-up"-Call absetzen (Server kann zwischenzeitlich idle gewesen sein)
+  - Periodischer Keep-Alive während aktiver Session (z. B. alle 2 min ein leerer/minimaler Call), solange der Bot im Voice-Channel ist
+  - Ollama-Parameter `keep_alive` im Request auf z. B. `30m` setzen — vermeidet das Idle-Unloading server-seitig
+  - Messen: Warm-Latenz vs. Cold-Latenz dokumentieren (DEBUG-Log)
+
+- [ ] **Claude Haiku API als optionaler LLM-Provider** — Vergleichstest gegen lokales Ollama.
+  - API-Key-Setup (`ANTHROPIC_API_KEY` in `.env`), Provider-Switch via `LLM_PROVIDER=ollama|anthropic`
+  - Modell-Default: `claude-haiku-4-5`
+  - Same chat()-Interface, same conversationHistory-Format
+  - Vergleich: Latenz, deutsche Sprachqualität, Kosten (Cloud → kein lokaler Datenschutz mehr → bewusste Opt-in-Entscheidung)
+  - Hinweis: widerspricht dem „alles lokal"-Designziel — nur als optionaler Fallback / für Quick-Tests
+
+---
+
 ## Phase 1 — Quick Wins
 
 - [ ] **Version-Anzeige in Bot-Activity** — Status zeigt Bot- + Server-Version (`1.0.1-d5b717a (server:1.0.1-d5b717a)`).
@@ -15,34 +33,39 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
   - `apps/bot/src/transport/control.js`: `hello`-Message auswerten und Server-Version weitergeben
   - Hilfsfunktion `getVersionString()` jeweils einmal in bot und server
 
-- [ ] **Whisper `temperature=0.2` + `no_speech_prob`-Filter (Kombo)** — bereits informell verifiziert: T>0.0 liefert deutlich korrektere `no_speech_prob`-Werte. Reasonable conservative estimates ohne weiteren Test-Aufwand:
-  - Whisper-Aufruf-Parameter: `temperature: 0.2`
-  - In `apps/server/src/stt.js` (oder pipeline): wenn `no_speech_prob > 0.67` → Transkript verwerfen, leeren String zurückgeben
-  - Spätere Feintuning-Tests (Test-Matrix mit mehr Audio-Samples) verschoben auf „Optimierungen"
+- [x] **Whisper `temperature` + `no_speech_prob`-Diagnostik** — T>0.0 liefert deutlich korrektere `no_speech_prob`-Werte.
+  - Whisper-Aufruf-Parameter: `temperature` über `WHISPER_TEMPERATURE`
+  - Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`
+  - `noSpeechProbAvg`/`noSpeechProbMax` werden pro `user_transcript` im JSONL gespeichert
+  - Spätere Feintuning-/Filtertests bleiben Aufgabe der Finalize-/Offline-Pipeline
 
 ---
 
 ## Phase 2 — Core Workflows
 
-- [ ] **Type-to-Ask (`/ask "Frage" tts:false`)** — Slash-Command für Text-Queries.
-  - Bot: neuer Slash-Command mit `question` (string, required) + `tts` (bool, default false)
-  - Bot: Handler sendet `text_query`-Message über Control-Plane
-  - Server: neue `runTextPipeline()` skippt STT, startet bei LLM, reuse `chat()` + `synthesize()` + History-Management
-  - History-Mixing: Text- und Voice-Queries teilen sich `conversationHistory`
+- [x] **Type-to-Ask (`/ask "Frage" tts:false`)** — Slash-Command und Mention-Trigger für Text-Queries.
+  - Bot: `/ask frage:<text> tts:<bool>` + `@Botname Frage`
+  - Bot: Handler sendet `text_query` über Control-Plane
+  - Server: `runTextPipeline()` skippt STT/Wake-Word und nutzt dieselbe LLM-/History-/TTS-Pipeline
+  - History-Mixing: Text- und Voice-Queries teilen sich bei aktiver Session `conversationHistory`
   - Sessionless erlaubt (Antwort nur als Discord-Text wenn Bot nicht im Voice-Channel)
 
-- [ ] **Server-Auto-Start via SSH bei `/join`** — Bot prüft Server-Erreichbarkeit, startet bei Bedarf via SSH.
-  - SSH-Infra existiert bereits (anderweitig genutzt) — kein WoL nötig
-  - Beim `/join`: Ping → falls offline: SSH-Aufruf von `Start-VoiceAssistant.ps1`
-  - Discord-Feedback: „Server wird gestartet, Moment …" → später „Bereit, Aufnahme läuft."
-  - Timeout-Handling: nach X Sekunden ohne Server → Offline-Cache-Modus, Hinweis im Chat
+- [x] **Server-Auto-Start via SSH bei `/join`** — Bot prüft Server-Erreichbarkeit, startet bei Bedarf via SSH.
+  - Beim `/join`: TCP-Probe → falls offline: `SERVER_START_CMD`
+  - Getestete Konfiguration: SSH auf Windows-Server, `Start-VoiceAssistant.ps1 -Mode silent`
+  - Discord-Feedback während Start/Wartezeit
+  - Timeout-Handling: nach 30 s ohne Server → Offline-Cache-Modus, Hinweis im Chat
   - Macht Feature `Autostart via Task Scheduler` (5.1) damit weitgehend obsolet
 
-- [ ] **Session-Log enriched (JSONL)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
-  - Pro Turn: Timestamp, Speaker-ID, ggf. Wake-Word-Query, LLM-Antwort, TTS-Speaker-Emotion
-  - Optionale Bot-Events (join/leave, wer spricht wann)
-  - Periodische Checkpoint-Snapshots (alle 30 min) — kompakter Kontext-Stand
-  - Format-Standard hier festlegen, weil Phase-3-Finalize und Phase-4-RAG darauf aufbauen
+- [x] **Session-Log enriched (JSONL Schema v1)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
+  - Common fields: `tsMs`, `type`, `sessionId`
+  - `session_meta` wird einmal pro Session geloggt: Discord-Kontext, Bot-/Server-Version, LLM-/STT-/TTS-Konfig, Wake-Word, Stop-Phrases, vorbereitetes `users`-Mapping
+  - `user_transcript` enthält `startTsMs`, `endTsMs`, `durationMs`, STT-Chunks und `no_speech_prob`-Diagnostik; auch leere Whisper-Texte behalten Diagnostik; kein separates `utterance_end` im JSONL
+  - Turn-/TTS-Lifecycle: `text_query`, `wakeword_query`, `assistant_response`, `tts_start`, `tts_done`, `tts_cancel`, `tts_error`
+  - Unterbrechungen: `playback_paused`/`playback_resumed` mit `framesPlayed`, `msPlayed`, Pause-/Resume-/Rewind-Daten
+  - Stop-Transcript: `assistant_response_played` wird bei Stop aus Playback-Dauer approximiert und natürlich gekürzt geloggt
+  - Bewusst vorbereitet: `users`-Mapping für Discord-ID/Name → Spieler-/Charakter-/phonetischer Name; konkrete Mapping-Konfig später
+  - Bewusst nicht enthalten: separate Join-/Leave-/Speaking-Dauer-Events, damit das Textlog nicht mit Transportereignissen überfüllt
 
 ---
 
@@ -50,12 +73,15 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
 
-- [ ] **`/finalize`-Command** — manuell getriggert nach Session-Ende (auch bei online-Session, weil Audio-Archiv + Transkript-Merge sonst nicht entstehen).
-  - Server transkribiert noch nicht-transkribierte Backlog-Chunks (Offline-Cache-Fall)
-  - Erzeugt `transcripts/<datum>-<session-id>/transcript.md` (siehe Format in README)
-  - Erzeugt OGG/Opus 32 kbps Audio-Archiv (gemerged oder pro Sprecher, noch zu klären)
-  - Verschiebt/markiert Roh-WAVs ins Archive-Verzeichnis (1–6 Monate aufbewahren)
-  - Discord-Feedback bei Erfolg/Fehler
+- [ ] **`/finalize`-Command — Ist-Zustand prüfen + Soll definieren**
+  - **Ist (Stand piper-rework)**: aktuell existiert `/save-session` (Bot-seitig) — ruft `mixSession()` auf, schreibt `session_mix.ogg`, schließt Session. **Kein** chronologisches Markdown-Transkript, **kein** Backlog-Transkribieren, **keine** WAV-Archivierung.
+  - **TODO 0**: Code lesen (`apps/bot/src/index.js` `save-session`-Handler, `mixer.js`, Session-State) und dokumentieren was wirklich passiert vs. was die README/TODO behaupten
+  - **TODO 1**: Soll-Verhalten entscheiden (umbenennen `/save-session` → `/finalize`? oder zwei getrennte Commands?)
+  - Soll (laut Plan): Server transkribiert noch nicht-transkribierte Backlog-Chunks (Offline-Cache-Fall)
+  - Soll: Erzeugt `transcripts/<datum>-<session-id>/transcript.md` (siehe Format in README)
+  - Soll: Erzeugt OGG/Opus 32 kbps Audio-Archiv (gemerged oder pro Sprecher, noch zu klären)
+  - Soll: Verschiebt/markiert Roh-WAVs ins Archive-Verzeichnis (1–6 Monate aufbewahren)
+  - Soll: Discord-Feedback bei Erfolg/Fehler
 
 - [ ] **Chronologisches Transkript-Merge mit Monolog-Splitting** — der Algorithmus für das Format.
   - Eingabe: pro User die transkribierten Utterances mit Whisper-Token-Timestamps + Aufnahme-`startedAt` (siehe `apps/bot/src/recorder.js`)
@@ -125,22 +151,30 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Power-User Features
 
-- [ ] **`/model <name>` + `/list-models`** — LLM-Modell zur Laufzeit wechseln.
-  - Server liefert Liste verfügbarer Ollama-Modelle (`/api/tags`)
-  - Bot zeigt sie als Auto-Complete-Choices im Slash-Command
-  - Switch in `runPipeline` ohne Server-Neustart
+> **Design-Richtlinie: so wenige Slash-Commands wie möglich.**
+> Discord zeigt alle registrierten Commands in einer Liste — zu viele (`/model`, `/debug`, `/config`, `/sleep`, …) wirken unübersichtlich.
+> Neue Funktionen wo möglich als **Subcommands** eines bestehenden Commands bündeln, nicht als eigene Top-Level-Commands.
+> Angestrebte Command-Liste gesamt: `/join`, `/leave`, `/ask`, `/config`, `/finalize` — alles andere als Subcommand darunter.
+> Beispiel: `WAKE_WORD`-Änderung → `/config set wake_word …`; Modell-Wechsel → `/config set model …`; Debug-Toggle → `/config debug on`.
 
-- [ ] **`/config`** — WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice etc. via Discord-Command.
+- [ ] **`/config`** — alle Laufzeit-Settings in einem Command (ersetzt geplante Einzelcommands `/model`, `/list-models`, `/debug`, `/sleep`/`/wake`).
+  - Subcommands: `/config list`, `/config set <key> <value>`, `/config debug on|off`
+  - Konfigurierbare Keys: WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice, LLM-Modell (inkl. Auto-Complete via `/api/tags`), Stop-Phrases, Whisper-Temperature
   - Permission-Check (Admin only?)
-  - In-Memory-State + optionale JSON-Persistierung
+  - In-Memory-State sofort; **Persistenz prüfen**: nötig wenn Änderungen Server-Restart überleben sollen — JSON-File in `apps/server/data/` als Override über `.env`, beim Start einlesen
+  - Alternativ ohne Persistenz: Änderungen gelten nur bis zum nächsten Server-Restart (einfacher, evtl. ausreichend wenn `/config` selten genutzt wird)
 
-- [ ] **`/sleep` / `/wake`** — niedrige Priorität (laut Diskussion).
+- [ ] **Sleep/Wake als `/config`-Subcommand** — niedrige Priorität.
+  - `config set sleep true/false` oder eigener Subcommand `/config sleep`
   - Wake-Word vorübergehend deaktivieren (z. B. während privater Plauderei)
-  - **Begründung für niedrige Prio**: Stop-Command unterbricht False-Positives bereits sehr gut; eigener Sleep-Modus ist nicht kritisch
+  - **Begründung für niedrige Prio**: Stop-Command unterbricht False-Positives bereits sehr gut
 
-- [ ] **`/debug on|off`** — Live-Debug-Output in einem Discord-Channel.
-  - STT-Transkripte, Wake-Word-Treffer, LLM-Antworten, Latenz-/Buffer-Metriken
-  - Server sendet über Control-Plane
+- [ ] **`/config debug on|off`** — Live-Debug-Output für den auslösenden User (kein eigener Top-Level-Command).
+  - **Ziel**: alle Transkripte (STT, Wake-Word-Treffer, LLM-Antworten, Latenz/Buffer-Metriken) sieht **nur der auslösende User**, idealerweise als fortlaufend editierte Ephemeral-Message (oder DM) — kein Channel-Spam
+  - `/debug on` öffnet einen Ephemeral-Slot, der bei jedem Server-Event aktualisiert wird (oder rotierend ein paar Messages, falls 4000-Zeichen-Limit gerissen wird)
+  - `/debug off` schließt den Slot
+  - Server sendet Events über Control-Plane (`debug_event`); Bot routet nur an User mit aktivem Debug-Slot
+  - Edge-Case: Ephemeral-Messages haben eine Lebensdauer — Strategie wenn Discord die Message verwirft (neue erzeugen)
 
 ---
 
@@ -173,9 +207,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Hängt zusammen mit `session-rolling-summary` (oben) und `obsidian-per-query` (Phase 4) — ggf. überflüssig wenn RAG den nötigen Kontext liefert
   - Format: leserliches Markdown (Speaker/Text), keine Steuerzeichen/JSON-Klammern. Falls LLM JSON ausgeben soll, dialog auch in JSON-Form serialisieren — sonst Markdown
 
-- [ ] **`Pipecat TTS Service Spec`-konforme TTS-API** — Wartbarkeit/Ecosystem-Kompatibilität.
-
-- [ ] **WebSocket-basiertes Piper-Streaming evaluieren** — `piper-streaming` oder `paroli` als Upgrade-Pfad falls Sub-100-ms-TTFA nötig wird. Aktuelle HTTP-Chunked-Lösung reicht aus.
+- [x] **`Pipecat TTS Service Spec`-konforme TTS-API** — `GET /voices` Endpoint + `Content-Type: audio/pcm-s16le` Header hinzugefügt (`feature/piper-pipeline-rework`).
 
 - [ ] **Autostart via Windows Task Scheduler** — wird durch „Server-Auto-Start via SSH bei `/join`" weitgehend redundant. Falls noch gebraucht: `Start-VoiceAssistant.ps1 -Mode silent` als Aufgabe „bei PC-Entsperrung".
 
@@ -188,11 +220,17 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 - [x] **Piper TTS auf GPU (DirectML)** — bestätigt 1.93× Speedup auf AMD RX 6800 XT.
 - [x] **Piper Streaming-API** — `POST /tts/synthesize` mit chunked HTTP-Streaming (Satz-für-Satz → niedrigere TTFA).
 - [x] **TTS-Settings konfigurierbar** — `length_scale`, `noise_scale`, `noise_w_scale` per Request; Voice-Wechsel per `model`-Feld.
+- [x] **FIFO-TTS-Playback-Pfad** — Bot spielt Server-Opus-Frames über `tts_start`/`tts_frame`/`tts_done` in FIFO-Reihenfolge, ohne JitterBuffer/Timestamp-Scheduling/Stale-Drops im aktiven TTS-Pfad.
+- [x] **TTS-Unterbrechung mit Resume/Rewind** — User-Sprache pausiert Playback nach `INTERRUPT_MIN_MS`, Resume nach `RESUME_GATE_MS`, Wiederholung über `REWIND_MS`.
+- [x] **Konfigurierbare Stop-Phrases** — `STOP_PHRASES` und `STOP_WITHOUT_WAKE_MAX_WORDS`; Stop bricht Playback und laufenden TTS-Stream ab.
+- [x] **STT-Split-Debug** — lange Utterances loggen bei `DEBUG=1` Chunk-Dauern, Threshold und Split-Typ; `STT_MAX_CHUNK_SECONDS` ist konfigurierbar.
+- [x] **`/ask` + `@mention` History-Scoping** — Requests aus dem Text-Chat des aktiven Voice-Channels teilen die Voice-Session-History; andere Text-Channels behalten je eine eigene channel-scoped History (server-seitig `sessionlessHistory(channel_<id>)`). Normale Chat-Nachrichten ohne Mention werden ignoriert.
 
 ---
 
 ## Verworfen
 
+- **WebSocket-basiertes Piper-Streaming** (`piper-streaming` / `paroli`) — evaluiert in `feature/piper-pipeline-rework`. HTTP-Chunked-Streaming liefert identische TTFA (first-byte innerhalb von 100–200 ms), kein messbarer Vorteil für unser 0.5–2s End-to-End-Ziel. Aufwand >> Nutzen.
 - **Mehrere gleichzeitige Sessions** — Bot ist bewusst auf einen Voice-Channel beschränkt.
 - **`/redact`-Command** — würde LLM-Entscheidungen erfordern. Off-Topic-Filter passiert manuell oder in der externen Cowork-Pipeline.
 - **`/marker`-Command** — gleiches Argument; Anker im Transkript besser über Pause-Erkennung + Spielernotizen.

@@ -1,5 +1,5 @@
 import { WebSocketServer } from 'ws';
-import { MAGIC_DNLK, buildFrame } from './protocol.js';
+import { randomUUID } from 'crypto';
 import { ensureSession } from './state.js';
 import { log, debug } from './logger.js';
 import opus from '@discordjs/opus';
@@ -40,7 +40,18 @@ export function initDownlinkWSS({} = {}) {
   return wss;
 }
 
-// Beispiel: 1 s 440 Hz Testton in 20 ms Opus-Frames an alle Bots der Session
+function sendJson(ws, obj) {
+  if (ws.readyState !== 1) return false;
+  try {
+    ws.send(JSON.stringify(obj));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Beispiel: 1 s 440 Hz Testton in 20 ms Opus-Frames an alle Bots der Session.
+// Uses the same JSON tts_start / tts_frame / tts_done path as Piper TTS.
 export async function sendTestTone(sessionId) {
   const s = ensureSession(sessionId);
   if (!s) return;
@@ -55,19 +66,20 @@ export async function sendTestTone(sessionId) {
       const sample = Math.round(Math.sin(2 * Math.PI * 440 * t) * 2000);
       pcm.writeInt16LE(sample, n * 2);
     }
-    frames.push(Buffer.from(enc.encode(pcm)));
+    frames.push(Buffer.from(enc.encode(pcm, frameSamples)));
   }
-  const ts0 = Date.now();
+  const id = `tone-${randomUUID()}`;
   for (const ws of s.downlinks) {
-    if (ws.readyState !== 1) continue; // skip closed/closing sockets
-    let seq = 0;
+    if (!sendJson(ws, { type: 'tts_start', id })) continue;
     for (let i = 0; i < frames.length; i++) {
-      const pkt = buildFrame({
-        magic: MAGIC_DNLK, codec: 'opus',
-        sessionId, userId: 0n, seq: seq++, tsMs: ts0 + i * 20, payload: frames[i],
+      sendJson(ws, {
+        type: 'tts_frame',
+        id,
+        seq: i,
+        payload: frames[i].toString('base64'),
       });
-      try { ws.send(pkt, { binary: true }); } catch {}
     }
+    sendJson(ws, { type: 'tts_done', id });
   }
-  debug('test tone sent to session', sessionId.toString());
+  debug('test tone sent to session', sessionId.toString(), 'frames=', frames.length);
 }

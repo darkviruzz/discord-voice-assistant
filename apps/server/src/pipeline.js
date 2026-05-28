@@ -1,13 +1,11 @@
 import { randomUUID } from 'crypto';
-import { appendFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { sessions } from './state.js';
+import { sessions, ensureSession } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { chat } from './llm.js';
-import { synthesizeStream } from './tts.js';
-import { MAGIC_DNLK, buildFrame } from './protocol.js';
+import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
+import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import opus from '@discordjs/opus';
@@ -16,11 +14,40 @@ const { OpusEncoder } = opus;
 
 // ── Stop-command detection ───────────────────────────────────────────────────
 
-// Matches German stop commands, with or without the wake word in front.
-const STOP_RE = /\b(stopp?|aufhören|halt(e)?\s*(ein|an)?|abbrechen|beenden)\b/i;
+const DEFAULT_STOP_PHRASES = [
+  'stop',
+  'stopp',
+  'abbrechen',
+  'beenden',
+  'hör auf',
+  'aufhören',
+  'halt',
+  'halte an',
+  'halte ein',
+];
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stopPhrases() {
+  const raw = process.env.STOP_PHRASES;
+  const phrases = raw
+    ? raw.split(',').map((item) => item.trim()).filter(Boolean)
+    : DEFAULT_STOP_PHRASES;
+  return phrases.length > 0 ? phrases : DEFAULT_STOP_PHRASES;
+}
+
+function stopRegex() {
+  const body = stopPhrases()
+    .map((phrase) => phrase.split(/\s+/).map(escapeRegex).join('\\s+'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  return new RegExp(`(^|[^\\p{L}\\p{N}])(?:${body})(?=$|[^\\p{L}\\p{N}])`, 'iu');
+}
 
 function isStopCommand(text) {
-  return STOP_RE.test(text);
+  return stopRegex().test(text);
 }
 
 // ── Audio helpers ────────────────────────────────────────────────────────────
@@ -45,89 +72,22 @@ function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
   return Buffer.concat([hdr, pcm]);
 }
 
-// Parse a WAV buffer and return { pcm, sampleRate, channels, bitDepth }.
-function parseWav(buf) {
-  if (buf.length < 44) throw new Error('wav: buffer too short');
-  if (buf.toString('ascii', 0, 4) !== 'RIFF') throw new Error('wav: not RIFF');
-  if (buf.toString('ascii', 8, 12) !== 'WAVE') throw new Error('wav: not WAVE');
-
-  let offset = 12;
-  let sampleRate, channels, bitDepth, dataStart, dataLen;
-
-  while (offset + 8 <= buf.length) {
-    const id   = buf.toString('ascii', offset, offset + 4);
-    const size = buf.readUInt32LE(offset + 4);
-    offset += 8;
-    if (id === 'fmt ') {
-      const fmt = buf.readUInt16LE(offset);
-      if (fmt !== 1) throw new Error(`wav: unsupported format ${fmt} (only PCM=1)`);
-      channels   = buf.readUInt16LE(offset + 2);
-      sampleRate = buf.readUInt32LE(offset + 4);
-      bitDepth   = buf.readUInt16LE(offset + 14);
-    } else if (id === 'data') {
-      dataStart = offset;
-      dataLen   = Math.min(size, buf.length - offset);
-      break;
-    }
-    offset += size % 2 === 0 ? size : size + 1; // RIFF chunks are word-aligned
-  }
-
-  if (dataStart == null) throw new Error('wav: no data chunk');
-  return { pcm: buf.subarray(dataStart, dataStart + dataLen), sampleRate, channels, bitDepth };
-}
-
-// Stereo / multi-channel → mono by averaging.
-function toMono(pcmI16Le, channels) {
-  if (channels === 1) return pcmI16Le;
-  const frames = Math.floor(pcmI16Le.length / 2 / channels);
-  const out = Buffer.alloc(frames * 2);
-  for (let i = 0; i < frames; i++) {
-    let sum = 0;
-    for (let c = 0; c < channels; c++) {
-      sum += pcmI16Le.readInt16LE((i * channels + c) * 2);
-    }
-    out.writeInt16LE(Math.round(sum / channels), i * 2);
-  }
-  return out;
-}
-
-// Linear-interpolation resampler (mono int16LE).
-function resampleMono(src, fromRate, toRate) {
-  if (fromRate === toRate) return src;
-  const srcFrames = src.length / 2;
-  const dstFrames = Math.round(srcFrames * toRate / fromRate);
-  const dst = Buffer.alloc(dstFrames * 2);
-  for (let i = 0; i < dstFrames; i++) {
-    const pos = i * fromRate / toRate;
-    const lo  = Math.min(Math.floor(pos), srcFrames - 1);
-    const hi  = Math.min(lo + 1,          srcFrames - 1);
-    const s0  = src.readInt16LE(lo * 2);
-    const s1  = src.readInt16LE(hi * 2);
-    const s   = Math.round(s0 + (s1 - s0) * (pos - lo));
-    dst.writeInt16LE(Math.max(-32768, Math.min(32767, s)), i * 2);
-  }
-  return dst;
-}
-
-// Encode 48 kHz mono int16LE PCM to an array of Opus Buffer packets.
-function pcm48kToOpusFrames(pcm48k) {
-  const enc        = new OpusEncoder(48000, 1);
-  const frameSamples = 960;      // 20 ms @ 48 kHz
-  const frameBytes   = frameSamples * 2;
-  const frames = [];
-  for (let off = 0; off + frameBytes <= pcm48k.length; off += frameBytes) {
-    frames.push(Buffer.from(enc.encode(pcm48k.subarray(off, off + frameBytes))));
-  }
-  return frames;
-}
-
 // ── Long-audio transcription helpers ────────────────────────────────────────
 
-const FRAME           = 960;        // 20 ms @ 48 kHz
-const SILENCE_FRAMES  = 15;         // 300 ms continuous silence → split candidate
-const MIN_CHUNK       = 48000 * 10; // 10 s minimum speech before a natural split
-const MAX_CHUNK       = 48000 * 30; // 30 s hard cap
-const OVERLAP_SAMPLES = 48000 *  2; // 2 s overlap used only in the no-silence fallback
+const SAMPLE_RATE     = 48000;
+const FRAME           = 960;              // 20 ms @ 48 kHz
+const SILENCE_FRAMES  = 15;               // 300 ms continuous silence → split candidate
+const MIN_CHUNK       = SAMPLE_RATE * 10; // 10 s minimum speech before a natural split
+const OVERLAP_SAMPLES = SAMPLE_RATE *  2; // 2 s overlap used only in the no-silence fallback
+
+function numberEnv(name, fallback, min = 0) {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.max(min, value) : fallback;
+}
+
+function maxChunkSamples() {
+  return Math.round(SAMPLE_RATE * numberEnv('STT_MAX_CHUNK_SECONDS', 30, 1));
+}
 
 function frameRms(pcm, sampleOffset) {
   let sum = 0;
@@ -144,7 +104,8 @@ function frameRms(pcm, sampleOffset) {
 //   hasOverlap=true  — forced split with 2 s overlap; stitchOverlap() should merge with previous.
 function splitAtSilence(pcm) {
   const totalSamples = pcm.length / 2;
-  if (totalSamples <= MAX_CHUNK) return [{ pcm, hasOverlap: false }];
+  const maxChunk = maxChunkSamples();
+  if (totalSamples <= maxChunk) return [{ pcm, hasOverlap: false, split: 'single' }];
 
   const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
   const chunks = [];
@@ -174,7 +135,11 @@ function splitAtSilence(pcm) {
         }
         // Natural split: enough speech before this silence.
         if ((silenceStart - chunkStart) >= MIN_CHUNK) {
-          chunks.push({ pcm: pcm.subarray(chunkStart * 2, silenceStart * 2), hasOverlap: nextHasOverlap });
+          chunks.push({
+            pcm: pcm.subarray(chunkStart * 2, silenceStart * 2),
+            hasOverlap: nextHasOverlap,
+            split: 'natural-silence',
+          });
           nextHasOverlap = false;
           chunkStart     = off;
           bestSilStart   = -1; bestSilEnd = -1; bestSilDur = 0;
@@ -184,17 +149,25 @@ function splitAtSilence(pcm) {
       silenceFrames = 0;
     }
 
-    // Hard cap: chunk has grown to MAX_CHUNK.
-    if ((off + FRAME - chunkStart) >= MAX_CHUNK) {
+    // Hard cap: chunk has grown to STT_MAX_CHUNK_SECONDS.
+    if ((off + FRAME - chunkStart) >= maxChunk) {
       if (bestSilStart >= 0) {
         // Split at the longest silence found — best boundary available.
-        chunks.push({ pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2), hasOverlap: nextHasOverlap });
+        chunks.push({
+          pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2),
+          hasOverlap: nextHasOverlap,
+          split: 'natural-silence',
+        });
         nextHasOverlap = false;
         chunkStart     = bestSilEnd; // skip silence
       } else {
         // No qualifying silence at all — forced split with 2 s overlap.
         const splitAt = off + FRAME;
-        chunks.push({ pcm: pcm.subarray(chunkStart * 2, splitAt * 2), hasOverlap: nextHasOverlap });
+        chunks.push({
+          pcm: pcm.subarray(chunkStart * 2, splitAt * 2),
+          hasOverlap: nextHasOverlap,
+          split: 'forced-overlap',
+        });
         nextHasOverlap = true; // next chunk carries the overlap flag
         chunkStart     = Math.max(0, splitAt - OVERLAP_SAMPLES);
       }
@@ -204,9 +177,27 @@ function splitAtSilence(pcm) {
   }
 
   if (chunkStart * 2 < pcm.length) {
-    chunks.push({ pcm: pcm.subarray(chunkStart * 2), hasOverlap: nextHasOverlap });
+    chunks.push({
+      pcm: pcm.subarray(chunkStart * 2),
+      hasOverlap: nextHasOverlap,
+      split: 'tail',
+    });
   }
-  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false }];
+  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false, split: 'single' }];
+}
+
+function logSilenceSplitDebug(pcm48k, chunks) {
+  const totalSec = pcm48k.length / 2 / SAMPLE_RATE;
+  const maxSec = numberEnv('STT_MAX_CHUNK_SECONDS', 30, 1);
+  if (totalSec <= maxSec) return;
+
+  const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
+  const details = chunks.map((chunk, i) => {
+    const sec = chunk.pcm.length / 2 / SAMPLE_RATE;
+    const overlap = chunk.hasOverlap ? ',overlap-in' : '';
+    return `#${i + 1}:${sec.toFixed(1)}s/${chunk.split}${overlap}`;
+  }).join(' ');
+  debug(`pipeline: silence split debug duration=${totalSec.toFixed(1)}s maxChunk=${maxSec}s threshold=${thresh} chunks=${chunks.length} ${details}`);
 }
 
 // Soft word-boundary deduplication for the 2 s overlap fallback.
@@ -225,60 +216,66 @@ function stitchOverlap(t1, t2) {
   return t1.trim() + ' ' + t2.trim();
 }
 
-// Transcribe PCM split at silence boundaries. Returns one string per logical chunk.
+function summarizeStt(chunks, chunkResults) {
+  let weightedNoSpeech = 0;
+  let totalWeight = 0;
+  let noSpeechProbMax = null;
+
+  for (const result of chunkResults) {
+    const avg = result.meta?.noSpeechProbAvg;
+    if (typeof avg !== 'number') continue;
+    const weight = Math.max(1, result.text.length || result.durationMs || 1);
+    weightedNoSpeech += avg * weight;
+    totalWeight += weight;
+    const max = result.meta?.noSpeechProbMax;
+    if (typeof max === 'number') noSpeechProbMax = noSpeechProbMax === null ? max : Math.max(noSpeechProbMax, max);
+  }
+
+  return {
+    provider: 'whisper.cpp',
+    noSpeechProbAvg: totalWeight > 0 ? weightedNoSpeech / totalWeight : null,
+    noSpeechProbMax,
+    chunkDurationsMs: chunks.map((chunk) => Math.round((chunk.pcm.length / 2 / SAMPLE_RATE) * 1000)),
+    splitTypes: chunks.map((chunk) => chunk.split),
+    chunks: chunkResults.map((result, i) => ({
+      index: i,
+      durationMs: result.durationMs,
+      splitType: chunks[i]?.split ?? 'unknown',
+      hasOverlap: !!chunks[i]?.hasOverlap,
+      textLength: result.text.length,
+      segmentCount: result.meta?.segmentCount ?? 0,
+      noSpeechProbAvg: result.meta?.noSpeechProbAvg ?? null,
+      noSpeechProbMax: result.meta?.noSpeechProbMax ?? null,
+      language: result.meta?.language ?? null,
+    })),
+  };
+}
+
+// Transcribe PCM split at silence boundaries. Returns text chunks plus STT metadata.
 async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
+  logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {
     log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
   }
   const parts = [];
+  const chunkResults = [];
   for (const { pcm, hasOverlap } of chunks) {
-    const t = await transcribe(pcmToWav(pcm));
-    if (!t) continue;
+    const { text, meta } = await transcribe(pcmToWav(pcm));
+    const result = {
+      text,
+      meta,
+      durationMs: Math.round((pcm.length / 2 / SAMPLE_RATE) * 1000),
+    };
+    chunkResults.push(result);
+    if (!text) continue;
     if (hasOverlap && parts.length > 0) {
-      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], t);
+      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], text);
     } else {
-      parts.push(t);
+      parts.push(text);
     }
   }
-  return parts;
-}
-
-// Append one transcript line to a per-session JSONL log on disk.
-function logTranscript(sessionId, userId, text) {
-  const dir = (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
-  try {
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(
-      join(dir, `session_${sessionId}.jsonl`),
-      JSON.stringify({ tsMs: Date.now(), userId: userId.toString(), text }) + '\n',
-    );
-  } catch (e) {
-    warn('pipeline: transcript log error:', e.message);
-  }
-}
-
-// Push Opus frames to every downlink subscriber of a session.
-function sendOpusToSession(sessionId, opusFrames) {
-  const s = sessions.get(BigInt(sessionId));
-  if (!s || s.downlinks.size === 0) {
-    debug('pipeline: no downlink subscribers for session', sessionId.toString());
-    return;
-  }
-  const ts0 = Date.now();
-  for (const ws of s.downlinks) {
-    if (ws.readyState !== 1) continue;
-    let seq = 0;
-    for (let i = 0; i < opusFrames.length; i++) {
-      const pkt = buildFrame({
-        magic: MAGIC_DNLK, codec: 'opus',
-        sessionId: BigInt(sessionId), userId: 0n,
-        seq: seq++, tsMs: ts0 + i * 20, payload: opusFrames[i],
-      });
-      try { ws.send(pkt, { binary: true }); } catch {}
-    }
-  }
-  log('pipeline: sent', opusFrames.length, 'opus frames to session', sessionId.toString());
+  return { transcripts: parts, stt: summarizeStt(chunks, chunkResults) };
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -289,10 +286,203 @@ const activePipelines = new Map();
 
 // Last LLM response per session — used to add interrupt context to history.
 const lastResponses = new Map(); // sessionId(string) → response text
+const textHistories = new Map();
+
+function wakeWordName() {
+  return process.env.WAKE_WORD ?? 'Rabenauge';
+}
+
+function sessionlessHistory(scope) {
+  const key = scope || 'global';
+  if (!textHistories.has(key)) textHistories.set(key, []);
+  return textHistories.get(key);
+}
+
+function appendHistory(history, userText, assistantText) {
+  history.push({ role: 'user', content: userText });
+  history.push({ role: 'assistant', content: assistantText });
+  const maxTurns = numberEnv('HISTORY_TURNS', 6, 1);
+  const maxMessages = Math.ceil(maxTurns * 2);
+  if (history.length > maxMessages) {
+    history.splice(0, history.length - maxMessages);
+  }
+}
+
+function maxStopWordsWithoutWake() {
+  return Math.floor(numberEnv('STOP_WITHOUT_WAKE_MAX_WORDS', 5, 0));
+}
+
+function maybeStopWithoutWake(text) {
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  return wordCount <= maxStopWordsWithoutWake() && isStopCommand(text);
+}
+
+function handleStopCommand({ sessionId, userId, text, wakeWordDetected = false, query = null, userDisplayName = null, channelId = null, source = 'voice' }) {
+  if (sessionId) cancelTtsForSession(sessionId, 'stopword');
+  broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
+  logTranscriptEvent(sessionId ?? `text_${channelId ?? 'global'}`, 'stop_command', {
+    userId,
+    userDisplayName,
+    text,
+    source,
+    wakeWordDetected,
+    query,
+  });
+
+  if (sessionId) {
+    const session = sessions.get(BigInt(sessionId));
+    if (session) {
+      const interrupted = lastResponses.get(String(sessionId));
+      session.conversationHistory.push({
+        role: 'system',
+        content: interrupted
+          ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
+          : 'Der Sprecher hat die Wiedergabe gestoppt.',
+      });
+    }
+  }
+
+  broadcastToAllBots({
+    type: 'chat_message',
+    cmdId: randomUUID(),
+    channelId,
+    question: text,
+    userDisplayName,
+    assistantName: wakeWordName(),
+    isStop: true,
+  });
+  log('pipeline: stop command detected, playback cleared');
+}
+
+async function answerQuestion({
+  sessionId,
+  userId,
+  userDisplayName = null,
+  query,
+  transcript,
+  source = 'voice',
+  channelId = null,
+  tts = true,
+}) {
+  const turnId = randomUUID();
+  const sid = sessionId ? BigInt(sessionId) : null;
+  const history = sid
+    ? sessions.get(sid)?.conversationHistory
+    : sessionlessHistory(channelId ? `channel_${channelId}` : 'global');
+
+  if (!history) {
+    warn('pipeline: session not found', sessionId?.toString?.() ?? String(sessionId));
+    return;
+  }
+
+  let response;
+  try {
+    response = await chat(history, query);
+  } catch (e) {
+    warn('pipeline: llm error:', e.message);
+    return;
+  }
+
+  const { text: responseText, speakerId, model: ttsModel } = response;
+  logTranscriptEvent(sessionId ?? `text_${channelId ?? 'global'}`, 'assistant_response', {
+    turnId,
+    userId,
+    userDisplayName,
+    source,
+    channelId,
+    query,
+    text: responseText,
+    speakerId,
+    model: ttsModel,
+    ttsRequested: tts,
+  });
+
+  appendHistory(history, query, responseText);
+  if (sid) lastResponses.set(sid.toString(), responseText);
+
+  broadcastToAllBots({
+    type: 'chat_message',
+    cmdId: randomUUID(),
+    channelId,
+    question: transcript ?? query,
+    answer: responseText,
+    userDisplayName,
+    assistantName: wakeWordName(),
+    isStop: false,
+  });
+
+  if (!tts) return;
+  if (!sid) {
+    logTranscriptEvent(`text_${channelId ?? 'global'}`, 'tts_skipped', {
+      turnId,
+      reason: 'no active voice session',
+    });
+    return;
+  }
+
+  try {
+    await streamTtsToSession(sid, responseText, {
+      model: ttsModel,
+      speakerId,
+      turnId,
+    });
+  } catch (e) {
+    if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
+  }
+}
 
 // ── Main pipeline ────────────────────────────────────────────────────────────
 
-export async function runPipeline(sessionId, userId) {
+export async function runTextPipeline({
+  sessionId = null,
+  userId = '0',
+  userDisplayName = null,
+  question,
+  channelId = null,
+  tts = false,
+  source = 'text',
+} = {}) {
+  const query = String(question || '').trim();
+  if (!query) return;
+
+  const logSessionId = sessionId ?? `text_${channelId ?? 'global'}`;
+  logTranscriptEvent(logSessionId, 'text_query', {
+    userId,
+    userDisplayName,
+    channelId,
+    text: query,
+    ttsRequested: tts,
+    source,
+  });
+
+  if (maybeStopWithoutWake(query)) {
+    handleStopCommand({
+      sessionId,
+      userId,
+      userDisplayName,
+      channelId,
+      text: query,
+      source,
+    });
+    return;
+  }
+
+  const sid = sessionId ? BigInt(sessionId) : null;
+  if (sid) ensureSession(sid);
+
+  await answerQuestion({
+    sessionId,
+    userId,
+    userDisplayName,
+    channelId,
+    query,
+    transcript: query,
+    source,
+    tts,
+  });
+}
+
+export async function runPipeline(sessionId, userId, metadata = {}) {
   const key = `${sessionId}:${userId}`;
   if (activePipelines.has(key)) {
     debug('pipeline: aborting previous run for', key);
@@ -315,20 +505,33 @@ export async function runPipeline(sessionId, userId) {
 
     // 3. STT — split at silence boundaries, transcribe each chunk independently.
     let transcripts;
+    let stt;
     try {
-      transcripts = await transcribeChunked(pcm48k);
+      const result = await transcribeChunked(pcm48k);
+      transcripts = result.transcripts;
+      stt = result.stt;
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;
     }
 
-    if (transcripts.length === 0) {
-      debug('pipeline: empty transcript, skipping');
+    // Log the full utterance (all chunks joined) to disk.
+    const fullTranscript = transcripts.join(' ');
+    logTranscriptEvent(sessionId, 'user_transcript', {
+      userId,
+      userDisplayName: metadata.userDisplayName ?? null,
+      startTsMs: metadata.startTsMs ?? null,
+      endTsMs: metadata.endTsMs ?? null,
+      durationMs: metadata.durationMs ?? null,
+      text: fullTranscript,
+      chunks: transcripts,
+      stt,
+    });
+
+    if (!fullTranscript) {
+      debug('pipeline: empty transcript, skipping wake-word processing');
       return;
     }
-
-    // Log the full utterance (all chunks joined) to disk.
-    logTranscript(sessionId, userId, transcripts.join(' '));
 
     // 4. Read wake-word config.
     const wakeWord = process.env.WAKE_WORD        ?? 'Rabenauge';
@@ -343,30 +546,20 @@ export async function runPipeline(sessionId, userId) {
     for (const chunk of transcripts) {
       const wordCount = chunk.trim().split(/\s+/).length;
       const wr        = detectWakeWord(chunk, wakeWord, fuzzy, maxPos);
-
       // Stop-command check (works with or without wake word).
       const isStop = (wr.detected && isStopCommand(wr.query)) ||
-                     (!wr.detected && wordCount <= 5 && isStopCommand(chunk));
+                     (!wr.detected && wordCount <= maxStopWordsWithoutWake() && isStopCommand(chunk));
 
       if (isStop) {
-        broadcastToAllBots({ type: 'stop_playback', cmdId: randomUUID() });
-
-        const session = sessions.get(BigInt(sessionId));
-        if (session) {
-          const interrupted = lastResponses.get(String(sessionId));
-          session.conversationHistory.push({
-            role: 'system',
-            content: interrupted
-              ? `Der Sprecher hat dich unterbrochen. Deine letzte Antwort war: "${interrupted.slice(0, 100)}"`
-              : 'Der Sprecher hat die Wiedergabe gestoppt.',
-          });
-        }
-
-        broadcastToAllBots({
-          type: 'chat_message', cmdId: randomUUID(),
-          question: chunk, isStop: true,
+        handleStopCommand({
+          sessionId,
+          userId,
+          userDisplayName: metadata.userDisplayName ?? null,
+          text: chunk,
+          wakeWordDetected: wr.detected,
+          query: wr.detected ? wr.query : null,
+          source: 'voice',
         });
-        log('pipeline: stop command detected, playback cleared');
         return;
       }
 
@@ -384,55 +577,23 @@ export async function runPipeline(sessionId, userId) {
 
     const { query } = wakeResult;
     log('pipeline: wake word detected, query=', JSON.stringify(query));
-
-    // 7. LLM.
-    const session = sessions.get(BigInt(sessionId));
-    if (!session) {
-      warn('pipeline: session not found', sessionId.toString());
-      return;
-    }
-
-    let response;
-    try {
-      response = await chat(session.conversationHistory, query);
-    } catch (e) {
-      warn('pipeline: llm error:', e.message);
-      return;
-    }
-
-    const { text: responseText, speakerId, model: ttsModel } = response;
-
-    // Persist turn to history using the spoken text (not raw JSON).
-    session.conversationHistory.push({ role: 'user',      content: query        });
-    session.conversationHistory.push({ role: 'assistant', content: responseText });
-    lastResponses.set(String(sessionId), responseText);
-
-    // Always send the Q&A to the Discord text channel.
-    broadcastToAllBots({
-      type: 'chat_message', cmdId: randomUUID(),
-      question: transcript, answer: responseText, isStop: false,
+    logTranscriptEvent(sessionId, 'wakeword_query', {
+      userId,
+      userDisplayName: metadata.userDisplayName ?? null,
+      transcript,
+      query,
     });
 
-    // 8–10. Streaming TTS → resample per sentence → encode → push to downlink.
-    // Each sentence chunk is sent as soon as it is synthesized, reducing TTFA.
-    try {
-      const opts = { model: ttsModel, speakerId };
-      for await (const { pcm, sampleRate, isWav } of synthesizeStream(responseText, opts, ctrl.signal)) {
-        if (ctrl.signal.aborted) break;
-        let rawPcm = pcm;
-        let rate   = sampleRate;
-        let channels = 1;
-        if (isWav) {
-          // ElevenLabs fallback: pcm is a full WAV buffer
-          ({ pcm: rawPcm, sampleRate: rate, channels } = parseWav(pcm));
-        }
-        const mono48k    = resampleMono(toMono(rawPcm, channels), rate, 48000);
-        const opusFrames = pcm48kToOpusFrames(mono48k);
-        sendOpusToSession(sessionId, opusFrames);
-      }
-    } catch (e) {
-      if (e.name !== 'AbortError') warn('pipeline: tts stream error:', e.message);
-    }
+    // 7. LLM + optional TTS.
+    await answerQuestion({
+      sessionId,
+      userId,
+      userDisplayName: metadata.userDisplayName ?? null,
+      query,
+      transcript,
+      source: 'voice',
+      tts: true,
+    });
   } finally {
     // Only clean up if this run is still the active one (a newer run may have replaced it).
     if (activePipelines.get(key) === ctrl) activePipelines.delete(key);

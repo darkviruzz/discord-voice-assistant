@@ -61,8 +61,8 @@ export class ControlClient extends EventEmitter {
     this.fsm.set(State.DISCONNECTED);
   }
 
-  ack(cmdId, ok = true, error) {
-    const msg = { type: 'ack', cmdId, ok };
+  ack(cmdId, ok = true, error, extra = {}) {
+    const msg = { type: 'ack', cmdId, ok, ...extra };
     if (error) msg.error = error;
     this._send(msg);
   }
@@ -82,8 +82,30 @@ export class ControlClient extends EventEmitter {
 
   // Notify the server that a speaker's utterance has finished.
   // { sessionId: string, userId: string, durationMs: number }
-  sendUtteranceEnd({ sessionId, userId, durationMs }) {
-    this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs });
+  sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
+    this._sendIfReady({ type: 'utterance_end', cmdId: randomUUID(), sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName });
+  }
+
+  playbackEvent(event) {
+    this._sendIfReady({ type: 'playback_event', cmdId: randomUUID(), ...event });
+  }
+
+  debugTts({ sessionId, text }) {
+    this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
+  }
+
+  textQuery({ sessionId, question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
+    return this._sendIfReady({
+      type: 'text_query',
+      cmdId: randomUUID(),
+      sessionId,
+      question,
+      tts,
+      channelId,
+      userId,
+      userDisplayName,
+      source,
+    });
   }
 
   _sendIfReady(obj) {

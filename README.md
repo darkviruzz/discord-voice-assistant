@@ -13,8 +13,8 @@ Alles läuft **lokal** — auch off-topic / privates Geplauder wird transkribier
 
 ## Komponenten
 
-* **Bot (apps/bot)** — Discord-Recorder. Nimmt pro Sprecher Opus-Frames auf (siehe [recorder.js](apps/bot/src/recorder.js)), speichert lokal als WAV. Sendet im Live-Modus optional Frames an den Server für sofortige Transkription. Wiedergabe von TTS-Antworten mit Jitter-/Playout-Puffer und Gating (spielt nur bei Stille).
-* **Server (apps/server)** — STT-/LLM-/TTS-Pipeline (Whisper + Ollama + Piper, alle lokal). Empfängt Uplink-Frames, transkribiert pro Utterance, scannt auf Wake-Word, ruft LLM auf, generiert TTS-Antwort.
+* **Bot (apps/bot)** — Discord-Recorder. Nimmt pro Sprecher Opus-Frames auf (siehe [recorder.js](apps/bot/src/recorder.js)), speichert lokal als WAV. Sendet im Live-Modus optional Frames an den Server für sofortige Transkription. TTS-Antworten werden über den neuen FIFO-Downlink abgespielt: keine Timestamp-Scheduling-Logik, kein JitterBuffer und keine Stale-Drops im aktiven TTS-Pfad.
+* **Server (apps/server)** — STT-/LLM-/TTS-Pipeline (Whisper + Ollama + Piper, alle lokal). Empfängt Uplink-Frames, transkribiert pro Utterance, scannt auf Wake-Word/Stop-Phrases, ruft LLM auf, generiert TTS-Antwort und streamt Opus-Frames per JSON-Downlink an den Bot.
 * **Cowork-Pipeline** *(extern)* — beobachtet den Transkript-Inbox-Ordner, reichert Spieler-Notizen an, baut/aktualisiert das Obsidian-Wiki.
 
 ## Operating Modes
@@ -68,10 +68,10 @@ Konventionen:
 Drei Kanäle zwischen Bot und Server:
 
 * `/uplink` (Binär, 20-ms-Frames pro Sprecher; Codec `opus` Passthrough — kein Re-Encode im Bot)
-* `/downlink` (Binär, 20-ms Opus → Bot)
+* `/downlink` (JSON, `tts_start` / `tts_frame` / `tts_done`; Opus-Frames base64 im Payload)
 * `/control` (WebSocket JSON; Events/Befehle/Backpressure)
 
-**Gating/Playout im Bot**: Wiedergabe startet nur, wenn `activeSpeakers.size == 0` für ≥ `GATE_MS`. Bei Unterbrechung pausieren; beim Fortsetzen werden die letzten ~1000 ms aus dem Wiedergabe-History-Buffer erneut eingespielt.
+**TTS-Playback im Bot**: Der neue Pfad nutzt eine FIFO-Queue ohne Timestamp-Scheduling und ohne Stale-Drops. Playback startet erst mit dem ersten echten `tts_frame`, endet bei `tts_done` und leerer Queue mit `push(null)`. Bei Unterbrechung pausiert der Readable; beim Fortsetzen werden `REWIND_MS` aus der Playback-History erneut eingespielt. Der Bot meldet bei Stop bereits `framesPlayed`/`msPlayed` zurück, damit spätere Transkript-Kürzung möglich ist.
 
 **Latenz** (LAN-Ziel) für die Wake-Word-Antwort: 0,5–2,0 s end-to-end (Transport << 5 ms; Rest = Puffer + STT/TTS/LLM). Latenz ist **nicht** Tier-1-Optimierungsziel — Transkript-Qualität geht vor.
 
@@ -89,14 +89,16 @@ SESSION_IDLE_HOURS=4
 
 SERVER_BASE_URL=ws://192.168.20.101:7440
 CONTROL_BEARER=changeme
+SERVER_START_CMD=ssh -i ~/.ssh/id_ed25519_va -o BatchMode=yes -o StrictHostKeyChecking=accept-new nogar@192.168.20.101 "powershell -ExecutionPolicy Bypass -File C:\Users\nogar\Programme\discord-voice-assistant\scripts\Start-VoiceAssistant.ps1 -Mode silent"
 
 UPLINK_CODEC=opus
 UPLINK_OPUS_BITRATE=32000
 
 GATE_MS=80
 PLAYOUT_MAX_MS=1500
-INTERRUPT_MIN_MS=400
-RESUME_GATE_MS=900
+INTERRUPT_MIN_MS=800
+RESUME_GATE_MS=1200
+REWIND_MS=1000
 ```
 
 | Variable | Standard | Beschreibung |
@@ -107,6 +109,7 @@ RESUME_GATE_MS=900
 | `DEBUG` | — | Auf `1` setzen für ausführliche Logs (STT-Transkripte, Wake-Word-Ergebnis, LLM-Antworten). |
 | `SESSION_IDLE_HOURS` | `4` | Stunden Inaktivität bis zur automatischen Session-Finalisierung beim Serverneustart. |
 | `SERVER_BASE_URL` | — | Basis-URL des Servers, z. B. `ws://192.168.20.101:7440`. Bevorzugte Einstellung — überschreibt die Ableitung aus `CONTROL_WS_URL`. |
+| `SERVER_START_CMD` | — | Optionaler Startbefehl, den der Bot bei `/join` ausführt, wenn `SERVER_BASE_URL` nicht erreichbar ist. Getestet mit SSH auf den Windows-Server und `Start-VoiceAssistant.ps1 -Mode silent`. |
 | `UPLINK_PROTO` | `ws` | Protokoll für den Uplink-WebSocket. `ws` für LAN, `wss` für TLS. |
 | `UPLINK_HOST` | — | IP-Adresse oder Hostname des Servers. Nur nötig wenn `SERVER_BASE_URL` nicht gesetzt. |
 | `UPLINK_PORT` | — | TCP-Port des Servers (z. B. `7440`). Nur nötig wenn `SERVER_BASE_URL` nicht gesetzt. |
@@ -115,10 +118,13 @@ RESUME_GATE_MS=900
 | `DOWNLINK_WS_URL` | — | Direkte WebSocket-URL für den Downlink-Kanal. Veraltet — `SERVER_BASE_URL` verwenden. |
 | `CONTROL_WS_URL` | — | Direkte WebSocket-URL für die Control-Plane, z. B. `ws://192.168.20.101:7440/control`. Veraltet — `SERVER_BASE_URL` verwenden. |
 | `CONTROL_BEARER` | — | Bearer-Token zur Authentifizierung gegenüber dem Server. Muss mit dem Server-`CONTROL_BEARER` übereinstimmen. |
-| `GATE_MS` | `80` | Mindest-Stille in ms nach dem letzten Sprecher, bevor die Wiedergabe starten darf (normales Gating ohne Unterbrechung). Kleinere Werte = schnellerer Start, aber mehr Überschneidungen. |
-| `PLAYOUT_MAX_MS` | `1500` | Frames die älter als dieser Wert sind (in ms) werden im JitterBuffer als veraltet verworfen. Verhindert Wiedergabe von zu alten Frames bei langen Pausen. |
-| `INTERRUPT_MIN_MS` | `400` | Mindest-Sprechdauer in ms, ab der eine Aussage als echte Unterbrechung gewertet wird. Kürzere Geräusche (Husten, Lachen, Hintergrundgeräusche) werden ignoriert. |
-| `RESUME_GATE_MS` | `900` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Gibt dem Spieler Zeit, seinen Satz zu beenden. |
+| `GATE_MS` | `80` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
+| `PLAYOUT_MAX_MS` | `1500` | Legacy/derzeit ungenutzt im neuen FIFO-TTS-Pfad. |
+| `INTERRUPT_MIN_MS` | `800` | Mindest-Sprechdauer in ms, ab der eine Aussage als echte Unterbrechung gewertet wird. Kürzere Geräusche (Husten, Lachen, Hintergrundgeräusche) werden ignoriert. |
+| `RESUME_GATE_MS` | `1200` | Stille-Dauer in ms nach dem Ende einer Unterbrechung, bevor die Wiedergabe fortgesetzt wird. Wird bei erneuter User-Sprache während Pause neu gestartet. |
+| `REWIND_MS` | `1000` | Beim Fortsetzen nach einer Unterbrechung werden so viele Millisekunden aus der Playback-History erneut vor die Queue gelegt. |
+
+Für den Mention-Trigger `@Botname Frage` muss im Discord Developer Portal der privilegierte **Message Content Intent** für den Bot aktiviert sein. Der Slash-Command `/ask` funktioniert unabhängig davon.
 
 ### Server – `apps/server/.env`
 
@@ -131,6 +137,12 @@ DEBUG=1
 
 WHISPER_URL=http://localhost:8080
 WHISPER_LANGUAGE=de
+WHISPER_TEMPERATURE=0.1
+# no_speech_prob wird gespeichert, aber im Live-Pfad nicht verworfen.
+# Optionaler Zukunftswert fuer Finalize/offline-Filtertests:
+# WHISPER_NO_SPEECH_THRESHOLD=0.67
+STT_MAX_CHUNK_SECONDS=30
+STT_SILENCE_THRESH=300
 
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.2
@@ -143,6 +155,8 @@ TTS_URL=http://localhost:5000
 WAKE_WORD=Rabenauge
 WAKE_WORD_FUZZY=true
 WAKE_WORD_POSITION=3
+STOP_PHRASES=stop,stopp,abbrechen,beenden,hör auf,aufhören,halt,halte an,halte ein
+STOP_WITHOUT_WAKE_MAX_WORDS=5
 ```
 
 #### Transport
@@ -161,6 +175,10 @@ WAKE_WORD_POSITION=3
 |---|---|---|
 | `WHISPER_URL` | `http://localhost:8080` | URL des whisper.cpp HTTP-Servers (`/inference`-Endpoint). |
 | `WHISPER_LANGUAGE` | `auto` | Sprache für Whisper. `de` für Deutsch, `en` für Englisch, `auto` für automatische Erkennung. `auto` ist etwas langsamer. |
+| `WHISPER_TEMPERATURE` | `0.2` | Sampling-Temperature für Whisper. Lokale `.env.example` nutzt konservativ `0.1`; Werte >0 liefern brauchbarere `no_speech_prob`-Werte als deterministisches `0`. |
+| `WHISPER_NO_SPEECH_THRESHOLD` | — | Der Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`; die Werte werden im JSONL gespeichert. Ein Threshold ist nur als späterer Finalize-/Offline-Filter vorgesehen. |
+| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks. Längere Utterances werden an Stille geteilt; wenn keine passende Stille gefunden wird, wird mit `OVERLAP=2s` forced gesplittet. |
+| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
 
 #### LLM
 
@@ -177,7 +195,7 @@ WAKE_WORD_POSITION=3
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `elevenlabs` für die ElevenLabs-Cloud-API. |
-| `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /synthesize` mit JSON `{text, model, speaker_id}` → WAV-Response. |
+| `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /tts/synthesize` mit JSON `{text, model, speaker_id, length_scale, noise_scale, noise_w_scale}` → chunked `audio/pcm-s16le`. |
 | `ELEVENLABS_API_KEY` | — | API-Key für ElevenLabs (nur bei `TTS_PROVIDER=elevenlabs`). |
 | `ELEVENLABS_VOICE_ID` | `EXAVITQu4vr4xnSDxMaL` | Voice-ID für ElevenLabs. Standard ist eine englische Männerstimme; für Deutsch eine passende Stimme aus dem ElevenLabs-Katalog wählen. |
 
@@ -188,9 +206,49 @@ WAKE_WORD_POSITION=3
 | `WAKE_WORD` | `Rabenauge` | Aktivierungswort. Der Bot verarbeitet eine Aussage nur, wenn dieses Wort erkannt wird. Groß-/Kleinschreibung wird ignoriert. |
 | `WAKE_WORD_FUZZY` | `true` | Fuzzy-Matching mit Levenshtein-Distanz ≤ 2. Erkennt Vertipper und Aussprache-Varianten (z. B. „Rabenaugen", „Rabenoge"). Auf `false` setzen für exaktes Matching. |
 | `WAKE_WORD_POSITION` | `3` | Maximale Wortposition des Wake-Words im Transkript. `3` = Wake-Word muss in den ersten 3 Wörtern stehen. `0` = überall im Satz erlaubt. Verhindert False-Positives wenn das Wake-Word mitten in einer Aussage vorkommt. |
-| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+| `STOP_PHRASES` | `stop,stopp,abbrechen,beenden,hör auf,aufhören,halt,halte an,halte ein` | Kommagetrennte Liste erkannter Stop-Phrasen. Mit Wake-Word wird nur der Text nach dem Wake-Word geprüft; ohne Wake-Word nur kurze Äußerungen bis `STOP_WITHOUT_WAKE_MAX_WORDS`. |
+| `STOP_WITHOUT_WAKE_MAX_WORDS` | `5` | Maximale Wortzahl für Stop-Phrases ohne Wake-Word. Verhindert, dass normale Sätze mit Stop-Wörtern versehentlich die Wiedergabe abbrechen. |
 
-> **TODO — Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Das Entfernen des früheren 6-Sekunden-Ringbuffers hat die Transkriptions-Erkennung bereits deutlich verbessert. Falls lange Fragen trotzdem abgeschnitten werden: `DEBUG=1` setzen und die Meldung `pipeline: Xs → N silence-split chunks` im Serverlog beobachten. Erscheint keine Aufteilungs-Meldung bei einer >30-Sekunden-Aufnahme, ist der Schwellwert zu niedrig (zu viel Hintergraudrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+> **Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Bei langen Aufnahmen (`> STT_MAX_CHUNK_SECONDS`) loggt der Server mit `DEBUG=1` Details wie Gesamtdauer, Threshold, Chunk-Anzahl, Chunk-Dauern und Split-Typ (`natural-silence`, `forced-overlap`, `tail`). Erscheint bei langen Fragen kein sinnvoller Natural-Split, ist der Schwellwert oft zu niedrig (zu viel Hintergrundrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+
+### Live-JSONL-Events
+
+Während Online-Live schreibt der Server rohe Events nach `TRANSCRIPT_DIR` (Default `./transcripts`) in `session_<sessionId>.jsonl`. Jede Zeile ist ein eigenständiges JSON-Objekt mit gemeinsamen Feldern:
+
+```json
+{"tsMs":1778600001000,"type":"user_transcript","sessionId":"1778422813219"}
+```
+
+`tsMs` ist ein absoluter Unix-Zeitstempel in Millisekunden und gilt für alle Event-Typen. Zusätzliche relative Zeitfelder werden bewusst vermieden, solange eine absolute Zeitangabe reicht.
+
+#### Schema v1
+
+* `session_meta` — einmal pro Session, direkt nach `session_start`. Enthält statische Session-Konfiguration: Discord-Guild/Channel, Bot-/Server-Version, LLM-/STT-/TTS-Konfiguration, Wake-Word, Stop-Phrases und ein vorbereitetes `users`-Objekt. Dieses Event macht spätere Finalize-/RAG-Schritte reproduzierbar, auch wenn `.env` oder Prompts später geändert wurden.
+* `user_transcript` — eine Zeile pro abgeschlossener User-Audioaufnahme nach erfolgreichem STT-Aufruf. Enthält `userId`, `userDisplayName`, `startTsMs`, `endTsMs`, `durationMs`, `text`, `chunks` und `stt`. Wenn Whisper leeren Text liefert, bleibt `text` leer, aber die STT-Diagnostik wird gespeichert. Ein separates `utterance_end`-Event wird nicht ins JSONL geschrieben, damit das Transkript nicht mit Transportereignissen verstopft.
+* `text_query` — Textfrage aus `/ask` oder Mention-Trigger. Der Mention-Trigger benötigt in Discord den Message-Content-Intent.
+* `wakeword_query` — erkannter Wake-Word-Trigger und extrahierte Query.
+* `assistant_response` — rohe LLM-Antwort inklusive `turnId`, Text und Voice-Metadaten.
+* `tts_start`, `tts_done`, `tts_cancel`, `tts_error` — TTS-Lifecycle. `turnId` verbindet Assistant-Antwort und TTS-Ausgabe.
+* `playback_paused`, `playback_resumed` — kompakte Bot-Playback-Events bei User-Unterbrechung. Enthalten u. a. `id`, `framesPlayed`, `msPlayed`, Queue-/Duration-Werte, Unterbrecher-User, Pause-Dauer und Rewind-Info. Sie sind strukturiert, damit später sichtbar ist, wo User-Audio in Bot-Audio fiel, ohne den normalen Textfluss künstlich aufzublähen.
+* `stop_command` — erkannte Stop-Phrase. Stop-Phrases funktionieren ohne Wake-Word nur bei kurzen Äußerungen bis `STOP_WITHOUT_WAKE_MAX_WORDS`; mit Wake-Word wird die Stop-Phrase nicht als neue LLM-Anfrage weitergereicht.
+* `playback_stopped` — Bot-Feedback mit `framesPlayed` und `msPlayed` nach Stop.
+* `assistant_response_played` — bei Stop geschätzter tatsächlich gehörter Antworttext, bei Bedarf mit `...` gekürzt.
+
+`stt.noSpeechProbAvg` und `stt.noSpeechProbMax` werden gespeichert, aber im Live-Pfad nicht zum Verwerfen genutzt. Auch wahrscheinlich verrauschte Transkripte bleiben damit für spätere Filtertests und Finalize-Entscheidungen nachvollziehbar.
+
+Das vorbereitete `users`-Objekt in `session_meta` ist absichtlich leer. Es reserviert das Format für eine spätere konfigurierbare Zuordnung `Discord-User-ID -> Discord-Name / Spielername / Charaktername / phonetischer Name`, ohne jetzt schon eine feste Mapping-Datei zu erzwingen.
+
+Die gekürzte Assistant-Antwort wird heuristisch berechnet (`msPlayed / durationMs`) und am nächsten folgenden Whitespace geschnitten. Wenn weniger als 15 Zeichen oder weniger als 5 % Rest übrig bleiben, wird nicht gekürzt.
+
+Beispielhafte Zeilen:
+
+```jsonl
+{"tsMs":1778600000000,"type":"session_meta","sessionId":"1778422813219","schemaVersion":1,"guildName":"Jn","channelName":"Session","llm":{"provider":"ollama","model":"llama3.2","historyTurns":6},"stt":{"provider":"whisper.cpp","language":"de","temperature":0.1,"noSpeechProbStored":true,"noSpeechProbFiltersLive":false,"maxChunkSeconds":30,"silenceThresh":300},"wakeword":{"word":"Rabenauge","fuzzy":true,"position":3},"stopPhrases":["stop","stopp"],"users":{}}
+{"tsMs":1778600004123,"type":"user_transcript","sessionId":"1778422813219","userId":"696665320185659453","userDisplayName":"Nogâr","startTsMs":1778600001000,"endTsMs":1778600003900,"durationMs":2900,"text":"Hey Rabenauge, wer ist Baron Kelthur?","chunks":["Hey Rabenauge, wer ist Baron Kelthur?"],"stt":{"provider":"whisper.cpp","noSpeechProbAvg":0.03,"noSpeechProbMax":0.05,"chunkDurationsMs":[2900],"splitTypes":["single"]}}
+{"tsMs":1778600004300,"type":"assistant_response","sessionId":"1778422813219","turnId":"turn-...","text":"Baron Kelthur ist ein Halbork-Söldner.","speakerId":4,"model":"high"}
+{"tsMs":1778600006000,"type":"playback_paused","sessionId":"1778422813219","id":"tts-...","framesPlayed":80,"msPlayed":1600,"interruptedByUserId":"696665320185659453","interruptMinMs":800,"rewindMs":1000}
+{"tsMs":1778600008500,"type":"playback_resumed","sessionId":"1778422813219","id":"tts-...","framesPlayed":80,"msPlayed":1600,"pauseDurationMs":2500,"resumeGateMs":1200,"rewindFrames":50,"rewoundMs":1000}
+```
 
 ### Piper Speaker-IDs (de_DE-thorsten_emotional-medium)
 
@@ -305,8 +363,16 @@ SYSTEM_PROMPT_FILE=./prompt.txt
 
 * Server starten (Windows).
 * Bot verbindet optional `/uplink` (per-Speaker), `/downlink` (Abo), `/control`.
-* Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames an den Bot; Bot spielt nur bei Stille (Gating).
+* Test: `/control` → `{"type":"play_test_tone","sessionId":"<id>"}` sendet 20-ms-Opus-Frames über den JSON-Downlink an den Bot.
 * Wake-Word sprechen: *„Rabenauge, wer ist Baron Kelthur?"* → Bot antwortet per Sprache im Voice-Channel.
+* Textfrage ohne Vorlesen: `/ask frage:Wer ist Baron Kelthur?` oder `@Botname Wer ist Baron Kelthur?`.
+* Textfrage mit Voice-Ausgabe: `/ask frage:Wer ist Baron Kelthur? tts:true`. Der Textpfad nutzt dieselbe LLM-/History-Pipeline wie Wake-Word-Anfragen, überspringt aber STT/Wake-Word-Erkennung.
+
+Nach Änderungen an Slash-Commands muss der Bot neu registriert werden:
+
+```bash
+npm run register
+```
 
 ## AI Services Setup — Windows 11 / AMD GPU (RX 6800 XT)
 
@@ -529,21 +595,12 @@ Erwartet: JSON-Antwort mit `"role":"assistant"` und deutschem Text.
 
 ### Service 3: Piper TTS (Text-to-Speech)
 
+Der TTS-Server nutzt **piper via Python-API** (kein Subprocess-Aufruf der `piper.exe`).
+Für GPU-Beschleunigung auf AMD-GPUs wird ein DirectML-Fork der piper-Library verwendet.
+
 #### Installation
 
-**1. Piper-Binary herunterladen**
-
-```powershell
-New-Item -ItemType Directory -Path "C:\Users\$env:USERNAME\Programme\piper" -Force
-cd "C:\Users\$env:USERNAME\Programme\piper"
-
-& "C:\Windows\System32\curl.exe" -L -o piper.zip `
-    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
-
-Expand-Archive -Path piper.zip -DestinationPath . -Force
-```
-
-**2. Deutsche Stimmen herunterladen**
+**1. Deutsche Stimmen herunterladen**
 
 ```powershell
 New-Item -ItemType Directory -Path "C:\Users\$env:USERNAME\Programme\piper\voices" -Force
@@ -552,72 +609,94 @@ cd "C:\Users\$env:USERNAME\Programme\piper\voices"
 # Stimme 1: Thorsten High (klare, neutrale Stimme)
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten-high.onnx `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx"
-
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten-high.onnx.json `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json"
 
-# Stimme 2: Thorsten Emotional Medium (8 Emotionen)
+# Stimme 2: Thorsten Emotional Medium (8 Emotionen, empfohlen)
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten_emotional-medium.onnx `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx"
-
 & "C:\Windows\System32\curl.exe" -L -o de_DE-thorsten_emotional-medium.onnx.json `
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json"
 ```
 
-**3. Python-Umgebung einrichten**
+**2. Python-Umgebung einrichten (DirectML-Fork)**
+
+Der DirectML-Fork erweitert piper-tts um GPU-Support via `PIPER_USE_DIRECTML=1`.
+Ohne den Fork läuft der Server nur auf CPU.
 
 ```powershell
-cd "C:\Users\$env:USERNAME\Programme\piper"
-
-python -m venv piper
-.\piper\Scripts\activate
+# Fork installieren (einmalig):
+cd "C:\Users\$env:USERNAME\Programme\piper-directml-fork"
+python -m venv venv
+.\venv\Scripts\activate
+pip install -e .           # piper-tts aus dem Fork
 pip install fastapi uvicorn
 ```
 
-**4. HTTP-Server-Skript**
+Die Python-Dependencies sind in [`services/piper/requirements.txt`](services/piper/requirements.txt) dokumentiert.
 
-Das Skript liegt im Repo unter [`services/piper/server.py`](services/piper/server.py) und liest Pfade aus Umgebungsvariablen, die das Startskript automatisch setzt:
+**3. Umgebungsvariablen**
 
-```
-PIPER_DIR        → Basisverzeichnis der Piper-Installation
-PIPER_EXE        → Pfad zur piper.exe
-PIPER_VOICES_DIR → Verzeichnis mit den .onnx-Modellen
-```
+Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch:
 
-Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese Variablen anhand der konfigurierten `$PiperDir`-Variable und startet `uvicorn` dann aus dem `services/piper/`-Verzeichnis des Repos.
+| Variable | Wert | Beschreibung |
+|----------|------|--------------|
+| `PIPER_VOICES_DIR` | `C:\...\piper\voices` | Verzeichnis mit den `.onnx`-Modellen |
+| `PIPER_USE_DIRECTML` | `1` | GPU-Beschleunigung aktivieren (AMD DirectML) |
+| `PIPER_DIRECTML_DEVICE` | `0` | GPU-Index (0 = erste GPU) |
 
 #### Server starten
 
-Piper wird über das Haupt-Startskript gestartet:
+Über das Haupt-Startskript (empfohlen):
 
 ```powershell
 .\scripts\Start-VoiceAssistant.ps1        # Piper startet minimiert
 .\scripts\Start-VoiceAssistant.ps1 -Mode all   # Piper in eigenem Windows Terminal Pane
 ```
 
-Oder manuell (Piper-Venv muss aktiviert sein):
+Manuell:
 
 ```powershell
-cd "C:\Users\$env:USERNAME\Programme\piper"
-.\piper\Scripts\activate.ps1
-$env:PIPER_DIR = (Get-Location).Path
-$env:PIPER_EXE = "$env:PIPER_DIR\piper.exe"
-$env:PIPER_VOICES_DIR = "$env:PIPER_DIR\voices"
+cd "C:\Users\$env:USERNAME\Programme\piper-directml-fork"
+.\venv\Scripts\Activate.ps1
+$env:PIPER_VOICES_DIR      = "C:\Users\$env:USERNAME\Programme\piper\voices"
+$env:PIPER_USE_DIRECTML    = "1"
+$env:PIPER_DIRECTML_DEVICE = "0"
 cd "<Repo-Root>\services\piper"
-uvicorn server:app --host 0.0.0.0 --port 5000
+python -m uvicorn server:app --host 0.0.0.0 --port 5000
 ```
 
-#### Health-Check
+#### Health-Check & Voice-Discovery
 
 ```powershell
+# Server-Status + DirectML-Zustand:
 & "C:\Windows\System32\curl.exe" http://localhost:5000/health
-# Erwartet: {"status":"ok"}
+# Erwartet: {"status":"ok","voices":["emotional","high"],"directml":true}
+
+# Verfügbare Stimmen (Pipecat-kompatible Discovery):
+& "C:\Windows\System32\curl.exe" http://localhost:5000/voices
+# Erwartet: [{"id":"emotional","name":"...","lang":"de","speakers":8},...]
 ```
 
 #### TTS-Tests
 
+Die Tests verwenden den **primären Streaming-Endpoint** `/tts/synthesize`.
+Für einfaches WAV-Testen (Debug) steht `/synthesize` zusätzlich bereit.
+
 ```powershell
-# Test 1: Neutral (emotional, speaker 4)
+# Test 1: Streaming (primärer Produktionspfad) — PCM-Chunks in Datei sammeln
+[System.IO.File]::WriteAllText(
+    "$env:TEMP\tts-stream.json",
+    '{"text":"Hallo Abenteurer, ich bin Rabenauge. Baron Kelthur regiert die Nordprovinz seit zwanzig Jahren.","model":"emotional","speaker_id":4,"length_scale":1.0}',
+    [System.Text.UTF8Encoding]::new($false)
+)
+& "C:\Windows\System32\curl.exe" -X POST http://localhost:5000/tts/synthesize `
+    -H "Content-Type: application/json" `
+    -d "@$env:TEMP\tts-stream.json" `
+    -v 2>&1 | Select-String "X-Sample-Rate|Content-Type|bytes"
+# Erwartet: Content-Type: audio/pcm-s16le, X-Sample-Rate: 22050
+
+# Test 2: WAV (Debug, nicht-streaming)
 [System.IO.File]::WriteAllText(
     "$env:TEMP\tts-neutral.json",
     '{"text":"Hallo Abenteurer, ich bin Rabenauge. Wie kann ich euch helfen?","model":"emotional","speaker_id":4}',
@@ -629,7 +708,7 @@ uvicorn server:app --host 0.0.0.0 --port 5000
     --output test-neutral.wav
 Start-Process test-neutral.wav
 
-# Test 2: Flüsternd (speaker 7)
+# Test 3: Flüsternd (speaker 7)
 [System.IO.File]::WriteAllText(
     "$env:TEMP\tts-fluster.json",
     '{"text":"Vorsicht, da vorne lauert etwas im Schatten...","model":"emotional","speaker_id":7}',
@@ -641,18 +720,27 @@ Start-Process test-neutral.wav
     --output test-fluster.wav
 Start-Process test-fluster.wav
 
-# Test 3: High (klare Stimme ohne Emotion)
+# Test 4: Verlangsamte Sprache (length_scale > 1)
 [System.IO.File]::WriteAllText(
-    "$env:TEMP\tts-high.json",
-    '{"text":"Baron Kelthur regiert seit zwanzig Jahren die Nordprovinz.","model":"high"}',
+    "$env:TEMP\tts-slow.json",
+    '{"text":"Baron Kelthur regiert seit zwanzig Jahren die Nordprovinz.","model":"high","length_scale":1.3}',
     [System.Text.UTF8Encoding]::new($false)
 )
 & "C:\Windows\System32\curl.exe" -X POST http://localhost:5000/synthesize `
     -H "Content-Type: application/json" `
-    -d "@$env:TEMP\tts-high.json" `
-    --output test-high.wav
-Start-Process test-high.wav
+    -d "@$env:TEMP\tts-slow.json" `
+    --output test-slow.wav
+Start-Process test-slow.wav
 ```
+
+#### Troubleshooting Piper
+
+| Symptom | Ursache | Lösung |
+|---------|---------|--------|
+| `No voice models found` | `PIPER_VOICES_DIR` falsch | Env-Var prüfen, Pfad muss `.onnx`-Dateien enthalten |
+| `use_directml not supported` | Basis-piper statt Fork | Fork installieren: `pip install -e C:\...\piper-directml-fork` |
+| `{"directml":false}` im Health-Check | `PIPER_USE_DIRECTML` nicht gesetzt | Startskript nutzen oder Env-Var manuell setzen |
+| Server startet nicht | venv nicht aktiviert | `.\venv\Scripts\Activate.ps1` vor `uvicorn` |
 
 ---
 
@@ -716,6 +804,58 @@ netstat -ano | findstr ":5000"
 Stop-Process -Id <PID> -Force
 ```
 
+## Manuelle Test-Checkliste
+
+Nach größeren Pipeline-Änderungen (TTS-Rework, Session-Log, `/ask`-Pfad …) in dieser
+Reihenfolge durchgehen. Discord-Tests setzen einen laufenden Bot + Server voraus.
+
+### Voice Pipeline
+- [ ] `/join` → Bot tritt Channel bei, Server-Auto-Start via SSH funktioniert (falls `SERVER_START_CMD` gesetzt)
+- [ ] Bot-Status zeigt `<bot-version>-<hash> (server:<server-version>-<hash>)` sobald Server verbunden
+- [ ] Server offline + kein Auto-Start → Status bleibt ohne `(server:…)`-Teil
+- [ ] Wake-Word („Rabenauge, …") → Bot antwortet per TTS im Voice-Channel
+- [ ] Wake-Word + jemand unterbricht → TTS pausiert, setzt nach `RESUME_GATE_MS` mit `REWIND_MS` fort
+- [ ] Stop-Phrase während TTS → Wiedergabe bricht sofort ab
+- [ ] Stop-Phrase ohne Wake-Word (innerhalb `STOP_WITHOUT_WAKE_MAX_WORDS`) → TTS bricht ab
+- [ ] `/leave` → Bot verlässt Channel, Status wird zurückgesetzt
+
+### Text Pipeline (`/ask` + `@Bot`)
+- [ ] `/ask frage:"…"` → Antwort als Text im Channel
+- [ ] `/ask … tts:true` während aktiver Voice-Session → Antwort als Text **und** im Voice-Channel vorgelesen
+- [ ] `/ask … tts:true` ohne Voice-Session → nur Text, kein TTS
+- [ ] `@Bot Frage` → selbes Verhalten wie `/ask` ohne TTS
+- [ ] **History-Scoping (siehe `_activeVoiceChannelId`-Logik):**
+  - [ ] `/ask` im **Text-Chat des Voice-Channels** während aktiver Session → Bot kennt Wake-Word-Kontext (gleiche History)
+  - [ ] `/ask` in **anderem Text-Channel** → eigene channel-scoped History (kein Voice-Kontext)
+  - [ ] `/ask` in **Channel A**, dann in **Channel B** → Folgefrage in B kennt A nicht
+  - [ ] Normale Chat-Nachrichten ohne `@Bot` werden **ignoriert** (kein Lauschen)
+
+### STT / Whisper
+- [ ] Kurze Aussage (<3 s) → korrekt transkribiert, kein Split
+- [ ] Lange Aussage (>30 s) → wird gesplittet, im Log: `pipeline: Xs → N silence-split chunks` (bei `DEBUG=1`)
+- [ ] Stille / Atemgeräusch ohne Sprache → leeres Transkript, `noSpeechProbAvg/Max` im JSONL geloggt
+- [ ] `WHISPER_TEMPERATURE` aus `.env` wird im Request verwendet
+
+### TTS / Piper
+- [ ] `GET /voices` liefert Pipecat-konforme Liste
+- [ ] `POST /tts/synthesize` mit `model:emotional` + `speaker_id:0..7` → korrekte Stimme/Emotion
+- [ ] `POST /tts/synthesize` mit `model:high` → klare Standardstimme
+- [ ] Streaming-Pfad: erste PCM-Chunks treffen ein bevor der ganze Satz fertig ist (`Content-Type: audio/pcm-s16le`)
+- [ ] Wiedergabe im Bot startet ohne CNG-Burst (keine Rauschspitze am Anfang)
+
+### Session-Log (JSONL Schema v1)
+- [ ] Beim `/join` wird genau ein `session_meta` geschrieben: Discord-Kontext, Bot- + Server-Version, LLM/STT/TTS-Config, Wake-Word, Stop-Phrases, `users`-Mapping
+- [ ] `user_transcript` enthält `startTsMs`, `endTsMs`, `durationMs`, STT-Chunks, `noSpeechProbAvg/Max`
+- [ ] `assistant_response` enthält `turnId`, `query`, `text`, `speakerId`, `model`, `source` (`voice` / `slash` / `mention`)
+- [ ] `text_query`- und `stop_command`-Events werden geloggt
+
+### Auto-Tests (Vitest / `node --test`, optional zu ergänzen)
+Diese Funktionen haben keine Discord-/Netz-Abhängigkeiten und eignen sich für Unit-Tests:
+- `apps/bot/src/version.js` — `getVersion()`, `makeStatusText()`
+- `apps/server/src/pipeline.js` — `sessionlessHistory()` Scope-Isolation, `appendHistory()` Trim-Verhalten
+- `apps/server/src/stt.js` — Silence-Split mit Mock-PCM
+- (sobald implementiert) `no_speech_prob`-Filter-Schwelle
+
 ## Roadmap
 
 Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Modes" oben). Die priorisierte Feature-Reihenfolge mit Aufwand/Impact-Bewertung steht in `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Backlog/Brainstorm in [`TODO.md`](TODO.md).
@@ -724,8 +864,8 @@ Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Mo
 
 **Aktuelle Phasen (grob):**
 
-1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Filter.
-2. **Phase 2 — Core Workflows**: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log.
+1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Diagnostik.
+2. **Phase 2 — Core Workflows** *(implementiert, Praxistest ausstehend)*: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log mit Schema-v1-Struktur.
 3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
 4. **Phase 4 — RAG + Obsidian**: Python-RAG-Service (FastAPI + ChromaDB + Ollama-Embeddings), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
 5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).

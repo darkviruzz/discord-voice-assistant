@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$Text     = "Eine Frau namens Sophia hatte ein großes Abenteuer erlebt, als sie die verlorene Stadt von Eldarath entdeckte, das nur in den mittelalterischen Geschichten ihrer Mutter erzählt wurde. In der Nacht der Vollmondsonne fand sie eine geheime Tür im alten Schloss und öffnete sie, um einen dunklen Gang zu betreten. Am Ende des Ganges fand sie einen goldenen Schlüssel, der ihr den Weg zu vielen Geheimnissen und Schätzen zeigte. Aber Sophia musste auch die Gefahren überwinden, um ihre Reise erfolgreich abzuschließen.",
+    [string]$Text     = "In einem kleinen Dorf am Rande eines dichten Waldes lebte ein junger Junge namens Finn.",
     [string]$Model    = "high",
     [string]$PiperUrl = "http://localhost:5000"
 )

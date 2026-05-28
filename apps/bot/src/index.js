@@ -29,6 +29,10 @@ const client = new Client({
 const sessions = new SessionManager();
 const activeRecordings = new Map();
 let _textChannel = null;
+// Discord ID of the voice channel the bot is currently joined to.
+// When /ask or an @-mention is sent from this same channel's text chat,
+// the request shares conversationHistory with the voice session.
+let _activeVoiceChannelId = null;
 
 // Build the Custom-Status text shown in the bot's Discord profile.
 // With server connected: "1.0.1-d5b717a (server:1.0.1-d5b717a)"
@@ -52,7 +56,14 @@ function displayNameFor(member, user) {
 }
 
 function askServer({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
+  // Share voice-session history only when the question comes from the same
+  // channel the bot is currently joined to. Other text channels keep their
+  // own channel-scoped history on the server side.
+  const sessionId = (channelId && channelId === _activeVoiceChannelId)
+    ? sessions.wireSessionId()
+    : null;
   return transport.textQuery({
+    sessionId,
     question,
     tts,
     channelId,
@@ -188,6 +199,7 @@ client.on('interactionCreate', async (i) => {
           // Did not recover — real disconnect.
           warn('voice: real disconnect, destroying connection');
           try { connection.destroy(); } catch {}
+          _activeVoiceChannelId = null;
         }
       });
 
@@ -201,6 +213,7 @@ client.on('interactionCreate', async (i) => {
       connection.on('error', (e) => warn('voice: connection error:', e.message));
 
       sessions.loadOrStartNew();
+      _activeVoiceChannelId = channel.id;
       transport.sessionStart({
         sessionId: sessions.wireSessionId(),
         guildId: channel.guild.id,
@@ -281,6 +294,7 @@ client.on('interactionCreate', async (i) => {
       transport.clearVoiceConnection();
       const wireId = sessions.wireSessionId();
       if (wireId) transport.sessionEnd(wireId);
+      _activeVoiceChannelId = null;
       await i.reply({ content: 'Voice-Channel verlassen.', flags: MessageFlags.Ephemeral });
     }
 
@@ -297,6 +311,7 @@ client.on('interactionCreate', async (i) => {
         const wireId = sessions.wireSessionId();
         if (wireId) transport.sessionEnd(wireId);
         sessions.active = null;
+        _activeVoiceChannelId = null;
       } catch (e) {
         error(e);
         await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', flags: MessageFlags.Ephemeral });

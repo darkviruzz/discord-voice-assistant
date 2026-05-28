@@ -49,6 +49,8 @@ export class ControlClient extends EventEmitter {
     this.reconnectTimer = null;
 
     this.pendingSession = null;
+    // cmdId → { resolve, reject, timer } for in-flight finalize requests.
+    this.pendingFinalize = new Map();
   }
 
   start() {
@@ -117,6 +119,23 @@ export class ControlClient extends EventEmitter {
       userId,
       userDisplayName,
       source,
+    });
+  }
+
+  // Request server-side finalize. Resolves with the server's finalize_result
+  // (matched by cmdId). Re-STT of long sessions can take minutes → long timeout.
+  finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
+    const cmdId = randomUUID();
+    if (!this._sendIfReady({ type: 'finalize_session', cmdId, ...payload })) {
+      return Promise.reject(new Error('Server nicht verbunden'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingFinalize.delete(cmdId);
+        reject(new Error('Finalize-Timeout (Server hat nicht geantwortet)'));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingFinalize.set(cmdId, { resolve, reject, timer });
     });
   }
 
@@ -260,6 +279,17 @@ export class ControlClient extends EventEmitter {
       }
       case 'error': {
         warn('control: server error', msg.code, msg.message || '', 'cmdId=', msg.cmdId);
+        const pf = this.pendingFinalize.get(msg.cmdId);
+        if (pf) { clearTimeout(pf.timer); this.pendingFinalize.delete(msg.cmdId); pf.reject(new Error(msg.message || msg.code || 'server error')); }
+        return;
+      }
+      case 'finalize_progress': {
+        this.emit('finalizeProgress', msg);
+        return;
+      }
+      case 'finalize_result': {
+        const p = this.pendingFinalize.get(msg.cmdId);
+        if (p) { clearTimeout(p.timer); this.pendingFinalize.delete(msg.cmdId); p.resolve(msg); }
         return;
       }
       // Server→bot commands: dispatch to transport/index.js via event.

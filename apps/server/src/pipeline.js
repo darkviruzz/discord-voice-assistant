@@ -256,7 +256,7 @@ function summarizeStt(chunks, chunkResults) {
 }
 
 // Transcribe PCM split at silence boundaries. Returns text chunks plus STT metadata.
-async function transcribeChunked(pcm48k) {
+export async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
   logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {

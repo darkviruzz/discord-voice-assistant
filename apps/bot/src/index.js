@@ -9,9 +9,10 @@ import {
   VoiceConnectionStatus,
 } from '@discordjs/voice';
 import { log, warn, error, debug } from './logger.js';
-import { SessionManager } from './session.js';
+import { SessionManager, SessionStatus } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
 import { mixSession } from './mixer.js';
+import { buildManifest, writeManifest, uploadSession, applyRetention } from './finalize.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
 import * as transport from './transport/index.js';
@@ -311,23 +312,118 @@ client.on('interactionCreate', async (i) => {
       });
     }
 
-    if (i.commandName === 'save-session') {
-      if (!sessions.active) return i.reply({ content: 'Keine aktive Session.', flags: MessageFlags.Ephemeral });
-      const s = sessions.active;
-      await i.reply({ content: 'Finalisiere Session … das kann je nach Länge etwas dauern.', flags: MessageFlags.Ephemeral });
+    if (i.commandName === 'finalize') {
+      const sub = i.options.getSubcommand();
+
+      if (sub === 'list') {
+        const all = SessionManager.listAll();
+        if (all.length === 0) return i.reply({ content: 'Keine Sessions vorhanden.', flags: MessageFlags.Ephemeral });
+        const lines = all.slice(0, 20).map((s) => {
+          const when = new Date(s.startedAt).toLocaleString('de-DE');
+          const active = sessions.active && sessions.active.id === s.id ? ' ◀ aktiv' : '';
+          return `• \`${s.id}\` — ${s.status}, ${s.utterances} Äußerungen, ${when}${active}`;
+        });
+        return i.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
+      }
+
+      if (sub === 'show') {
+        const id = i.options.getString('session', true);
+        const s = (sessions.active && sessions.active.id === id) ? sessions.active : SessionManager.loadById(id);
+        if (!s) return i.reply({ content: `Session \`${id}\` nicht gefunden.`, flags: MessageFlags.Ephemeral });
+        const lines = [
+          `**Session \`${s.id}\`**`,
+          `Status: ${s.status}`,
+          `Start: ${new Date(s.startedAt).toLocaleString('de-DE')}`,
+          `Äußerungen: ${(s.timeline || []).length}`,
+        ];
+        if (s.finalize) {
+          lines.push(`Transkript: \`${s.finalize.transcriptPath}\``);
+          lines.push(`Archiv: \`${s.finalize.archiveDir}\``);
+        }
+        return i.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
+      }
+
+      // sub === 'run'
+      const idArg = i.options.getString('session');
+      let session;
+      if (idArg) {
+        session = (sessions.active && sessions.active.id === idArg) ? sessions.active : SessionManager.loadById(idArg);
+      } else {
+        session = sessions.active;
+      }
+      if (!session) return i.reply({ content: 'Keine Session zum Finalisieren (gib eine Session-ID an oder starte mit /join).', flags: MessageFlags.Ephemeral });
+      if (session.status === SessionStatus.FINALIZING) {
+        return i.reply({ content: 'Diese Session wird bereits finalisiert.', flags: MessageFlags.Ephemeral });
+      }
+      if (session.status === SessionStatus.FINALIZED) {
+        return i.reply({ content: 'Diese Session ist bereits finalisiert. Erneutes Finalisieren ist möglich, falls die WAVs noch lokal liegen.', flags: MessageFlags.Ephemeral });
+      }
+
+      await i.deferReply({ flags: MessageFlags.Ephemeral });
+      const prevStatus = session.status;
       try {
-        await mixSession(s.dir, 'session_mix.ogg', s.timeline);
-        s.status = 'closed';
-        sessions.persist();
-        await i.followUp({ content: `Session gespeichert: ${path.join(s.dir, 'session_mix.ogg')}`, flags: MessageFlags.Ephemeral });
-        transport.clearVoiceConnection();
-        const wireId = sessions.wireSessionId();
-        if (wireId) transport.sessionEnd(wireId);
-        sessions.active = null;
-        _activeVoiceChannelId = null;
+        // Lock the session and persist the status transition.
+        session.status = SessionStatus.FINALIZING;
+        SessionManager.save(session);
+
+        const manifest = buildManifest(session, {
+          channelName: i.channel?.name ?? null,
+          guildName: i.guild?.name ?? null,
+          wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
+          botVersion: getVersion(),
+        });
+        if (manifest.utterances.length === 0) {
+          throw new Error('Session enthält keine aufgenommenen Äußerungen.');
+        }
+        writeManifest(session, manifest);
+
+        await i.editReply({ content: `⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …` });
+        await uploadSession(session);
+
+        await i.editReply({ content: '⏳ Server transkribiert und baut das Transkript …' });
+        const result = await transport.finalizeSession({ sessionId: manifest.sessionId });
+        if (!result.ok) throw new Error(result.error || 'Finalize fehlgeschlagen');
+
+        const fullyVerified = (result.missing?.length ?? 0) === 0 && (result.mismatched?.length ?? 0) === 0;
+        session.status = SessionStatus.FINALIZED;
+        session.finalizedAt = Date.now();
+        session.finalize = { transcriptPath: result.transcriptPath, archiveDir: result.archiveDir, userCount: result.userCount };
+        SessionManager.save(session);
+
+        // Cleanup gate: only relocate/delete local WAVs when the server confirmed
+        // a durable archive for every file.
+        let retentionNote = '';
+        if (fullyVerified) {
+          const r = applyRetention(session);
+          retentionNote = r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.';
+        } else {
+          retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
+        }
+
+        await i.editReply({
+          content: [
+            `✅ Session **${session.id}** finalisiert.`,
+            `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
+            `Transkript: \`${result.transcriptPath}\``,
+            `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
+            retentionNote.trim(),
+          ].join('\n'),
+        });
+
+        // If this was the active session, detach it (it is done).
+        if (sessions.active && sessions.active.id === session.id) {
+          transport.clearVoiceConnection();
+          const conn = getVoiceConnection(i.guildId);
+          if (conn) conn.destroy();
+          sessions.active = null;
+          _activeVoiceChannelId = null;
+        }
       } catch (e) {
         error(e);
-        await i.followUp({ content: 'Fehler beim Finalisieren (siehe Logs).', flags: MessageFlags.Ephemeral });
+        // Revert the lock so the session can be retried.
+        session.status = prevStatus;
+        SessionManager.save(session);
+        await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` });
       }
     }
   } catch (e) {

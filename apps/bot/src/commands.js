@@ -16,8 +16,31 @@ const commands = [
     description: 'Bot verlässt den Voice-Channel',
   },
   {
-    name: 'save-session',
-    description: 'Finalisiert die aktuelle Session und mischt eine Session-Datei',
+    name: 'finalize',
+    description: 'Session abschließen: Transkript + Audio-Archiv erzeugen',
+    options: [
+      {
+        name: 'run',
+        description: 'Aktuelle (oder angegebene) Session finalisieren',
+        type: 1, // SUB_COMMAND
+        options: [
+          { name: 'session', description: 'Session-ID (Standard: aktive Session)', type: 3, required: false },
+        ],
+      },
+      {
+        name: 'list',
+        description: 'Sessions auflisten (offen/finalisiert)',
+        type: 1,
+      },
+      {
+        name: 'show',
+        description: 'Details zu einer Session anzeigen',
+        type: 1,
+        options: [
+          { name: 'session', description: 'Session-ID', type: 3, required: true },
+        ],
+      },
+    ],
   },
   {
     name: 'ask',

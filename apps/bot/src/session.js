@@ -48,6 +48,40 @@ export class SessionManager {
     return best;
   }
 
+  // Persist any session object (not necessarily the active one).
+  static save(session) {
+    if (!session?.dir) return;
+    fs.writeFileSync(path.join(session.dir, 'session.json'), JSON.stringify(session, null, 2));
+  }
+
+  // Load a session by its local id (directory name), without making it active.
+  static loadById(id) {
+    try {
+      const dir = path.join(DATA_DIR, id);
+      const s = JSON.parse(fs.readFileSync(path.join(dir, 'session.json'), 'utf8'));
+      s.dir = dir;
+      if (!Array.isArray(s.timeline)) s.timeline = [];
+      return s;
+    } catch { return null; }
+  }
+
+  // All sessions on disk, newest first: { id, status, startedAt, utterances }.
+  static listAll() {
+    let dirs;
+    try {
+      dirs = fs.readdirSync(DATA_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
+    } catch { return []; }
+    const out = [];
+    for (const d of dirs) {
+      if (d.name === '_archived') continue;
+      try {
+        const s = JSON.parse(fs.readFileSync(path.join(DATA_DIR, d.name, 'session.json'), 'utf8'));
+        out.push({ id: s.id, status: s.status, startedAt: s.startedAt, utterances: (s.timeline || []).length, finalize: s.finalize || null });
+      } catch {}
+    }
+    return out.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  }
+
   startNew() {
     const id = fmtTs(nowMs());
     const dir = path.join(DATA_DIR, id);

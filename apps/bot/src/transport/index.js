@@ -175,6 +175,16 @@ export function textQuery({ question, tts = false, channelId, userId, userDispla
   }
 }
 
+export function finalizeSession(payload, opts) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.finalizeSession(payload, opts);
+}
+
+export function onFinalizeProgress(cb) {
+  if (!_instance) return;
+  _instance.control.on('finalizeProgress', cb);
+}
+
 export function setVoiceConnection(conn) {
   if (!_instance) return;
   try { _instance.downlink.setVoiceConnection(conn); }

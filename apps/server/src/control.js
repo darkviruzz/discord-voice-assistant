@@ -1,6 +1,10 @@
+import fs from 'fs';
+import path from 'path';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import { log, debug, warn } from './logger.js';
+import { finalizeSession } from './finalize/index.js';
+import { loadSpeakerMap } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
@@ -95,6 +99,68 @@ function logSessionMeta(sessionId, msg) {
 function send(ws, obj) {
   if (ws.readyState !== ws.OPEN) return;
   try { ws.send(JSON.stringify(obj)); } catch (e) { warn('control send failed:', e.message); }
+}
+
+function transcriptDir() {
+  return (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
+}
+
+function readSessionEvents(sessionId) {
+  const fp = path.join(transcriptDir(), `session_${sessionId}.jsonl`);
+  if (!fs.existsSync(fp)) return { events: [], jsonlPath: null };
+  const events = [];
+  for (const line of fs.readFileSync(fp, 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try { events.push(JSON.parse(t)); } catch { /* skip malformed */ }
+  }
+  return { events, jsonlPath: fp };
+}
+
+// Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
+// archive, then reply with a checksum summary. Errors are reported back so the
+// bot keeps its local WAVs for a retry.
+async function handleFinalize(ws, msg) {
+  const sessionId = msg.sessionId;
+  const uploadRoot = (process.env.FINALIZE_UPLOAD_DIR ?? './uploads').replace(/\/+$/, '');
+  const uploadDir = path.join(uploadRoot, String(sessionId));
+  const manifestPath = path.join(uploadDir, 'manifest.json');
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch (e) {
+    send(ws, { type: 'error', code: 'NO_MANIFEST', message: `manifest not found at ${manifestPath}: ${e.message}`, cmdId: msg.cmdId });
+    return;
+  }
+
+  const { events, jsonlPath } = readSessionEvents(sessionId);
+  const meta = events.find((e) => e && e.type === 'session_meta') || {};
+  const speakerMap = loadSpeakerMap(meta.guildId);
+
+  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: 'started', utterances: manifest.utterances?.length ?? 0 });
+
+  try {
+    const result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap });
+    send(ws, {
+      type: 'finalize_result',
+      cmdId: msg.cmdId,
+      ok: true,
+      sessionId: String(sessionId),
+      transcriptPath: result.transcriptPath,
+      archiveDir: result.archiveDir,
+      spanCount: result.spanCount,
+      userCount: result.userCount,
+      missing: result.missing,
+      mismatched: result.mismatched,
+      files: result.files,            // small: archive-root files only
+      audioOk: result.audio?.ok ?? false,
+      audioCount: result.audio?.files?.length ?? 0,
+    });
+  } catch (e) {
+    warn('finalize: failed for', String(sessionId), '-', e.message);
+    send(ws, { type: 'finalize_result', cmdId: msg.cmdId, ok: false, sessionId: String(sessionId), error: e.message });
+  }
 }
 
 export function initControlWSS({ bearer } = {}) {
@@ -307,6 +373,19 @@ export function initControlWSS({ bearer } = {}) {
               durationMs: typeof msg.durationMs === 'number' ? msg.durationMs : null,
             }).catch((e) => warn('pipeline error:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'utterance_end' });
+            return;
+          }
+          case 'finalize_session': {
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            // Long-running; fire-and-forget — replies via finalize_result.
+            handleFinalize(ws, msg).catch((e) => {
+              warn('finalize handler error:', e.message);
+              send(ws, { type: 'finalize_result', cmdId: msg.cmdId, ok: false, error: e.message });
+            });
             return;
           }
           // Phase 2/3 stubs: log and ack so the bot can develop against them.

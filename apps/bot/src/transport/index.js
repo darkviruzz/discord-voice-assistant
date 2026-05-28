@@ -7,6 +7,12 @@ import { log, warn, debug } from '../logger.js';
 let _instance = null;
 let _chatMessageCallback = null;
 let _serverInfoCallback = null;
+let _finalizeRequestCallback = null;
+
+// Server-initiated finalize (idle auto-finalize). cb receives { sessionId, reason }.
+export function onFinalizeRequest(cb) {
+  _finalizeRequestCallback = cb;
+}
 
 export function onChatMessage(cb) {
   _chatMessageCallback = cb;
@@ -98,6 +104,10 @@ export function start({ botId } = {}) {
       case 'chat_message':
         if (_chatMessageCallback) _chatMessageCallback(msg);
         control.ack(msg.cmdId, true);
+        break;
+      case 'finalize_request':
+        control.ack(msg.cmdId, true);
+        if (_finalizeRequestCallback) _finalizeRequestCallback({ sessionId: msg.sessionId, reason: msg.reason });
         break;
       default:
         debug('transport: unhandled server command', msg.type);

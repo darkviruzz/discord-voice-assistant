@@ -1,6 +1,4 @@
 import 'dotenv/config';
-import path from 'path';
-import fs from 'fs';
 import { Client, GatewayIntentBits, Partials, MessageFlags, ActivityType } from 'discord.js';
 import {
   joinVoiceChannel,
@@ -11,7 +9,6 @@ import {
 import { log, warn, error, debug } from './logger.js';
 import { SessionManager, SessionStatus } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
-import { mixSession } from './mixer.js';
 import { buildManifest, writeManifest, uploadSession, applyRetention } from './finalize.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
@@ -74,17 +71,14 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
   });
 }
 
-async function recoverOldSessions() {
+// On startup, surface open sessions that are past the idle window (e.g. the
+// server-side timer was lost to a server restart). They are not auto-finalized
+// here — finalize needs the server — but flagged so they can be completed with
+// /finalize run. The live path is driven by the server-side idle timer.
+function recoverOldSessions() {
   const stale = SessionManager.tryAutoFinalizeOld();
   for (const s of stale) {
-    try {
-      log('Auto-Finalize alter Session:', s.id);
-      await mixSession(s.dir, 'session_mix.ogg', s.timeline);
-      s.status = 'closed';
-      fs.writeFileSync(path.join(s.dir, 'session.json'), JSON.stringify(s, null, 2));
-    } catch (e) {
-      warn('Auto-Finalize fehlgeschlagen:', e.message);
-    }
+    log(`Offene Session über Idle-Grenze: ${s.id} — mit /finalize run abschließen.`);
   }
 }
 
@@ -97,6 +91,8 @@ client.once('clientReady', async () => {
   transport.onServerInfo((info) => {
     setBotStatus(info.connected ? info.version : null);
   });
+
+  transport.onFinalizeRequest((req) => { handleAutoFinalize(req).catch((e) => warn('auto-finalize:', e.message)); });
 
   transport.onChatMessage(async (msg) => {
     const targetChannel = msg.channelId
@@ -114,6 +110,92 @@ client.once('clientReady', async () => {
     targetChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
   });
 });
+
+// Detach the active in-memory session and tear down its voice connection.
+function detachActiveSession() {
+  transport.clearVoiceConnection();
+  const ch = _activeVoiceChannelId ? client.channels.cache.get(_activeVoiceChannelId) : null;
+  const conn = ch?.guild ? getVoiceConnection(ch.guild.id) : null;
+  if (conn) { try { conn.destroy(); } catch {} }
+  sessions.active = null;
+  _activeVoiceChannelId = null;
+}
+
+// Shared finalize flow for both manual (/finalize run) and server-initiated
+// (idle auto-finalize) paths: lock → manifest → upload → server finalize →
+// status + checksum-gated retention → detach if active. Throws on failure
+// (status reverted so it can be retried).
+async function performFinalize(session, { channelName = null, guildName = null, onProgress = () => {} } = {}) {
+  const prevStatus = session.status;
+  session.status = SessionStatus.FINALIZING;
+  SessionManager.save(session);
+  try {
+    const manifest = buildManifest(session, {
+      channelName,
+      guildName,
+      wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
+      botVersion: getVersion(),
+    });
+    if (manifest.utterances.length === 0) throw new Error('Session enthält keine aufgenommenen Äußerungen.');
+    writeManifest(session, manifest);
+
+    onProgress(`⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …`);
+    await uploadSession(session);
+
+    onProgress('⏳ Server transkribiert und baut das Transkript …');
+    const result = await transport.finalizeSession({ sessionId: manifest.sessionId });
+    if (!result.ok) throw new Error(result.error || 'Finalize fehlgeschlagen');
+
+    const fullyVerified = (result.missing?.length ?? 0) === 0 && (result.mismatched?.length ?? 0) === 0;
+    session.status = SessionStatus.FINALIZED;
+    session.finalizedAt = Date.now();
+    session.finalize = { transcriptPath: result.transcriptPath, archiveDir: result.archiveDir, userCount: result.userCount };
+    SessionManager.save(session);
+
+    let retentionNote = '';
+    if (fullyVerified) {
+      const r = applyRetention(session);
+      retentionNote = r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.';
+    } else {
+      retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
+    }
+
+    if (sessions.active && sessions.active.id === session.id) detachActiveSession();
+    return { result, fullyVerified, retentionNote };
+  } catch (e) {
+    session.status = prevStatus;
+    SessionManager.save(session);
+    throw e;
+  }
+}
+
+// Server-initiated finalize (idle timeout). The server decided the timing; the
+// bot owns the WAVs and runs the flow. Race guard: if the targeted session is
+// still active with humans present in voice, activity resumed → skip.
+async function handleAutoFinalize({ sessionId }) {
+  const session = (sessions.active && String(sessions.active.startedAt) === String(sessionId))
+    ? sessions.active
+    : SessionManager.findByWireId(sessionId);
+  if (!session) { warn('auto-finalize: unknown session', sessionId); return; }
+  if (session.status === SessionStatus.FINALIZING || session.status === SessionStatus.FINALIZED) return;
+
+  if (sessions.active && sessions.active.id === session.id && _activeVoiceChannelId) {
+    const ch = client.channels.cache.get(_activeVoiceChannelId);
+    const humans = ch ? [...ch.members.values()].filter((m) => !m.user.bot).length : 0;
+    if (humans > 0) { log('auto-finalize: humans present, skipping', sessionId); return; }
+  }
+
+  log('auto-finalize: finalizing idle session', session.id);
+  try {
+    const { result, retentionNote } = await performFinalize(session, {});
+    if (_textChannel?.send) {
+      _textChannel.send(`🗄️ Session **${session.id}** automatisch finalisiert (Inaktivität).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
+        .catch(() => {});
+    }
+  } catch (e) {
+    warn('auto-finalize failed:', e.message);
+  }
+}
 
 client.on('interactionCreate', async (i) => {
   try {
@@ -414,46 +496,12 @@ client.on('interactionCreate', async (i) => {
       }
 
       await i.deferReply({ flags: MessageFlags.Ephemeral });
-      const prevStatus = session.status;
       try {
-        // Lock the session and persist the status transition.
-        session.status = SessionStatus.FINALIZING;
-        SessionManager.save(session);
-
-        const manifest = buildManifest(session, {
+        const { result, retentionNote } = await performFinalize(session, {
           channelName: i.channel?.name ?? null,
           guildName: i.guild?.name ?? null,
-          wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
-          botVersion: getVersion(),
+          onProgress: (m) => { i.editReply({ content: m }).catch(() => {}); },
         });
-        if (manifest.utterances.length === 0) {
-          throw new Error('Session enthält keine aufgenommenen Äußerungen.');
-        }
-        writeManifest(session, manifest);
-
-        await i.editReply({ content: `⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …` });
-        await uploadSession(session);
-
-        await i.editReply({ content: '⏳ Server transkribiert und baut das Transkript …' });
-        const result = await transport.finalizeSession({ sessionId: manifest.sessionId });
-        if (!result.ok) throw new Error(result.error || 'Finalize fehlgeschlagen');
-
-        const fullyVerified = (result.missing?.length ?? 0) === 0 && (result.mismatched?.length ?? 0) === 0;
-        session.status = SessionStatus.FINALIZED;
-        session.finalizedAt = Date.now();
-        session.finalize = { transcriptPath: result.transcriptPath, archiveDir: result.archiveDir, userCount: result.userCount };
-        SessionManager.save(session);
-
-        // Cleanup gate: only relocate/delete local WAVs when the server confirmed
-        // a durable archive for every file.
-        let retentionNote = '';
-        if (fullyVerified) {
-          const r = applyRetention(session);
-          retentionNote = r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.';
-        } else {
-          retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
-        }
-
         await i.editReply({
           content: [
             `✅ Session **${session.id}** finalisiert.`,
@@ -463,26 +511,30 @@ client.on('interactionCreate', async (i) => {
             retentionNote.trim(),
           ].join('\n'),
         });
-
-        // If this was the active session, detach it (it is done).
-        if (sessions.active && sessions.active.id === session.id) {
-          transport.clearVoiceConnection();
-          const conn = getVoiceConnection(i.guildId);
-          if (conn) conn.destroy();
-          sessions.active = null;
-          _activeVoiceChannelId = null;
-        }
       } catch (e) {
         error(e);
-        // Revert the lock so the session can be retried.
-        session.status = prevStatus;
-        SessionManager.save(session);
         await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` });
       }
     }
   } catch (e) {
     error(e);
     try { await (i.deferred || i.replied ? i.followUp('Fehler.') : i.reply('Fehler.')); } catch {}
+  }
+});
+
+// Track voice-channel presence in the active channel and report it to the
+// server so it can (re)arm or cancel the idle auto-finalize timer. The bot
+// being alone (no humans) arms it; a human present cancels it.
+client.on('voiceStateUpdate', (oldState, newState) => {
+  try {
+    if (!_activeVoiceChannelId || !sessions.active) return;
+    if (oldState.channelId !== _activeVoiceChannelId && newState.channelId !== _activeVoiceChannelId) return;
+    const channel = client.channels.cache.get(_activeVoiceChannelId);
+    if (!channel) return;
+    const humans = [...channel.members.values()].filter((m) => !m.user.bot).length;
+    transport.voiceState({ sessionId: sessions.wireSessionId(), state: humans === 0 ? 'alone' : 'occupied' });
+  } catch (e) {
+    debug('voiceStateUpdate handler error:', e.message);
   }
 });
 

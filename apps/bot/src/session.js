@@ -54,6 +54,16 @@ export class SessionManager {
     fs.writeFileSync(path.join(session.dir, 'session.json'), JSON.stringify(session, null, 2));
   }
 
+  // Find a session by its wire id (= startedAt as a string). Used to resolve
+  // server-initiated finalize requests back to the local session.
+  static findByWireId(wireId) {
+    const want = String(wireId);
+    for (const s of SessionManager.listAll()) {
+      if (String(s.startedAt) === want) return SessionManager.loadById(s.id);
+    }
+    return null;
+  }
+
   // Load a session by its local id (directory name), without making it active.
   static loadById(id) {
     try {

@@ -11,8 +11,18 @@ import { ensureSession, dropSession } from './state.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
-import { botConnections } from './broadcast.js';
+import { botConnections, broadcastToAllBots } from './broadcast.js';
+import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { getVersion } from './version.js';
+
+// Server-side idle timer. On fire, ask the bot(s) to finalize — the bot owns
+// the WAVs and runs the upload + finalize flow. Broadcast: only the bot that
+// owns the session will act.
+const autoTimer = new AutoFinalizeTimer({
+  onFire: (sessionId) => broadcastToAllBots({
+    type: 'finalize_request', cmdId: randomUUID(), sessionId, reason: 'idle',
+  }),
+});
 
 const PROTO_VERSION = 1;
 const SERVER_ID = randomUUID();
@@ -138,6 +148,8 @@ async function handleFinalize(ws, msg) {
   const meta = events.find((e) => e && e.type === 'session_meta') || {};
   const speakerMap = loadSpeakerMap(meta.guildId);
 
+  // Lock against the idle timer so manual + auto finalize never both run.
+  autoTimer.markFinalizing(sessionId);
   send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: 'started', utterances: manifest.utterances?.length ?? 0 });
 
   try {
@@ -159,6 +171,7 @@ async function handleFinalize(ws, msg) {
     });
   } catch (e) {
     warn('finalize: failed for', String(sessionId), '-', e.message);
+    autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
     send(ws, { type: 'finalize_result', cmdId: msg.cmdId, ok: false, sessionId: String(sessionId), error: e.message });
   }
 }
@@ -244,6 +257,7 @@ export function initControlWSS({ bearer } = {}) {
             const state = validStates.includes(msg.state) ? msg.state : null;
             if (!state) { send(ws, { type: 'error', code: 'BAD_STATE', cmdId: msg.cmdId }); return; }
             logTranscriptEvent(msg.sessionId, 'voice_state', { state });
+            autoTimer.notify(msg.sessionId, state);
             onVoiceState?.(BigInt(msg.sessionId), state);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;

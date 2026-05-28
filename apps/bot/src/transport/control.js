@@ -35,6 +35,12 @@ export class ControlClient extends EventEmitter {
     this.serverParams = null;
     this.serverInfo = null;
 
+    // NTP-style clock offset estimate (serverClock − botClock, ms), smoothed
+    // with an EMA over app-ping round-trips. Bot time is authoritative; this is
+    // reported to the server so finalize can map server-stamped event
+    // timestamps onto the bot timeline. null until the first measurement.
+    this.clockOffsetMs = null;
+
     this.lastServerMsgAt = 0;
     this.hbTimer = null;
     this.appPingTimer = null;
@@ -226,8 +232,19 @@ export class ControlClient extends EventEmitter {
       }
       case 'pong': {
         if (typeof msg.t === 'number') {
-          const rtt = Date.now() - msg.t;
+          const now = Date.now();
+          const rtt = now - msg.t;
           debug(`control: app rtt ${rtt}ms`);
+          // Estimate clock offset when the server echoed its receive-time.
+          // Server received the ping at ≈ msg.t + rtt/2 on the bot clock.
+          if (typeof msg.srvT === 'number') {
+            const sample = msg.srvT - (msg.t + rtt / 2);
+            // EMA (α=0.2) once seeded; ignore wild samples from rare RTT spikes.
+            this.clockOffsetMs = this.clockOffsetMs === null
+              ? sample
+              : 0.8 * this.clockOffsetMs + 0.2 * sample;
+            this._send({ type: 'clock_sync', offsetMs: Math.round(this.clockOffsetMs), rttMs: rtt });
+          }
         }
         return;
       }

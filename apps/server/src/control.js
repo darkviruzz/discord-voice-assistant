@@ -40,8 +40,11 @@ function logSessionMeta(sessionId, msg) {
   if (session.metaLogged) return;
   session.metaLogged = true;
   logTranscriptEvent(sessionId, 'session_meta', {
-    schemaVersion: 1,
     protoVersion: PROTO_VERSION,
+    // Bot↔server clock offset (serverClock − botClock, ms). Filled in live via
+    // `clock_sync` events; finalize uses those to normalize server-stamped
+    // event timestamps onto the bot timeline (the authoritative clock).
+    clockOffsetMs: null,
     guildId: msg.guildId ?? null,
     guildName: msg.guildName ?? null,
     channelId: msg.channelId ?? null,
@@ -156,6 +159,17 @@ export function initControlWSS({ bearer } = {}) {
           }
           case 'ping': {
             send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
+            return;
+          }
+          case 'clock_sync': {
+            // Bot reports its measured clock offset (serverClock − botClock, ms)
+            // and round-trip time. Logged per active session so finalize can
+            // normalize server-stamped event timestamps onto the bot timeline.
+            if (!registered || activeSessionId === null) return;
+            const offsetMs = typeof msg.offsetMs === 'number' ? msg.offsetMs : null;
+            const rttMs = typeof msg.rttMs === 'number' ? msg.rttMs : null;
+            if (offsetMs === null) return;
+            logTranscriptEvent(activeSessionId, 'clock_sync', { offsetMs, rttMs });
             return;
           }
           case 'ack': {

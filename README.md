@@ -804,6 +804,58 @@ netstat -ano | findstr ":5000"
 Stop-Process -Id <PID> -Force
 ```
 
+## Manuelle Test-Checkliste
+
+Nach größeren Pipeline-Änderungen (TTS-Rework, Session-Log, `/ask`-Pfad …) in dieser
+Reihenfolge durchgehen. Discord-Tests setzen einen laufenden Bot + Server voraus.
+
+### Voice Pipeline
+- [ ] `/join` → Bot tritt Channel bei, Server-Auto-Start via SSH funktioniert (falls `SERVER_START_CMD` gesetzt)
+- [ ] Bot-Status zeigt `<bot-version>-<hash> (server:<server-version>-<hash>)` sobald Server verbunden
+- [ ] Server offline + kein Auto-Start → Status bleibt ohne `(server:…)`-Teil
+- [ ] Wake-Word („Rabenauge, …") → Bot antwortet per TTS im Voice-Channel
+- [ ] Wake-Word + jemand unterbricht → TTS pausiert, setzt nach `RESUME_GATE_MS` mit `REWIND_MS` fort
+- [ ] Stop-Phrase während TTS → Wiedergabe bricht sofort ab
+- [ ] Stop-Phrase ohne Wake-Word (innerhalb `STOP_WITHOUT_WAKE_MAX_WORDS`) → TTS bricht ab
+- [ ] `/leave` → Bot verlässt Channel, Status wird zurückgesetzt
+
+### Text Pipeline (`/ask` + `@Bot`)
+- [ ] `/ask frage:"…"` → Antwort als Text im Channel
+- [ ] `/ask … tts:true` während aktiver Voice-Session → Antwort als Text **und** im Voice-Channel vorgelesen
+- [ ] `/ask … tts:true` ohne Voice-Session → nur Text, kein TTS
+- [ ] `@Bot Frage` → selbes Verhalten wie `/ask` ohne TTS
+- [ ] **History-Scoping (siehe `_activeVoiceChannelId`-Logik):**
+  - [ ] `/ask` im **Text-Chat des Voice-Channels** während aktiver Session → Bot kennt Wake-Word-Kontext (gleiche History)
+  - [ ] `/ask` in **anderem Text-Channel** → eigene channel-scoped History (kein Voice-Kontext)
+  - [ ] `/ask` in **Channel A**, dann in **Channel B** → Folgefrage in B kennt A nicht
+  - [ ] Normale Chat-Nachrichten ohne `@Bot` werden **ignoriert** (kein Lauschen)
+
+### STT / Whisper
+- [ ] Kurze Aussage (<3 s) → korrekt transkribiert, kein Split
+- [ ] Lange Aussage (>30 s) → wird gesplittet, im Log: `pipeline: Xs → N silence-split chunks` (bei `DEBUG=1`)
+- [ ] Stille / Atemgeräusch ohne Sprache → leeres Transkript, `noSpeechProbAvg/Max` im JSONL geloggt
+- [ ] `WHISPER_TEMPERATURE` aus `.env` wird im Request verwendet
+
+### TTS / Piper
+- [ ] `GET /voices` liefert Pipecat-konforme Liste
+- [ ] `POST /tts/synthesize` mit `model:emotional` + `speaker_id:0..7` → korrekte Stimme/Emotion
+- [ ] `POST /tts/synthesize` mit `model:high` → klare Standardstimme
+- [ ] Streaming-Pfad: erste PCM-Chunks treffen ein bevor der ganze Satz fertig ist (`Content-Type: audio/pcm-s16le`)
+- [ ] Wiedergabe im Bot startet ohne CNG-Burst (keine Rauschspitze am Anfang)
+
+### Session-Log (JSONL Schema v1)
+- [ ] Beim `/join` wird genau ein `session_meta` geschrieben: Discord-Kontext, Bot- + Server-Version, LLM/STT/TTS-Config, Wake-Word, Stop-Phrases, `users`-Mapping
+- [ ] `user_transcript` enthält `startTsMs`, `endTsMs`, `durationMs`, STT-Chunks, `noSpeechProbAvg/Max`
+- [ ] `assistant_response` enthält `turnId`, `query`, `text`, `speakerId`, `model`, `source` (`voice` / `slash` / `mention`)
+- [ ] `text_query`- und `stop_command`-Events werden geloggt
+
+### Auto-Tests (Vitest / `node --test`, optional zu ergänzen)
+Diese Funktionen haben keine Discord-/Netz-Abhängigkeiten und eignen sich für Unit-Tests:
+- `apps/bot/src/version.js` — `getVersion()`, `makeStatusText()`
+- `apps/server/src/pipeline.js` — `sessionlessHistory()` Scope-Isolation, `appendHistory()` Trim-Verhalten
+- `apps/server/src/stt.js` — Silence-Split mit Mock-PCM
+- (sobald implementiert) `no_speech_prob`-Filter-Schwelle
+
 ## Roadmap
 
 Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Modes" oben). Die priorisierte Feature-Reihenfolge mit Aufwand/Impact-Bewertung steht in `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Backlog/Brainstorm in [`TODO.md`](TODO.md).

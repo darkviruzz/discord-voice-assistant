@@ -73,7 +73,7 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
 
-- [ ] **`/finalize`-Command — Ist-Zustand prüfen + Soll definieren**
+- [x] **`/finalize`-Command — Ist-Zustand prüfen + Soll definieren**
   - **Ist (Stand piper-rework)**: aktuell existiert `/save-session` (Bot-seitig) — ruft `mixSession()` auf, schreibt `session_mix.ogg`, schließt Session. **Kein** chronologisches Markdown-Transkript, **kein** Backlog-Transkribieren, **keine** WAV-Archivierung.
   - **TODO 0**: Code lesen (`apps/bot/src/index.js` `save-session`-Handler, `mixer.js`, Session-State) und dokumentieren was wirklich passiert vs. was die README/TODO behaupten
   - **TODO 1**: Soll-Verhalten entscheiden (umbenennen `/save-session` → `/finalize`? oder zwei getrennte Commands?)
@@ -83,7 +83,7 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
   - Soll: Verschiebt/markiert Roh-WAVs ins Archive-Verzeichnis (1–6 Monate aufbewahren)
   - Soll: Discord-Feedback bei Erfolg/Fehler
 
-- [ ] **Chronologisches Transkript-Merge mit Monolog-Splitting** — der Algorithmus für das Format.
+- [x] **Chronologisches Transkript-Merge mit Monolog-Splitting** — der Algorithmus für das Format.
   - Eingabe: pro User die transkribierten Utterances mit Whisper-Token-Timestamps + Aufnahme-`startedAt` (siehe `apps/bot/src/recorder.js`)
   - Schritt 1: Utterances mit Absolut-Timestamps versehen (`startedAt + token.t0`)
   - Schritt 2: Pro langem Monolog (User1) prüfen, ob andere Spuren (User2/3) zeitlich überlappen
@@ -93,13 +93,13 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
   - Wake-Word und Stop-Word im Output **fett** markieren (`**Rabenauge**`, `**Stop**`)
   - Eigenes Sub-Branch von Phase 3 (z. B. `feature/finalize-transcript-merge`) — nicht trivial
 
-- [ ] **Audio-Archiv** — OGG/Opus 32 kbps nach Finalize.
+- [x] **Audio-Archiv** — OGG/Opus 32 kbps nach Finalize.
   - Während Aufnahme: hochqualitative WAVs bleiben (PCM 48 kHz/16-bit, ~1 GB/h pro Sprecher)
   - Bei `/finalize`: Container-Repack der Original-Opus-Frames in OGG (kein Re-Encode nötig — Discord liefert ja schon Opus)
   - Optional: gemerged in eine Datei, plus pro Sprecher eine Spur
   - Cleanup-Policy: Roh-WAVs nach erfolgreichem Finalize gelöscht oder verschoben (genau noch zu klären)
 
-- [ ] **Auto-Finalize (optional)** — 4 h nach `/leave` ohne erneutes `/join`, *nur wenn Server online*.
+- [x] **Auto-Finalize (optional)** — 4 h nach `/leave` ohne erneutes `/join`, *nur wenn Server online*.
   - Timer-Logik mit Reset bei `/join`
   - Persistierung über Bot-Restart hinweg (sonst geht Timer verloren)
   - Bei Server-offline → Discord-Hinweis „Session muss manuell finalisiert werden"

@@ -4,6 +4,17 @@
 > Ziel: vom rohen Audio + JSONL-Log zum lesbaren, chronologisch korrekten Markdown-Transkript.
 > Versionsziel am Phasenende: `1.3.0`.
 
+## Status (umgesetzt)
+
+- [x] **M0** schemaVersion v2, Whisper-Wort-Timestamps, Clock-Offset über Control-WS
+- [x] **M1** Lifecycle: `/leave` beendet nicht, `/join` re-attacht, Status open→finalizing→finalized
+- [x] **M2** Merge-Modul (`finalize/merge.js`) + CLI + 13 Fixture-Tests
+- [x] **M3** Persistente Speaker-Map + `/finalize map` + Live-Reminder
+- [x] **M4** `/finalize run|list|show` + Server-Orchestrator (re-STT, Archiv, Checksum-Ack)
+- [x] **M5** OGG/Opus-Audio-Archiv (merged + per-Äußerung) + Upload-Cleanup
+- [x] **M6** Server-seitiger Auto-Finalize-Idle-Timer + Race-Handling
+- Tests: `npm test` → 29 Unit-Tests grün. Integration: `docs/phase-3-manual-tests.md`.
+
 ## Architektur (final entschieden)
 
 **Rollen**

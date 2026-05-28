@@ -350,14 +350,26 @@ SYSTEM_PROMPT_FILE=./prompt.txt
 
 ## Nutzung (ohne Server)
 
-* In Discord in den Voice-Channel, **/join** → Aufnahme startet.
-* **/save-session** → erzeugt:
+* In Discord in den Voice-Channel, **/join** → Aufnahme startet (per-Speaker
+  WAV-Chunks + `session.json`-Timeline unter `DATA_DIR/<id>/`).
+* **/leave** verlässt den Channel — die Session bleibt **offen** und kann später
+  fortgesetzt (`/join`) oder abgeschlossen werden.
+* **/finalize run** schließt die Session ab → der Server transkribiert die WAVs
+  neu, baut ein chronologisches Markdown-Transkript (`transcript.md`) und ein
+  OGG/Opus-Audio-Archiv. Ohne laufenden Server ist Finalize nicht möglich
+  (STT + Transkript-Erzeugung liegen serverseitig).
+* **/finalize list** / **/finalize show \<id\>** — Sessions auflisten / Details.
+* **/finalize map user:@… player:… [character:… phonetic:…]** — Sprecher-Zuordnung.
+* Inaktive Sessions werden vom Server **automatisch finalisiert** (Idle-Timer,
+  Standard 4 h, sobald der Bot allein im Channel ist oder nach `/leave`).
 
-  * `session_mix_hq.ogg`, `session_mix_lq.ogg`
-  * `user_<name>_hq.ogg`, `user_<name>_lq.ogg`
-  * WAV-Chunks + `session.json` (Timeline).
-* **/leave** verlässt den Channel.
-* Bei Neustart werden inaktive Sessions (>4 h) automatisch finalisiert.
+### Offline-Transkript aus einem JSONL-Log
+
+```bash
+npm run transcript -- apps/server/transcripts/session_<id>.jsonl --tz Europe/Berlin
+```
+
+Siehe `docs/phase-3-manual-tests.md` für die vollständige manuelle Test-Checkliste.
 
 ## Nutzung (mit Server, on-demand)
 

@@ -171,7 +171,15 @@ export async function finalizeSession({
     files.push({ name, sha256: sha256File(fp), bytes: st.size });
   }
 
-  log(`finalize: session ${sessionId} → ${transcriptPath} (${model.userCount} utterances, ${model.spans.length} spans, audio=${audio.ok ? 'ok' : 'skipped'})`);
+  // The uploaded WAVs are transient — remove them once fully verified and
+  // archived (the OGG archive + bot retention hold the durable copies).
+  if (missing.length === 0 && mismatched.length === 0
+      && (process.env.FINALIZE_KEEP_UPLOADS ?? 'false') !== 'true') {
+    try { fs.rmSync(uploadDir, { recursive: true, force: true }); }
+    catch (e) { warn('finalize: upload cleanup failed:', e.message); }
+  }
+
+  log(`finalize: session ${sessionId} → ${transcriptPath} (${model.userCount} utterances, ${model.spans.length} spans, audio=${audio.ok ? audio.format : 'skipped'})`);
 
   return {
     ok: true,

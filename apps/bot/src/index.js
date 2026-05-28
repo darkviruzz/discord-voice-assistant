@@ -212,7 +212,7 @@ client.on('interactionCreate', async (i) => {
 
       connection.on('error', (e) => warn('voice: connection error:', e.message));
 
-      sessions.loadOrStartNew();
+      const { resumed } = sessions.resumeOrStart();
       _activeVoiceChannelId = channel.id;
       transport.sessionStart({
         sessionId: sessions.wireSessionId(),
@@ -222,7 +222,11 @@ client.on('interactionCreate', async (i) => {
         channelName: channel.name,
         botVersion: getVersion(),
         startedAt: sessions.active.startedAt,
+        resume: resumed,
       });
+      // Tell the server the bot is present in voice (drives the server-side
+      // auto-finalize idle timer).
+      transport.voiceState({ sessionId: sessions.wireSessionId(), state: 'joined' });
       transport.setVoiceConnection(connection);
 
       // Minimal streaming-TTS smoke test.  This uses the real server→bot
@@ -284,7 +288,9 @@ client.on('interactionCreate', async (i) => {
         transport.speakingEnd(userId);
       });
 
-      statusLines.push(`Verbunden mit **${channel.name}**. Aufnahme läuft (Session ${sessions.wireSessionId()}).`);
+      statusLines.push(resumed
+        ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (${sessions.active.id}).`
+        : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session ${sessions.active.id}).`);
       await i.editReply({ content: statusLines.join('\n') });
     }
 
@@ -292,10 +298,17 @@ client.on('interactionCreate', async (i) => {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
       transport.clearVoiceConnection();
+      // Leaving voice does NOT end the session. Recording resumes on the next
+      // /join within the idle window; finalize (manual /finalize or the
+      // server-side auto-finalize timer) owns session teardown.
       const wireId = sessions.wireSessionId();
-      if (wireId) transport.sessionEnd(wireId);
+      if (wireId) transport.voiceState({ sessionId: wireId, state: 'left' });
+      sessions.touch();
       _activeVoiceChannelId = null;
-      await i.reply({ content: 'Voice-Channel verlassen.', flags: MessageFlags.Ephemeral });
+      await i.reply({
+        content: 'Voice-Channel verlassen. Session bleibt offen – mit `/join` fortsetzen oder via `/finalize` abschließen (sonst automatisch nach Inaktivität).',
+        flags: MessageFlags.Ephemeral,
+      });
     }
 
     if (i.commandName === 'save-session') {

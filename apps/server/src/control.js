@@ -13,6 +13,11 @@ import { getVersion } from './version.js';
 const PROTO_VERSION = 1;
 const SERVER_ID = randomUUID();
 
+// Optional hook invoked on every voice_state transition: (sessionId: BigInt, state: string).
+// Wired by the auto-finalize timer (M6); null until then.
+let onVoiceState = null;
+export function setVoiceStateHandler(fn) { onVoiceState = fn; }
+
 function envList(name, fallback = []) {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -140,7 +145,7 @@ export function initControlWSS({ bearer } = {}) {
             activeSessionId = BigInt(msg.sessionId);
             ensureSession(activeSessionId);
             logSessionMeta(activeSessionId, msg);
-            log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId);
+            log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId, msg.resume ? '(resume)' : '(new)');
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }
@@ -159,6 +164,22 @@ export function initControlWSS({ bearer } = {}) {
           }
           case 'ping': {
             send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
+            return;
+          }
+          case 'voice_state': {
+            // Voice-channel presence signal. Logged for the timeline; the
+            // server-side auto-finalize timer hooks into these transitions.
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            const validStates = ['joined', 'left', 'alone', 'occupied'];
+            const state = validStates.includes(msg.state) ? msg.state : null;
+            if (!state) { send(ws, { type: 'error', code: 'BAD_STATE', cmdId: msg.cmdId }); return; }
+            logTranscriptEvent(msg.sessionId, 'voice_state', { state });
+            onVoiceState?.(BigInt(msg.sessionId), state);
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;
           }
           case 'clock_sync': {

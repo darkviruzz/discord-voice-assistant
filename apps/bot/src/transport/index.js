@@ -133,6 +133,12 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
 }
 
+export function voiceState({ sessionId, state } = {}) {
+  if (!_instance) return;
+  try { _instance.control.voiceState({ sessionId, state }); }
+  catch (e) { warn('transport.voiceState:', e.message); }
+}
+
 export function sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
   if (!_instance) return;
   try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }); }

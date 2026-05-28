@@ -96,6 +96,12 @@ export class ControlClient extends EventEmitter {
     this._sendIfReady({ type: 'playback_event', cmdId: randomUUID(), ...event });
   }
 
+  // Voice-channel presence signal driving the server-side idle/auto-finalize
+  // timer. state ∈ 'joined' | 'left' | 'alone' | 'occupied'.
+  voiceState({ sessionId, state }) {
+    this._sendIfReady({ type: 'voice_state', cmdId: randomUUID(), sessionId, state });
+  }
+
   debugTts({ sessionId, text }) {
     this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
   }

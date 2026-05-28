@@ -6,6 +6,24 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 ---
 
+## Performance / Stabilität
+
+- [ ] **LLM-Keep-Warm beim Server-Start + `/join`** — aktuelle Symptome: Server-Start dauert lang; Ollama-Modell wird nach wenigen Minuten Idle aus dem VRAM entladen und muss bei der nächsten Wake-Word-Query erneut geladen werden (mehrere Sekunden Latenz).
+  - Beim Server-Start: leeren Chat-Call gegen das konfigurierte `OLLAMA_MODEL` absetzen, damit das Modell in den VRAM kommt
+  - Bei `/join`: erneut einen „warm-up"-Call absetzen (Server kann zwischenzeitlich idle gewesen sein)
+  - Periodischer Keep-Alive während aktiver Session (z. B. alle 2 min ein leerer/minimaler Call), solange der Bot im Voice-Channel ist
+  - Ollama-Parameter `keep_alive` im Request auf z. B. `30m` setzen — vermeidet das Idle-Unloading server-seitig
+  - Messen: Warm-Latenz vs. Cold-Latenz dokumentieren (DEBUG-Log)
+
+- [ ] **Claude Haiku API als optionaler LLM-Provider** — Vergleichstest gegen lokales Ollama.
+  - API-Key-Setup (`ANTHROPIC_API_KEY` in `.env`), Provider-Switch via `LLM_PROVIDER=ollama|anthropic`
+  - Modell-Default: `claude-haiku-4-5`
+  - Same chat()-Interface, same conversationHistory-Format
+  - Vergleich: Latenz, deutsche Sprachqualität, Kosten (Cloud → kein lokaler Datenschutz mehr → bewusste Opt-in-Entscheidung)
+  - Hinweis: widerspricht dem „alles lokal"-Designziel — nur als optionaler Fallback / für Quick-Tests
+
+---
+
 ## Phase 1 — Quick Wins
 
 - [ ] **Version-Anzeige in Bot-Activity** — Status zeigt Bot- + Server-Version (`1.0.1-d5b717a (server:1.0.1-d5b717a)`).
@@ -55,12 +73,15 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
 
-- [ ] **`/finalize`-Command** — manuell getriggert nach Session-Ende (auch bei online-Session, weil Audio-Archiv + Transkript-Merge sonst nicht entstehen).
-  - Server transkribiert noch nicht-transkribierte Backlog-Chunks (Offline-Cache-Fall)
-  - Erzeugt `transcripts/<datum>-<session-id>/transcript.md` (siehe Format in README)
-  - Erzeugt OGG/Opus 32 kbps Audio-Archiv (gemerged oder pro Sprecher, noch zu klären)
-  - Verschiebt/markiert Roh-WAVs ins Archive-Verzeichnis (1–6 Monate aufbewahren)
-  - Discord-Feedback bei Erfolg/Fehler
+- [ ] **`/finalize`-Command — Ist-Zustand prüfen + Soll definieren**
+  - **Ist (Stand piper-rework)**: aktuell existiert `/save-session` (Bot-seitig) — ruft `mixSession()` auf, schreibt `session_mix.ogg`, schließt Session. **Kein** chronologisches Markdown-Transkript, **kein** Backlog-Transkribieren, **keine** WAV-Archivierung.
+  - **TODO 0**: Code lesen (`apps/bot/src/index.js` `save-session`-Handler, `mixer.js`, Session-State) und dokumentieren was wirklich passiert vs. was die README/TODO behaupten
+  - **TODO 1**: Soll-Verhalten entscheiden (umbenennen `/save-session` → `/finalize`? oder zwei getrennte Commands?)
+  - Soll (laut Plan): Server transkribiert noch nicht-transkribierte Backlog-Chunks (Offline-Cache-Fall)
+  - Soll: Erzeugt `transcripts/<datum>-<session-id>/transcript.md` (siehe Format in README)
+  - Soll: Erzeugt OGG/Opus 32 kbps Audio-Archiv (gemerged oder pro Sprecher, noch zu klären)
+  - Soll: Verschiebt/markiert Roh-WAVs ins Archive-Verzeichnis (1–6 Monate aufbewahren)
+  - Soll: Discord-Feedback bei Erfolg/Fehler
 
 - [ ] **Chronologisches Transkript-Merge mit Monolog-Splitting** — der Algorithmus für das Format.
   - Eingabe: pro User die transkribierten Utterances mit Whisper-Token-Timestamps + Aufnahme-`startedAt` (siehe `apps/bot/src/recorder.js`)
@@ -135,17 +156,22 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Bot zeigt sie als Auto-Complete-Choices im Slash-Command
   - Switch in `runPipeline` ohne Server-Neustart
 
-- [ ] **`/config`** — WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice etc. via Discord-Command.
+- [ ] **`/config`** — Settings zur Laufzeit über Discord ändern (z. B. WAKE_WORD, HISTORY_TURNS, TTS-Provider/Voice, LLM-Modell, Stop-Phrases, Whisper-Temperature).
   - Permission-Check (Admin only?)
-  - In-Memory-State + optionale JSON-Persistierung
+  - In-Memory-State sofort; **Persistenz prüfen**: nötig wenn Änderungen Server-Restart überleben sollen — JSON-File in `apps/server/data/` als Override über `.env`, beim Start einlesen
+  - Alternativ ohne Persistenz: Änderungen gelten nur bis zum nächsten Server-Restart (einfacher, evtl. ausreichend wenn `/config` selten genutzt wird)
+  - Auflisten + Setzen einzelner Keys (`/config list`, `/config set <key> <value>`)
 
 - [ ] **`/sleep` / `/wake`** — niedrige Priorität (laut Diskussion).
   - Wake-Word vorübergehend deaktivieren (z. B. während privater Plauderei)
   - **Begründung für niedrige Prio**: Stop-Command unterbricht False-Positives bereits sehr gut; eigener Sleep-Modus ist nicht kritisch
 
-- [ ] **`/debug on|off`** — Live-Debug-Output in einem Discord-Channel.
-  - STT-Transkripte, Wake-Word-Treffer, LLM-Antworten, Latenz-/Buffer-Metriken
-  - Server sendet über Control-Plane
+- [ ] **`/debug on|off`** — Live-Debug-Output für den auslösenden User.
+  - **Ziel**: alle Transkripte (STT, Wake-Word-Treffer, LLM-Antworten, Latenz/Buffer-Metriken) sieht **nur der auslösende User**, idealerweise als fortlaufend editierte Ephemeral-Message (oder DM) — kein Channel-Spam
+  - `/debug on` öffnet einen Ephemeral-Slot, der bei jedem Server-Event aktualisiert wird (oder rotierend ein paar Messages, falls 4000-Zeichen-Limit gerissen wird)
+  - `/debug off` schließt den Slot
+  - Server sendet Events über Control-Plane (`debug_event`); Bot routet nur an User mit aktivem Debug-Slot
+  - Edge-Case: Ephemeral-Messages haben eine Lebensdauer — Strategie wenn Discord die Message verwirft (neue erzeugen)
 
 ---
 
@@ -195,6 +221,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 - [x] **TTS-Unterbrechung mit Resume/Rewind** — User-Sprache pausiert Playback nach `INTERRUPT_MIN_MS`, Resume nach `RESUME_GATE_MS`, Wiederholung über `REWIND_MS`.
 - [x] **Konfigurierbare Stop-Phrases** — `STOP_PHRASES` und `STOP_WITHOUT_WAKE_MAX_WORDS`; Stop bricht Playback und laufenden TTS-Stream ab.
 - [x] **STT-Split-Debug** — lange Utterances loggen bei `DEBUG=1` Chunk-Dauern, Threshold und Split-Typ; `STT_MAX_CHUNK_SECONDS` ist konfigurierbar.
+- [x] **`/ask` + `@mention` History-Scoping** — Requests aus dem Text-Chat des aktiven Voice-Channels teilen die Voice-Session-History; andere Text-Channels behalten je eine eigene channel-scoped History (server-seitig `sessionlessHistory(channel_<id>)`). Normale Chat-Nachrichten ohne Mention werden ignoriert.
 
 ---
 

@@ -150,6 +150,121 @@ export function computeParticipants(spans, events, clockOffsetMs = 0, speakerMap
   return [...byUser.values()].sort((a, b) => (a.joinMs ?? 0) - (b.joinMs ?? 0));
 }
 
+// Map an audio position (ms into the TTS) to a character offset in the text via
+// linear interpolation, snapped forward to the next word boundary.
+function charCutter(full, durationMs) {
+  return (ms) => {
+    if (!(durationMs > 0)) return full.length;
+    const ratio = Math.max(0, Math.min(1, ms / durationMs));
+    let c = Math.floor(full.length * ratio);
+    if (c <= 0) return 0;
+    if (c >= full.length) return full.length;
+    const ws = full.slice(c).search(/\s/);
+    if (ws >= 0) c += ws;
+    return c;
+  };
+}
+
+// Reconstruct assistant (LLM/TTS) turns, split at playback interruptions.
+// We have no per-word TTS timing, so character positions are interpolated from
+// playback_paused.msPlayed / tts_done.durationMs and snapped to word boundaries;
+// playback_resumed.rewoundMs is honored so the replayed overlap after each
+// interruption is not dropped. Ordering within a turn follows the playback
+// event sequence (robust against clock-sync jitter), with the interrupting user
+// utterance (interruptedByUserId) woven in between segments.
+// Returns { spans, consumed } where `consumed` are user spans pulled into the
+// woven sequence (so callers drop them from the standalone span list).
+export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName = DEFAULT_ASSISTANT_NAME, userSpans = [] } = {}) {
+  const norm = (ms) => (Number.isFinite(ms) ? ms - clockOffsetMs : null);
+  const TYPES = ['assistant_response', 'tts_start', 'tts_done', 'assistant_response_played', 'playback_paused', 'playback_resumed'];
+  // playback_paused/resumed carry the TTS `id`, not the turnId — map id→turnId
+  // via tts_start so they can be correlated to their turn.
+  const idToTurn = new Map();
+  for (const e of events) {
+    if (e && e.type === 'tts_start' && e.id && e.turnId) idToTurn.set(e.id, e.turnId);
+  }
+
+  const turns = new Map(); // turnId → { ..., pauses[], resumes[] }
+  let solo = 0;
+  for (const e of events) {
+    if (!e || !TYPES.includes(e.type)) continue;
+    let key = e.turnId || (e.id ? idToTurn.get(e.id) : null);
+    if (!key) {
+      // assistant_response without a turnId (e.g. text replies) → standalone turn;
+      // other event types can't be correlated, so skip them.
+      if (e.type === 'assistant_response') key = `__solo_${solo++}`;
+      else continue;
+    }
+    const rec = turns.get(key) || { pauses: [], resumes: [] };
+    if (e.type === 'playback_paused') rec.pauses.push(e);
+    else if (e.type === 'playback_resumed') rec.resumes.push(e);
+    else rec[e.type] = e;
+    turns.set(key, rec);
+  }
+
+  const out = [];
+  const consumed = new Set();
+  // Process turns in playback-start order.
+  const ordered = [...turns.values()].filter((r) => r.assistant_response)
+    .sort((a, b) => (a.tts_start?.tsMs ?? a.assistant_response.tsMs ?? 0) - (b.tts_start?.tsMs ?? b.assistant_response.tsMs ?? 0));
+
+  for (const rec of ordered) {
+    const full = String(rec.assistant_response.text || '').trim();
+    if (!full) continue;
+    const startWall = norm(rec.tts_start?.tsMs ?? rec.assistant_response.tsMs) ?? 0;
+    const durationMs = rec.tts_done?.durationMs || estimateSpeechMs(full);
+    const cut = charCutter(full, durationMs);
+    const pauses = rec.pauses.slice().sort((a, b) => a.tsMs - b.tsMs);
+    const resumes = rec.resumes.slice().sort((a, b) => a.tsMs - b.tsMs);
+
+    // Uninterrupted (or stopped-only) turn → single span.
+    if (pauses.length === 0) {
+      const played = rec.assistant_response_played;
+      const text = (played && played.truncated && played.text) ? String(played.text).trim() : full;
+      out.push({ type: 'assistant', label: assistantName, startMs: startWall, endMs: startWall + estimateSpeechMs(text), text, words: null, forceMarker: null, interrupted: !!(played && played.truncated) });
+      continue;
+    }
+
+    let segStartPos = 0;        // audio ms position where the current segment begins
+    let segStartWall = startWall;
+    let lastWall = startWall - 1;
+    const push = (it) => { it.startMs = Math.max(it.startMs, lastWall + 1); lastWall = it.startMs; out.push(it); };
+
+    for (let k = 0; k < pauses.length; k++) {
+      const pausePos = Number(pauses[k].msPlayed) || 0;
+      const text = full.slice(cut(segStartPos), cut(pausePos)).trim();
+      const endWall = norm(pauses[k].tsMs) ?? (segStartWall + (pausePos - segStartPos));
+      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: endWall, text, words: null, forceMarker: k > 0 ? 'weiter' : null });
+
+      // Weave in the interrupting user utterance.
+      const interrupterId = pauses[k].interruptedByUserId != null ? String(pauses[k].interruptedByUserId) : null;
+      if (interrupterId) {
+        const pauseBot = norm(pauses[k].tsMs);
+        let best = null, bestD = Infinity;
+        for (const s of userSpans) {
+          if (consumed.has(s) || String(s.userId) !== interrupterId) continue;
+          const d = Math.abs(s.startMs - (pauseBot ?? s.startMs));
+          if (d < bestD && d < 8000) { best = s; bestD = d; }
+        }
+        if (best) { consumed.add(best); push({ ...best, words: null, forceMarker: 'unterbricht' }); }
+      }
+
+      const resume = resumes[k];
+      if (!resume) { segStartPos = pausePos; segStartWall = endWall; break; } // terminal stop
+      segStartPos = Math.max(0, pausePos - (Number(resume.rewoundMs) || 0));
+      segStartWall = norm(resume.tsMs) ?? endWall;
+    }
+
+    // Final segment to the end, when playback resumed after the last pause.
+    if (resumes.length >= pauses.length) {
+      const text = full.slice(cut(segStartPos)).trim();
+      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: segStartWall + estimateSpeechMs(text), text, words: null, forceMarker: 'weiter' });
+    }
+  }
+
+  return { spans: out, consumed };
+}
+
 // ── model building (live / fallback path) ────────────────────────────────────
 
 // Convert parsed JSONL events for ONE session into a render model.
@@ -171,13 +286,7 @@ export function buildModelFromEvents(events, opts = {}) {
   // session_meta.clockOffsetMs, else 0.
   const clockOffsetMs = resolveClockOffset(list, opts.clockOffsetMs);
 
-  // Prefer the actually-played (truncated) assistant text when playback was cut
-  // short — what was heard, not the full generated answer.
-  const playedByTurn = new Map();
-  for (const e of list) {
-    if (e && e.type === 'assistant_response_played' && e.turnId) playedByTurn.set(e.turnId, e);
-  }
-
+  // User + typed-query spans (voice assistant turns are woven in afterwards).
   const spans = [];
   for (const e of list) {
     if (!e || typeof e !== 'object') continue;
@@ -215,33 +324,22 @@ export function buildModelFromEvents(events, opts = {}) {
         });
         break;
       }
-      case 'assistant_response': {
-        const played = e.turnId ? playedByTurn.get(e.turnId) : null;
-        // Use the truncated played text when the answer was interrupted/stopped.
-        const text = (played && played.truncated && played.text)
-          ? String(played.text).trim()
-          : String(e.text || '').trim();
-        if (!text) continue;
-        const startMs = Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : sessionStartMs;
-        spans.push({
-          type: 'assistant',
-          label: assistantName,
-          startMs,
-          endMs: startMs + estimateSpeechMs(text),
-          text,
-          words: null,
-          interrupted: !!(played && played.truncated),
-        });
+      case 'assistant_response':
+        // Handled by weaveAssistantTurns() below (segmented by interruptions).
         break;
-      }
       default:
         break;
     }
   }
 
-  markDetections(spans, list, clockOffsetMs);
-  const participants = computeParticipants(spans, list, clockOffsetMs, speakerMap);
-  return { spans, sessionStartMs, clockOffsetMs, participants };
+  const { spans: assistantSpans, consumed } = weaveAssistantTurns(list, {
+    clockOffsetMs, assistantName, userSpans: spans,
+  });
+  const finalSpans = spans.filter((s) => !consumed.has(s)).concat(assistantSpans);
+
+  markDetections(finalSpans, list, clockOffsetMs);
+  const participants = computeParticipants(finalSpans, list, clockOffsetMs, speakerMap);
+  return { spans: finalSpans, sessionStartMs, clockOffsetMs, participants };
 }
 
 function resolveClockOffset(events, override) {
@@ -318,13 +416,18 @@ export function mergeTranscript(model, opts = {}) {
       .map((o) => o.startMs);
     const frags = fragmentsFor(span, cutTimes);
     frags.forEach((f, idx) => {
+      let marker;
+      if (f.isContinuation) marker = 'weiter';
+      else if ('forceMarker' in span) marker = span.forceMarker; // woven assistant/interrupter
+      else if (idx === 0 && span._interrupter) marker = 'unterbricht';
+      else marker = null;
       items.push({
         type: span.type,
         label: span.label,
         startMs: f.startMs,
         endMs: f.endMs,
         text: f.text,
-        marker: f.isContinuation ? 'weiter' : (idx === 0 && span._interrupter ? 'unterbricht' : null),
+        marker,
         typed: !!span.typed,
         wakeDetected: !!span.wakeDetected,
         stopDetected: !!span.stopDetected,

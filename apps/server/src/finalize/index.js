@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants } from './merge.js';
+import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
 import { warn, log } from '../logger.js';
 
@@ -43,9 +43,10 @@ export function verifyUploads(manifest, uploadDir) {
 // `transcribeFn(absPath) → {text, words}` is injectable for tests.
 export async function buildFinalizeModel({
   sessionId, manifest, events = [], uploadDir,
-  transcribeFn = null, speakerMap = {}, verified = null,
+  transcribeFn = null, speakerMap = {}, verified = null, assistantName = null,
 }) {
   const transcribe = transcribeFn || defaultTranscribe;
+  const asstName = assistantName || manifest.wakeWord || manifest.assistantName || undefined;
   const sessionStartMs = Number(manifest.sessionStartMs ?? sessionId);
 
   const userSpans = [];
@@ -73,14 +74,16 @@ export async function buildFinalizeModel({
     });
   }
 
-  // Keep assistant + typed-query spans from the live log; drop the live voice
-  // user_transcript spans (re-STT above is authoritative).
-  const evModel = buildModelFromEvents(events, { speakerMap, assistantName: manifest.assistantName });
-  const overlaySpans = evModel.spans.filter((s) => s.type === 'assistant' || s.typed);
+  // Typed-query spans come from the live log; voice user spans are the
+  // authoritative re-STT ones above. Assistant turns are woven against the
+  // re-STT user spans (so interruption splitting uses the authoritative audio).
+  const evModel = buildModelFromEvents(events, { speakerMap, assistantName: asstName });
+  const typedSpans = evModel.spans.filter((s) => s.typed);
+  const { spans: assistantSpans, consumed } = weaveAssistantTurns(events, {
+    clockOffsetMs: evModel.clockOffsetMs, assistantName: asstName, userSpans,
+  });
 
-  const spans = [...userSpans, ...overlaySpans];
-  // Wake/stop emphasis flags + participant join/leave times against the
-  // authoritative (re-STT) spans.
+  const spans = [...userSpans.filter((s) => !consumed.has(s)), ...typedSpans, ...assistantSpans];
   markDetections(spans, events, evModel.clockOffsetMs);
   const participants = computeParticipants(spans, events, evModel.clockOffsetMs, speakerMap);
 
@@ -89,7 +92,7 @@ export async function buildFinalizeModel({
     sessionStartMs,
     clockOffsetMs: evModel.clockOffsetMs,
     participants,
-    userCount: userSpans.length,
+    userCount: userSpans.filter((s) => !consumed.has(s)).length,
   };
 }
 
@@ -126,7 +129,7 @@ export async function finalizeSession({
 
   const model = await buildFinalizeModel({
     sessionId, manifest, events, uploadDir, transcribeFn,
-    speakerMap: mergedSpeakerMap, verified,
+    speakerMap: mergedSpeakerMap, verified, assistantName: wakeWord,
   });
 
   const md = mergeTranscript(model, {

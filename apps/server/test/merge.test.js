@@ -264,3 +264,60 @@ test('resolveClockOffset prefers median clock_sync over session_meta', () => {
   assert.equal(_internal.resolveClockOffset([{ type: 'session_meta', clockOffsetMs: 42 }]), 42);
   assert.equal(_internal.resolveClockOffset([]), 0);
 });
+
+// ── assistant interruption weaving (real-data fixture) ─────────────────────────
+
+test('weaveAssistantTurns splits an interrupted LLM turn with rewind + interrupters', () => {
+  const sid = '1780058709544';
+  // Subset of a real session: one assistant turn, interrupted twice with rewinds.
+  const events = [
+    { type: 'clock_sync', sessionId: sid, tsMs: 1780059282375, offsetMs: -878, rttMs: 0 },
+    { type: 'user_transcript', sessionId: sid, tsMs: 1780059258851, userId: '696665320185659453', userDisplayName: 'Dhorik',
+      startTsMs: 1780059252997, endTsMs: 1780059257997, durationMs: 5000, text: 'Ok, Rabenauge, kannst du mir kurz erzählen, was gerade passiert ist?' },
+    { type: 'wakeword_query', sessionId: sid, tsMs: 1780059258851, userId: '696665320185659453', query: 'kannst du mir kurz erzählen, was gerade passiert ist?' },
+    { type: 'user_transcript', sessionId: sid, tsMs: 1780059275032, userId: '696665320185659453', userDisplayName: 'Dhorik',
+      startTsMs: 1780059271540, endTsMs: 1780059272040, durationMs: 500, text: '[SILENCE]' },
+    { type: 'assistant_response', sessionId: sid, tsMs: 1780059279877, turnId: 't1', userId: '696665320185659453',
+      text: 'Ihr habt gerade die alte Schriftrolle untersucht und dabei die geheime Inschrift entdeckt. Diese Inschrift deutet darauf hin, dass die nächste Stadt das Verlies eines mächtigen Magiers birgt.' },
+    { type: 'tts_start', sessionId: sid, tsMs: 1780059279878, turnId: 't1', id: 'tts-1', text: 'Ihr habt gerade …' },
+    { type: 'tts_done', sessionId: sid, tsMs: 1780059280414, turnId: 't1', frames: 474, durationMs: 9480 },
+    { type: 'playback_paused', sessionId: sid, tsMs: 1780059280478, id: 'tts-1', interruptedByUserId: '696665320185659453', msPlayed: 320, framesPlayed: 16 },
+    { type: 'playback_resumed', sessionId: sid, tsMs: 1780059282555, id: 'tts-1', rewoundMs: 320, msPlayed: 320 },
+    { type: 'user_transcript', sessionId: sid, tsMs: 1780059282900, userId: '696665320185659453', userDisplayName: 'Dhorik',
+      startTsMs: 1780059280556, endTsMs: 1780059282156, durationMs: 1600, text: 'Okay, noch einmal.' },
+    { type: 'playback_paused', sessionId: sid, tsMs: 1780059285057, id: 'tts-1', interruptedByUserId: '696665320185659453', msPlayed: 2860, framesPlayed: 143 },
+    { type: 'playback_resumed', sessionId: sid, tsMs: 1780059286317, id: 'tts-1', rewoundMs: 1000, msPlayed: 2860 },
+    { type: 'user_transcript', sessionId: sid, tsMs: 1780059286637, userId: '696665320185659453', userDisplayName: 'Dhorik',
+      startTsMs: 1780059285134, endTsMs: 1780059285914, durationMs: 780, text: 'Mhm.' },
+    { type: 'user_transcript', sessionId: sid, tsMs: 1780059301452, userId: '696665320185659453', userDisplayName: 'Dhorik',
+      startTsMs: 1780059299137, endTsMs: 1780059300697, durationMs: 1560, text: 'Ah, okay, danke.' },
+  ];
+
+  const model = buildModelFromEvents(events, { speakerMap: { '696665320185659453': { player: 'Dhorik' } } });
+  const md = mergeTranscript(model, { ...OPTS, wakeWord: 'Rabenauge' });
+
+  // Three assistant segments.
+  const asst = model.spans.filter((s) => s.type === 'assistant');
+  assert.equal(asst.length, 3, 'turn split into 3 segments');
+  assert.match(asst[0].text, /^Ihr habt/);
+  assert.equal(asst[0].forceMarker, null);
+  assert.equal(asst[1].forceMarker, 'weiter');
+  assert.equal(asst[2].forceMarker, 'weiter');
+  assert.match(asst[2].text, /birgt\.$/, 'final segment runs to the end');
+
+  // [SILENCE] dropped; interrupters woven once each.
+  assert.doesNotMatch(md, /SILENCE/);
+  assert.equal((md.match(/Okay, noch einmal\./g) || []).length, 1);
+  assert.match(md, /_\[unterbricht\]_ Okay, noch einmal\./);
+  assert.match(md, /_\[unterbricht\]_ Mhm\./);
+  assert.match(md, /_\[weiter\]_/);
+
+  // Order: seg0 ("Ihr habt") → Okay → seg1 → Mhm → final ("… birgt.").
+  const order = ['Ihr habt', 'Okay, noch einmal', 'Mhm.', 'birgt.'];
+  let pos = -1;
+  for (const needle of order) {
+    const at = md.indexOf(needle);
+    assert.ok(at > pos, `"${needle}" out of order`);
+    pos = at;
+  }
+});

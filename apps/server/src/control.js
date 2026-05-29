@@ -268,8 +268,11 @@ export function initControlWSS({ bearer } = {}) {
             const validStates = ['joined', 'left', 'alone', 'occupied'];
             const state = validStates.includes(msg.state) ? msg.state : null;
             if (!state) { send(ws, { type: 'error', code: 'BAD_STATE', cmdId: msg.cmdId }); return; }
-            logTranscriptEvent(msg.sessionId, 'voice_state', { state });
-            autoTimer.notify(msg.sessionId, state);
+            // Don't append presence to an already-finalized session.
+            if (!autoTimer.isFinalizing(msg.sessionId)) {
+              logTranscriptEvent(msg.sessionId, 'voice_state', { state });
+              autoTimer.notify(msg.sessionId, state);
+            }
             onVoiceState?.(BigInt(msg.sessionId), state);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;
@@ -279,6 +282,9 @@ export function initControlWSS({ bearer } = {}) {
             // and round-trip time. Logged per active session so finalize can
             // normalize server-stamped event timestamps onto the bot timeline.
             if (!registered || activeSessionId === null) return;
+            // Stop appending to a session that has been finalized — wait until a
+            // new session_start makes a fresh session active.
+            if (autoTimer.isFinalizing(activeSessionId)) return;
             const offsetMs = typeof msg.offsetMs === 'number' ? msg.offsetMs : null;
             const rttMs = typeof msg.rttMs === 'number' ? msg.rttMs : null;
             if (offsetMs === null) return;

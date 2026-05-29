@@ -77,6 +77,9 @@ export async function chat(history, query, { systemBlocks = [] } = {}) {
     ...recentHistory,
     { role: 'user',   content: query },
   ];
+  if (extraBlocks.length) {
+    debug(`llm: ${extraBlocks.length} extra system block(s), ${extraBlocks.reduce((n, b) => n + b.content.length, 0)} chars`);
+  }
 
   let res;
   try {

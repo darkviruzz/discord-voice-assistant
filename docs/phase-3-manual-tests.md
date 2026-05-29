@@ -128,10 +128,11 @@ dann:
 
 - **Whisper-Wort-Timestamps**: abhängig vom whisper.cpp-Build. Ohne sie greift
   der Utterance-Fallback (kein wortgenaues Splitting).
-- **Re-Finalize aus dem Archiv**: die Per-Äußerung-OGGs + `index.json` liegen im
-  Archiv, ein dedizierter „aus Archiv neu bauen"-Befehl ist aber noch nicht
-  verdrahtet (OGG→PCM-Decode für Re-STT fehlt). Re-Finalize aktuell über die
-  noch lokal vorhandenen WAVs.
+- **Re-Finalize**: `/finalize run session:<id>` funktioniert auch für bereits
+  finalisierte Sessions — der Bot lädt die ins `_archived/<id>/chunks/`
+  verschobenen WAVs erneut hoch (Retention `move`). Bei Retention `delete` gibt
+  es keine lokale Quelle mehr; ein Re-STT direkt aus den Archiv-OGGs des Servers
+  (OGG→PCM-Decode) ist noch nicht verdrahtet.
 - **Server-Restart während des Idle-Fensters**: der In-Memory-Timer geht verloren.
   Der Bot flaggt solche Sessions beim Start im Log; Abschluss dann via
   `/finalize run`. (Timer-Persistenz = Folgearbeit.)

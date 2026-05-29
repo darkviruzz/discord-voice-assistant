@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { buildManifest, applyRetention, chunksDir } from '../src/finalize.js';
+import { buildManifest, applyRetention, chunksDir, sourceChunksDir } from '../src/finalize.js';
 
 function makeSession() {
   // Mirror production layout: <DATA_DIR>/<id>/chunks so _archived lands under
@@ -60,4 +60,13 @@ test('applyRetention delete removes WAVs', () => {
   const res = applyRetention(session, { policy: 'delete' });
   assert.equal(res.policy, 'delete');
   assert.equal(fs.existsSync(chunksDir(session)), false);
+});
+
+test('re-finalize resolves WAVs from _archived after a retention move', () => {
+  const session = makeSession();
+  applyRetention(session, { policy: 'move' });
+  assert.equal(fs.existsSync(chunksDir(session)), false, 'live chunks moved away');
+  assert.ok(sourceChunksDir(session).includes('_archived'), 'source resolves to archive');
+  const m = buildManifest(session, {});
+  assert.equal(m.utterances.length, 2, 'manifest rebuilt from archived WAVs');
 });

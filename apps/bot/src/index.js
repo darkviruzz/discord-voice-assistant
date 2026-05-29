@@ -161,7 +161,7 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     let retentionNote = '';
     if (fullyVerified) {
       const r = applyRetention(session);
-      retentionNote = r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.';
+      retentionNote = r.noop ? '' : (r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.');
     } else {
       retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
     }
@@ -503,9 +503,10 @@ client.on('interactionCreate', async (i) => {
       if (session.status === SessionStatus.FINALIZING) {
         return i.reply({ content: 'Diese Session wird bereits finalisiert.', flags: MessageFlags.Ephemeral });
       }
-      if (session.status === SessionStatus.FINALIZED) {
-        return i.reply({ content: 'Diese Session ist bereits finalisiert. Erneutes Finalisieren ist möglich, falls die WAVs noch lokal liegen.', flags: MessageFlags.Ephemeral });
-      }
+      // FINALIZED sessions may be re-finalized (rebuilds from the retained
+      // _archived WAVs) — useful after code changes. uploadSession/buildManifest
+      // resolve the source dir automatically (live or archived).
+      const reFinalize = session.status === SessionStatus.FINALIZED;
 
       await i.deferReply({ flags: MessageFlags.Ephemeral });
       try {
@@ -516,7 +517,7 @@ client.on('interactionCreate', async (i) => {
         });
         await i.editReply({
           content: [
-            `✅ Session \`${session.id}\` finalisiert.`,
+            `✅ Session \`${session.id}\` ${reFinalize ? 'neu finalisiert' : 'finalisiert'}.`,
             `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
             `Transkript: \`${result.transcriptPath}\``,
             `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,

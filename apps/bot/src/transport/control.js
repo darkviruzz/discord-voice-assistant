@@ -138,6 +138,11 @@ export class ControlClient extends EventEmitter {
     this._sendIfReady({ type: 'voice_state', cmdId: randomUUID(), sessionId, state });
   }
 
+  // Per-user voice channel join/leave → participant times in the transcript.
+  voiceMember({ sessionId, userId, displayName, state }) {
+    this._sendIfReady({ type: 'voice_member', cmdId: randomUUID(), sessionId, userId, displayName, state });
+  }
+
   debugTts({ sessionId, text }) {
     this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
   }

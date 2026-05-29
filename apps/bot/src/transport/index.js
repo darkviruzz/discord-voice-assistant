@@ -149,6 +149,12 @@ export function voiceState({ sessionId, state } = {}) {
   catch (e) { warn('transport.voiceState:', e.message); }
 }
 
+export function voiceMember({ sessionId, userId, displayName, state } = {}) {
+  if (!_instance) return;
+  try { _instance.control.voiceMember({ sessionId, userId, displayName, state }); }
+  catch (e) { warn('transport.voiceMember:', e.message); }
+}
+
 export function sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
   if (!_instance) return;
   try { _instance.control.sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }); }

@@ -99,17 +99,82 @@ test('no pause header for short gaps', () => {
   assert.doesNotMatch(md, /Pause/);
 });
 
-test('wake word and stop phrases are bolded in user text', () => {
-  const model = {
-    sessionStartMs: BASE,
-    spans: [
-      userSpan('Hauke', BASE, BASE + 2000, 'Rabenauge, öffne die Tür.'),
-      userSpan('Greta', BASE + 3000, BASE + 3500, 'Stop bitte.'),
-    ],
-  };
-  const md = mergeTranscript(model, OPTS);
+test('wake word / stop phrases are bolded only when actually detected', () => {
+  const detected = userSpan('Hauke', BASE, BASE + 2000, 'Rabenauge, öffne die Tür.');
+  detected.wakeDetected = true;
+  const stop = userSpan('Greta', BASE + 3000, BASE + 3500, 'Stop bitte.');
+  stop.stopDetected = true;
+  const md = mergeTranscript({ sessionStartMs: BASE, spans: [detected, stop] }, OPTS);
   assert.match(md, /\*\*Rabenauge\*\*, öffne/);
   assert.match(md, /\*\*Stop\*\* bitte/);
+});
+
+test('wake word is NOT bolded when no detection flag is set', () => {
+  // e.g. wake word said too late in the sentence → no trigger.
+  const model = {
+    sessionStartMs: BASE,
+    spans: [userSpan('Hauke', BASE, BASE + 2000, 'Ja gut, Rabenauge hätte ich fast vergessen.')],
+  };
+  const md = mergeTranscript(model, OPTS);
+  assert.doesNotMatch(md, /\*\*Rabenauge\*\*/);
+  assert.match(md, /Rabenauge hätte/);
+});
+
+test('detection flags derive from wakeword_query / stop_command events', () => {
+  const sid = String(BASE);
+  const events = [
+    { type: 'user_transcript', sessionId: sid, tsMs: BASE + 1600, userId: '111', userDisplayName: 'Hauke',
+      startTsMs: BASE, endTsMs: BASE + 1500, text: 'Rabenauge was ist das' },
+    { type: 'wakeword_query', sessionId: sid, tsMs: BASE + 1700, userId: '111', query: 'was ist das' },
+  ];
+  const model = buildModelFromEvents(events, {});
+  assert.equal(model.spans[0].wakeDetected, true);
+  const md = mergeTranscript(model, OPTS);
+  assert.match(md, /\*\*Rabenauge\*\* was ist das/);
+});
+
+test('bracket-only transcripts are dropped', () => {
+  const sid = String(BASE);
+  const events = [
+    { type: 'user_transcript', sessionId: sid, tsMs: BASE, userId: '1', startTsMs: BASE, endTsMs: BASE + 500, text: '[Musik]' },
+    { type: 'user_transcript', sessionId: sid, tsMs: BASE + 1000, userId: '1', startTsMs: BASE + 1000, endTsMs: BASE + 1500, text: 'Hallo [Rascheln] zusammen' },
+  ];
+  const model = buildModelFromEvents(events, {});
+  assert.equal(model.spans.length, 1, '[Musik] dropped, mixed line kept');
+  assert.match(model.spans[0].text, /Hallo/);
+});
+
+test('normalizeText collapses STT newlines in rendered lines', () => {
+  const model = { sessionStartMs: BASE, spans: [userSpan('Hauke', BASE, BASE + 2000, 'Erste Zeile.\nZweite Zeile.\n\nDritte.')] };
+  const md = mergeTranscript(model, OPTS);
+  assert.match(md, /Erste Zeile\. Zweite Zeile\. Dritte\./);
+});
+
+test('interrupted assistant uses the played (truncated) text', () => {
+  const sid = String(BASE);
+  const events = [
+    { type: 'assistant_response', sessionId: sid, tsMs: BASE + 2000, turnId: 't1', text: 'Die Tür ist verschlossen und dahinter lauert ein Drache.' },
+    { type: 'assistant_response_played', sessionId: sid, tsMs: BASE + 2500, turnId: 't1', truncated: true, text: 'Die Tür ist verschlossen ...' },
+  ];
+  const model = buildModelFromEvents(events, {});
+  const asst = model.spans.find((s) => s.type === 'assistant');
+  assert.equal(asst.text, 'Die Tür ist verschlossen ...');
+  assert.equal(asst.interrupted, true);
+});
+
+test('participants carry join/leave times from voice_member events', () => {
+  const sid = String(BASE);
+  const events = [
+    { type: 'voice_member', sessionId: sid, tsMs: BASE, userId: '111', displayName: 'Hauke', state: 'join' },
+    { type: 'user_transcript', sessionId: sid, tsMs: BASE + 5000, userId: '111', userDisplayName: 'Hauke', startTsMs: BASE + 5000, endTsMs: BASE + 6000, text: 'Hallo.' },
+    { type: 'voice_member', sessionId: sid, tsMs: BASE + 600000, userId: '111', displayName: 'Hauke', state: 'leave' },
+  ];
+  const model = buildModelFromEvents(events, {});
+  assert.equal(model.participants.length, 1);
+  assert.equal(model.participants[0].joinMs, BASE);
+  assert.equal(model.participants[0].leftMs, BASE + 600000);
+  const md = mergeTranscript({ ...model, channelName: 'X' }, OPTS);
+  assert.match(md, /\*\*Teilnehmer:\*\* Hauke \(\d{2}:\d{2}–\d{2}:\d{2}\)/);
 });
 
 test('assistant text is not keyword-bolded and uses assistant label', () => {

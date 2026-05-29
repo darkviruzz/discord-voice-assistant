@@ -34,6 +34,9 @@ export function buildManifest(session, extra = {}) {
   }
   return {
     sessionId: String(session.startedAt),
+    // Human-readable id (e.g. 2026-05-29T12-45-09-543Z) — used for server-side
+    // archive/transcript folder names so they match the bot's session ids.
+    sessionName: session.id,
     sessionStartMs: session.startedAt,
     channelName: extra.channelName ?? null,
     guildName: extra.guildName ?? null,

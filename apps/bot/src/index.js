@@ -113,6 +113,9 @@ client.once('clientReady', async () => {
 
 // Detach the active in-memory session and tear down its voice connection.
 function detachActiveSession() {
+  // Tell the server the bot left voice (stops clock_sync logging).
+  const wid = sessions.wireSessionId();
+  if (wid) transport.voiceState({ sessionId: wid, state: 'left' });
   transport.clearVoiceConnection();
   const ch = _activeVoiceChannelId ? client.channels.cache.get(_activeVoiceChannelId) : null;
   const conn = ch?.guild ? getVoiceConnection(ch.guild.id) : null;
@@ -192,7 +195,7 @@ async function handleAutoFinalize({ sessionId }) {
   try {
     const { result, retentionNote } = await performFinalize(session, {});
     if (_textChannel?.send) {
-      _textChannel.send(`🗄️ Session **${session.id}** automatisch finalisiert (Inaktivität).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
+      _textChannel.send(`🗄️ Session \`${session.id}\` automatisch finalisiert (Inaktivität).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
         .catch(() => {});
     }
   } catch (e) {
@@ -313,6 +316,12 @@ client.on('interactionCreate', async (i) => {
       // Tell the server the bot is present in voice (drives the server-side
       // auto-finalize idle timer).
       transport.voiceState({ sessionId: sessions.wireSessionId(), state: 'joined' });
+      // Record current channel members as joined (they don't trigger a
+      // voiceStateUpdate for this /join).
+      for (const m of channel.members.values()) {
+        if (m.user.bot) continue;
+        transport.voiceMember({ sessionId: sessions.wireSessionId(), userId: m.id, displayName: m.displayName, state: 'join' });
+      }
       transport.setVoiceConnection(connection);
 
       // Minimal streaming-TTS smoke test.  This uses the real server→bot
@@ -375,8 +384,8 @@ client.on('interactionCreate', async (i) => {
       });
 
       statusLines.push(resumed
-        ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (${sessions.active.id}).`
-        : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session ${sessions.active.id}).`);
+        ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (\`${sessions.active.id}\`).`
+        : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session \`${sessions.active.id}\`).`);
 
       // Reminder: speakers currently in the channel without a mapping (best
       // effort — needs the server online; falls back silently otherwise).
@@ -507,7 +516,7 @@ client.on('interactionCreate', async (i) => {
         });
         await i.editReply({
           content: [
-            `✅ Session **${session.id}** finalisiert.`,
+            `✅ Session \`${session.id}\` finalisiert.`,
             `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
             `Transkript: \`${result.transcriptPath}\``,
             `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
@@ -531,11 +540,24 @@ client.on('interactionCreate', async (i) => {
 client.on('voiceStateUpdate', (oldState, newState) => {
   try {
     if (!_activeVoiceChannelId || !sessions.active) return;
+    const wid = sessions.wireSessionId();
+
+    // Per-user join/leave to/from our channel → participant times.
+    const member = newState.member ?? oldState.member;
+    const uid = member?.id;
+    if (uid && uid !== client.user.id) {
+      const joined = oldState.channelId !== _activeVoiceChannelId && newState.channelId === _activeVoiceChannelId;
+      const leftCh = oldState.channelId === _activeVoiceChannelId && newState.channelId !== _activeVoiceChannelId;
+      if (joined || leftCh) {
+        transport.voiceMember({ sessionId: wid, userId: uid, displayName: displayNameFor(member, member?.user), state: joined ? 'join' : 'leave' });
+      }
+    }
+
     if (oldState.channelId !== _activeVoiceChannelId && newState.channelId !== _activeVoiceChannelId) return;
     const channel = client.channels.cache.get(_activeVoiceChannelId);
     if (!channel) return;
     const humans = [...channel.members.values()].filter((m) => !m.user.bot).length;
-    transport.voiceState({ sessionId: sessions.wireSessionId(), state: humans === 0 ? 'alone' : 'occupied' });
+    transport.voiceState({ sessionId: wid, state: humans === 0 ? 'alone' : 'occupied' });
   } catch (e) {
     debug('voiceStateUpdate handler error:', e.message);
   }

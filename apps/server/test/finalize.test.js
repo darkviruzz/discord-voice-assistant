@@ -40,6 +40,7 @@ function baseManifest(uploadDir) {
 
 const events = [
   { type: 'session_meta', sessionId: String(BASE), tsMs: BASE, users: { '111': { player: 'Hauke', character: 'Thrain' } }, wakeword: { word: 'Rabenauge' }, stopPhrases: ['stop'] },
+  { type: 'wakeword_query', sessionId: String(BASE), tsMs: BASE + 1500, userId: '111', query: 'öffne die Tür' },
   { type: 'assistant_response', sessionId: String(BASE), tsMs: BASE + 2500, text: 'Die Tür öffnet sich.' },
 ];
 

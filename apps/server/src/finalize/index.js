@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { buildModelFromEvents, mergeTranscript, speakerLabel } from './merge.js';
+import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants } from './merge.js';
 import { buildAudioArchive } from './archive.js';
 import { warn, log } from '../logger.js';
 
@@ -60,7 +60,7 @@ export async function buildFinalizeModel({
       warn('finalize: STT failed for', u.file, '-', e.message);
       continue;
     }
-    if (!text) continue;
+    if (!text || isBracketOnly(text)) continue;
     const startMs = sessionStartMs + (Number(u.startMs) || 0);
     userSpans.push({
       type: 'user',
@@ -78,15 +78,25 @@ export async function buildFinalizeModel({
   const evModel = buildModelFromEvents(events, { speakerMap, assistantName: manifest.assistantName });
   const overlaySpans = evModel.spans.filter((s) => s.type === 'assistant' || s.typed);
 
+  const spans = [...userSpans, ...overlaySpans];
+  // Wake/stop emphasis flags + participant join/leave times against the
+  // authoritative (re-STT) spans.
+  markDetections(spans, events, evModel.clockOffsetMs);
+  const participants = computeParticipants(spans, events, evModel.clockOffsetMs, speakerMap);
+
   return {
-    spans: [...userSpans, ...overlaySpans],
+    spans,
     sessionStartMs,
     clockOffsetMs: evModel.clockOffsetMs,
+    participants,
     userCount: userSpans.length,
   };
 }
 
-function archiveDirName(sessionStartMs, sessionId, timeZone) {
+function archiveDirName(manifest, sessionStartMs, sessionId, timeZone) {
+  // Prefer the human-readable bot session id; sanitize for the filesystem.
+  const name = typeof manifest.sessionName === 'string' ? manifest.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  if (name) return name;
   const date = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date(sessionStartMs)); // YYYY-MM-DD
@@ -130,7 +140,7 @@ export async function finalizeSession({
     guildName: manifest.guildName || meta.guildName || null,
   });
 
-  const dirName = archiveDirName(model.sessionStartMs, sessionId, timeZone);
+  const dirName = archiveDirName(manifest, model.sessionStartMs, sessionId, timeZone);
   const archiveDir = path.resolve(archiveRoot, dirName);
   const transcriptDir = path.resolve(transcriptRoot, dirName);
   fs.mkdirSync(archiveDir, { recursive: true });

@@ -202,6 +202,11 @@ export function initControlWSS({ bearer } = {}) {
 
     let registered = false;
     let activeSessionId = null;
+    // Whether humans are present in the bot's voice channel — clock_sync is only
+    // logged while occupied (it is only needed to align live conversation, and
+    // this naturally stops writing after /leave or finalize). Gaps are fine:
+    // finalize uses the median of the available samples.
+    let occupied = false;
 
     send(ws, { type: 'hello', serverId: SERVER_ID, version: getVersion(), protoVersion: PROTO_VERSION, t: Date.now() });
 
@@ -268,6 +273,8 @@ export function initControlWSS({ bearer } = {}) {
             const validStates = ['joined', 'left', 'alone', 'occupied'];
             const state = validStates.includes(msg.state) ? msg.state : null;
             if (!state) { send(ws, { type: 'error', code: 'BAD_STATE', cmdId: msg.cmdId }); return; }
+            // Track presence for clock_sync gating regardless of finalize status.
+            occupied = (state === 'joined' || state === 'occupied');
             // Don't append presence to an already-finalized session.
             if (!autoTimer.isFinalizing(msg.sessionId)) {
               logTranscriptEvent(msg.sessionId, 'voice_state', { state });
@@ -277,14 +284,31 @@ export function initControlWSS({ bearer } = {}) {
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;
           }
+          case 'voice_member': {
+            // Per-user voice channel join/leave → participant times in the transcript.
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            if (msg.userId != null && !autoTimer.isFinalizing(msg.sessionId)) {
+              logTranscriptEvent(msg.sessionId, 'voice_member', {
+                userId: String(msg.userId),
+                displayName: typeof msg.displayName === 'string' ? msg.displayName : null,
+                state: msg.state === 'join' ? 'join' : 'leave',
+              });
+            }
+            send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_member' });
+            return;
+          }
           case 'clock_sync': {
             // Bot reports its measured clock offset (serverClock − botClock, ms)
             // and round-trip time. Logged per active session so finalize can
             // normalize server-stamped event timestamps onto the bot timeline.
             if (!registered || activeSessionId === null) return;
-            // Stop appending to a session that has been finalized — wait until a
-            // new session_start makes a fresh session active.
-            if (autoTimer.isFinalizing(activeSessionId)) return;
+            // Only log while the bot is in voice with people present (after
+            // /leave or finalize the bot reports left/alone → occupied=false).
+            if (!occupied) return;
             const offsetMs = typeof msg.offsetMs === 'number' ? msg.offsetMs : null;
             const rttMs = typeof msg.rttMs === 'number' ? msg.rttMs : null;
             if (offsetMs === null) return;

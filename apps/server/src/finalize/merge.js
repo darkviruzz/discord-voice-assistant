@@ -80,6 +80,76 @@ function emphasizeKeywords(text, { wakeWord, stopPhrases }) {
   return out;
 }
 
+// Collapse STT/segment newlines and runs of whitespace into single spaces so a
+// transcript line stays on one line.
+export function normalizeText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+// True when the text consists only of bracketed tokens like "[Musik]",
+// "[BLANK_AUDIO]" with no real words outside brackets → drop from the transcript.
+export function isBracketOnly(text) {
+  const stripped = String(text || '').replace(/\[[^\]]*\]/g, '').trim();
+  return stripped.length === 0 && /\[[^\]]*\]/.test(String(text || ''));
+}
+
+// Mark user spans where a wake word / stop command was actually detected, so
+// emphasis is applied only on real triggers (not on every mention of the word).
+// Each detection event is attributed to the most recent user span of the same
+// speaker that started at/just before the (clock-normalized) event time.
+export function markDetections(spans, events, clockOffsetMs = 0) {
+  const userSpans = spans.filter((s) => s.type === 'user' && s.userId != null);
+  const assign = (evType, flag) => {
+    for (const e of events) {
+      if (!e || e.type !== evType) continue;
+      const uid = e.userId != null ? String(e.userId) : null;
+      if (!uid) continue;
+      const t = Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : null;
+      if (t == null) continue;
+      let best = null;
+      for (const s of userSpans) {
+        if (String(s.userId) !== uid) continue;
+        if (s.startMs <= t + 1000 && (!best || s.startMs > best.startMs)) best = s;
+      }
+      if (best) best[flag] = true;
+    }
+  };
+  assign('wakeword_query', 'wakeDetected');
+  assign('stop_command', 'stopDetected');
+  return spans;
+}
+
+// Participant join/leave times. Prefers voice_member events (clock-normalized);
+// falls back to first/last utterance per speaker.
+export function computeParticipants(spans, events, clockOffsetMs = 0, speakerMap = {}) {
+  const byUser = new Map();
+  const get = (uid) => byUser.get(uid) || { label: null, joinMs: null, leftMs: null };
+
+  for (const e of events) {
+    if (!e || e.type !== 'voice_member' || e.userId == null) continue;
+    const uid = String(e.userId);
+    const t = Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : null;
+    if (t == null) continue;
+    const rec = get(uid);
+    if (e.state === 'join') rec.joinMs = rec.joinMs == null ? t : Math.min(rec.joinMs, t);
+    else if (e.state === 'leave') rec.leftMs = rec.leftMs == null ? t : Math.max(rec.leftMs, t);
+    rec.label = speakerLabel(uid, e.displayName, speakerMap);
+    byUser.set(uid, rec);
+  }
+
+  for (const s of spans) {
+    if (s.type !== 'user' || s.userId == null) continue;
+    const uid = String(s.userId);
+    const rec = get(uid);
+    if (rec.joinMs == null) rec.joinMs = s.startMs;
+    rec.leftMs = rec.leftMs == null ? s.endMs : Math.max(rec.leftMs, s.endMs);
+    rec.label = rec.label || s.label;
+    byUser.set(uid, rec);
+  }
+
+  return [...byUser.values()].sort((a, b) => (a.joinMs ?? 0) - (b.joinMs ?? 0));
+}
+
 // ── model building (live / fallback path) ────────────────────────────────────
 
 // Convert parsed JSONL events for ONE session into a render model.
@@ -101,13 +171,20 @@ export function buildModelFromEvents(events, opts = {}) {
   // session_meta.clockOffsetMs, else 0.
   const clockOffsetMs = resolveClockOffset(list, opts.clockOffsetMs);
 
+  // Prefer the actually-played (truncated) assistant text when playback was cut
+  // short — what was heard, not the full generated answer.
+  const playedByTurn = new Map();
+  for (const e of list) {
+    if (e && e.type === 'assistant_response_played' && e.turnId) playedByTurn.set(e.turnId, e);
+  }
+
   const spans = [];
   for (const e of list) {
     if (!e || typeof e !== 'object') continue;
     switch (e.type) {
       case 'user_transcript': {
         const text = String(e.text || '').trim();
-        if (!text) continue; // empty STT result — keep diagnostics out of the read view
+        if (!text || isBracketOnly(text)) continue; // empty/bracket-only STT result
         const startMs = Number.isFinite(e.startTsMs) ? e.startTsMs
           : Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : sessionStartMs;
         const endMs = Number.isFinite(e.endTsMs) ? e.endTsMs
@@ -124,7 +201,7 @@ export function buildModelFromEvents(events, opts = {}) {
       }
       case 'text_query': {
         const text = String(e.text || '').trim();
-        if (!text) continue;
+        if (!text || isBracketOnly(text)) continue;
         const startMs = Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : sessionStartMs;
         spans.push({
           type: 'user',
@@ -139,7 +216,11 @@ export function buildModelFromEvents(events, opts = {}) {
         break;
       }
       case 'assistant_response': {
-        const text = String(e.text || '').trim();
+        const played = e.turnId ? playedByTurn.get(e.turnId) : null;
+        // Use the truncated played text when the answer was interrupted/stopped.
+        const text = (played && played.truncated && played.text)
+          ? String(played.text).trim()
+          : String(e.text || '').trim();
         if (!text) continue;
         const startMs = Number.isFinite(e.tsMs) ? e.tsMs - clockOffsetMs : sessionStartMs;
         spans.push({
@@ -149,6 +230,7 @@ export function buildModelFromEvents(events, opts = {}) {
           endMs: startMs + estimateSpeechMs(text),
           text,
           words: null,
+          interrupted: !!(played && played.truncated),
         });
         break;
       }
@@ -157,7 +239,9 @@ export function buildModelFromEvents(events, opts = {}) {
     }
   }
 
-  return { spans, sessionStartMs, clockOffsetMs };
+  markDetections(spans, list, clockOffsetMs);
+  const participants = computeParticipants(spans, list, clockOffsetMs, speakerMap);
+  return { spans, sessionStartMs, clockOffsetMs, participants };
 }
 
 function resolveClockOffset(events, override) {
@@ -242,6 +326,8 @@ export function mergeTranscript(model, opts = {}) {
         text: f.text,
         marker: f.isContinuation ? 'weiter' : (idx === 0 && span._interrupter ? 'unterbricht' : null),
         typed: !!span.typed,
+        wakeDetected: !!span.wakeDetected,
+        stopDetected: !!span.stopDetected,
       });
     });
   }
@@ -250,16 +336,24 @@ export function mergeTranscript(model, opts = {}) {
 
   // ── header ──
   const lastEnd = spans.reduce((m, s) => Math.max(m, s.endMs), sessionStartMs);
-  const participants = [...new Map(
-    spans.filter((s) => s.type === 'user').map((s) => [s.label, true]),
-  ).keys()];
+  // Participants with join/leave times: from the model (voice_member-derived)
+  // when available, else first/last utterance per speaker.
+  const participants = (model.participants && model.participants.length)
+    ? model.participants
+    : [...new Map(spans.filter((s) => s.type === 'user').map((s) => [s.label, { label: s.label, joinMs: null, leftMs: null }])).values()];
+  const participantLine = participants.map((p) => {
+    if (p.joinMs == null && p.leftMs == null) return p.label;
+    const j = p.joinMs != null ? fmtClock(p.joinMs, timeZone, false) : '?';
+    const l = p.leftMs != null ? fmtClock(p.leftMs, timeZone, false) : '?';
+    return `${p.label} (${j}–${l})`;
+  });
   const lines = [];
   const title = opts.channelName ? `Session ${fmtDate(sessionStartMs, timeZone)} — ${opts.channelName}`
     : `Session ${fmtDate(sessionStartMs, timeZone)}`;
   lines.push(`# ${title}`);
   lines.push('');
   lines.push(`- **Beginn:** ${fmtClock(sessionStartMs, timeZone)} · **Dauer:** ${fmtDurationMs(lastEnd - sessionStartMs)}`);
-  if (participants.length) lines.push(`- **Teilnehmer:** ${participants.join(', ')}`);
+  if (participantLine.length) lines.push(`- **Teilnehmer:** ${participantLine.join(', ')}`);
   if (opts.guildName) lines.push(`- **Server:** ${opts.guildName}`);
   lines.push('');
   lines.push('---');
@@ -277,9 +371,14 @@ export function mergeTranscript(model, opts = {}) {
     const ts = `[${fmtClock(it.startMs, timeZone)}]`;
     const marker = it.marker ? ` _[${it.marker}]_` : '';
     const typed = it.typed ? ' _(getippt)_' : '';
-    const body = it.type === 'assistant'
-      ? it.text
-      : emphasizeKeywords(it.text, { wakeWord, stopPhrases });
+    let body = normalizeText(it.text);
+    if (it.type !== 'assistant') {
+      // Emphasize only on real detections (wakeword_query / stop_command).
+      body = emphasizeKeywords(body, {
+        wakeWord: it.wakeDetected ? wakeWord : null,
+        stopPhrases: it.stopDetected ? stopPhrases : [],
+      });
+    }
     lines.push(`${ts} **${it.label}:**${marker}${typed} ${body}`.trimEnd());
     prevEnd = Math.max(prevEnd ?? it.endMs, it.endMs);
   }
@@ -291,4 +390,7 @@ export function mergeTranscript(model, opts = {}) {
   return lines.join('\n') + '\n';
 }
 
-export const _internal = { estimateSpeechMs, emphasizeKeywords, fragmentsFor, resolveClockOffset, fmtClock };
+export const _internal = {
+  estimateSpeechMs, emphasizeKeywords, fragmentsFor, resolveClockOffset, fmtClock,
+  normalizeText, isBracketOnly, markDetections, computeParticipants,
+};

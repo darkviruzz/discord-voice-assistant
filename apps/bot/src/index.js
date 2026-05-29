@@ -128,28 +128,35 @@ function detachActiveSession() {
 // (idle auto-finalize) paths: lock → manifest → upload → server finalize →
 // status + checksum-gated retention → detach if active. Throws on failure
 // (status reverted so it can be retried).
-async function performFinalize(session, { channelName = null, guildName = null, onProgress = () => {} } = {}) {
+async function performFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
   const prevStatus = session.status;
   session.status = SessionStatus.FINALIZING;
   SessionManager.save(session);
   try {
-    const manifest = buildManifest(session, {
-      channelName,
-      guildName,
-      wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
-      botVersion: getVersion(),
-    });
-    if (manifest.utterances.length === 0) throw new Error('Session enthält keine aufgenommenen Äußerungen.');
-    writeManifest(session, manifest);
+    let result;
+    if (fromArchive) {
+      // Re-finalize: no upload — the server rebuilds from the archived originals.
+      onProgress('⏳ Server finalisiert aus dem Archiv neu …');
+      result = await transport.finalizeSession({ sessionId: String(session.startedAt), sessionName: session.id });
+    } else {
+      const manifest = buildManifest(session, {
+        channelName,
+        guildName,
+        wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
+        botVersion: getVersion(),
+      });
+      if (manifest.utterances.length === 0) throw new Error('Session enthält keine aufgenommenen Äußerungen.');
+      writeManifest(session, manifest);
 
-    onProgress(`⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …`);
-    // Ensure the server-side upload dir exists (scp won't create it remotely).
-    try { await transport.finalizePrepare(manifest.sessionId); }
-    catch (e) { warn('finalize: prepare failed (continuing):', e.message); }
-    await uploadSession(session);
+      onProgress(`⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …`);
+      // Ensure the server-side upload dir exists (scp won't create it remotely).
+      try { await transport.finalizePrepare(manifest.sessionId); }
+      catch (e) { warn('finalize: prepare failed (continuing):', e.message); }
+      await uploadSession(session);
 
-    onProgress('⏳ Server transkribiert und baut das Transkript …');
-    const result = await transport.finalizeSession({ sessionId: manifest.sessionId });
+      onProgress('⏳ Server transkribiert und baut das Transkript …');
+      result = await transport.finalizeSession({ sessionId: manifest.sessionId, sessionName: session.id });
+    }
     if (!result.ok) throw new Error(result.error || 'Finalize fehlgeschlagen');
 
     const fullyVerified = (result.missing?.length ?? 0) === 0 && (result.mismatched?.length ?? 0) === 0;
@@ -159,9 +166,11 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     SessionManager.save(session);
 
     let retentionNote = '';
-    if (fullyVerified) {
+    if (fromArchive) {
+      retentionNote = '';
+    } else if (fullyVerified) {
       const r = applyRetention(session);
-      retentionNote = r.noop ? '' : (r.policy === 'delete' ? ' WAVs gelöscht.' : ' WAVs ins Archiv verschoben.');
+      retentionNote = r.noop ? '' : (r.policy === 'delete' ? ' Lokale WAVs gelöscht (Original liegt im Server-Archiv).' : ' Lokale WAVs ins _archived/ verschoben.');
     } else {
       retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
     }
@@ -514,6 +523,7 @@ client.on('interactionCreate', async (i) => {
           channelName: i.channel?.name ?? null,
           guildName: i.guild?.name ?? null,
           onProgress: (m) => { i.editReply({ content: m }).catch(() => {}); },
+          fromArchive: reFinalize,
         });
         await i.editReply({
           content: [

@@ -139,3 +139,29 @@ test('finalizeSession finalizes the verified subset when an upload is corrupt', 
   const md = fs.readFileSync(result.transcriptPath, 'utf8');
   assert.doesNotMatch(md, /sollte fehlen/);
 });
+
+test('re-finalize from the archive (no upload) reuses archived WAVs', async () => {
+  const upload = tmpdir();
+  const out = tmpdir();
+  const manifest = baseManifest(upload);
+  const archiveRoot = path.join(out, 'archive');
+  const transcriptRoot = path.join(out, 'transcripts');
+  const stt = fakeStt({ 'a.wav': { text: 'Erste Aussage', words: null }, 'b.wav': { text: 'Zweite Aussage', words: null } });
+
+  const r1 = await finalizeSession({
+    sessionId: String(BASE), manifest, events, uploadDir: upload,
+    archiveRoot, transcriptRoot, transcribeFn: stt, opts: { timeZone: 'UTC' },
+  });
+  const audioDir = path.join(r1.archiveDir, 'audio');
+  assert.ok(fs.existsSync(path.join(audioDir, 'a.wav')), 'originals copied into archive');
+
+  // Re-finalize: source IS the archive audio dir; must not delete it.
+  const archManifest = JSON.parse(fs.readFileSync(path.join(r1.archiveDir, 'manifest.json'), 'utf8'));
+  const r2 = await finalizeSession({
+    sessionId: String(BASE), manifest: archManifest, events, uploadDir: audioDir,
+    archiveRoot, transcriptRoot, transcribeFn: stt, opts: { timeZone: 'UTC' }, cleanupUploadDir: false,
+  });
+  assert.ok(r2.ok);
+  assert.equal(r2.userCount, 2);
+  assert.ok(fs.existsSync(path.join(audioDir, 'a.wav')), 'archive WAVs preserved after re-finalize');
+});

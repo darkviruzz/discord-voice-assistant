@@ -50,11 +50,14 @@ function runFfmpeg(args) {
 }
 
 // Build the audio archive under <archiveDir>/audio/:
-//   session_mix.ogg          — merged listening mix (Opus 32 kbps)
-//   <basename>.ogg           — per-utterance source (re-finalize / speaker attribution)
-//   index.json               — basename → { userId, label, startMs, durationMs }
-// Falls back to copying the raw WAVs when ffmpeg is unavailable so finalize
-// never fails for the lack of an encoder.
+//   <basename>.wav          — per-utterance ORIGINAL (lossless master + re-finalize source)
+//   session_mix.ogg         — merged listening mix (Opus, small)
+//   index.json              — basename → { userId, label, startMs, durationMs }
+// Per-utterance format is WAV by default (the lossless master stays on the
+// server, and re-finalize reads it back). Set ARCHIVE_AUDIO_FORMAT=ogg to store
+// compressed per-utterance Opus instead (re-encode path kept for later A/B
+// testing of whether OGG changes Whisper transcription — note: OGG per-utterance
+// breaks archive re-finalize until an OGG→PCM decode path exists).
 export async function buildAudioArchive({ manifest, uploadDir, archiveDir, verified = null }) {
   const audioDir = path.join(archiveDir, 'audio');
   fs.mkdirSync(audioDir, { recursive: true });
@@ -64,8 +67,10 @@ export async function buildAudioArchive({ manifest, uploadDir, archiveDir, verif
     .map((u) => ({ ...u, abs: path.join(uploadDir, u.file) }))
     .filter((u) => fs.existsSync(u.abs));
 
+  const perUtteranceOgg = (process.env.ARCHIVE_AUDIO_FORMAT ?? 'wav').toLowerCase() === 'ogg' && hasFfmpeg();
+
   const index = utterances.map((u) => ({
-    file: u.file,
+    file: perUtteranceOgg ? path.basename(u.file).replace(/\.wav$/i, '') + '.ogg' : path.basename(u.file),
     userId: u.userId != null ? String(u.userId) : null,
     username: u.username ?? null,
     startMs: u.startMs ?? 0,
@@ -77,39 +82,33 @@ export async function buildAudioArchive({ manifest, uploadDir, archiveDir, verif
     return { files: [], ok: true, error: null, format: 'none' };
   }
 
-  if (!hasFfmpeg()) {
-    warn('finalize: ffmpeg not found — archiving raw WAVs instead of OGG');
-    const files = [];
-    for (const u of utterances) {
-      const dst = path.join(audioDir, path.basename(u.file));
-      fs.copyFileSync(u.abs, dst);
+  const files = [];
+  // Per-utterance: copy originals (default) or re-encode to Opus.
+  for (const u of utterances) {
+    const base = path.basename(u.file);
+    if (perUtteranceOgg) {
+      const out = path.join(audioDir, base.replace(/\.wav$/i, '') + '.ogg');
+      try { await runFfmpeg(encodeOggArgs(u.abs, out)); files.push(path.relative(archiveDir, out)); }
+      catch (e) { warn('finalize: per-utterance encode failed for', base, '-', e.message); }
+    } else {
+      const dst = path.join(audioDir, base);
+      // Guard self-copy when re-finalizing from the archive itself.
+      if (path.resolve(dst) !== path.resolve(u.abs)) fs.copyFileSync(u.abs, dst);
       files.push(path.relative(archiveDir, dst));
     }
-    return { files, ok: true, error: null, format: 'wav' };
   }
 
-  const files = [];
-  // Per-utterance OGG (re-finalize source).
-  if ((process.env.ARCHIVE_PER_UTTERANCE ?? 'true') !== 'false') {
-    for (const u of utterances) {
-      const out = path.join(audioDir, path.basename(u.file).replace(/\.wav$/i, '') + '.ogg');
-      try {
-        await runFfmpeg(encodeOggArgs(u.abs, out));
-        files.push(path.relative(archiveDir, out));
-      } catch (e) {
-        warn('finalize: per-utterance encode failed for', u.file, '-', e.message);
-      }
+  // Merged listening mix (small, harmless). Best-effort.
+  if (hasFfmpeg()) {
+    try {
+      const mixOut = path.join(audioDir, 'session_mix.ogg');
+      await runFfmpeg(mergedMixArgs(utterances, mixOut));
+      files.push(path.relative(archiveDir, mixOut));
+      debug('finalize: merged mix written', mixOut);
+    } catch (e) {
+      warn('finalize: merged mix failed:', e.message);
     }
   }
-  // Merged listening mix.
-  try {
-    const mixOut = path.join(audioDir, 'session_mix.ogg');
-    await runFfmpeg(mergedMixArgs(utterances, mixOut));
-    files.push(path.relative(archiveDir, mixOut));
-    debug('finalize: merged mix written', mixOut);
-  } catch (e) {
-    warn('finalize: merged mix failed:', e.message);
-  }
 
-  return { files, ok: files.length > 0, error: null, format: 'ogg' };
+  return { files, ok: true, error: null, format: perUtteranceOgg ? 'ogg' : 'wav' };
 }

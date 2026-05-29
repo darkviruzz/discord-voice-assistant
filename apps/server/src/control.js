@@ -144,14 +144,28 @@ function readSessionEvents(sessionId) {
 // bot keeps its local WAVs for a retry.
 async function handleFinalize(ws, msg) {
   const sessionId = msg.sessionId;
-  const uploadDir = ensureUploadDir(sessionId);
-  const manifestPath = path.join(uploadDir, 'manifest.json');
+
+  // Source resolution: a fresh finalize reads the freshly-uploaded WAVs from the
+  // transient upload dir; a re-finalize (no upload) reads the originals back from
+  // the session's archive (audio/) — the archive is never cleaned up.
+  const transientDir = path.join(uploadRootDir(), String(sessionId));
+  const archiveRoot = (process.env.ARCHIVE_DIR ?? './archive').replace(/\/+$/, '');
+  const archiveName = typeof msg.sessionName === 'string' ? msg.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  const archiveAudioDir = archiveName ? path.join(archiveRoot, archiveName, 'audio') : null;
 
   let manifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  } catch (e) {
-    send(ws, { type: 'error', code: 'NO_MANIFEST', message: `manifest not found at ${manifestPath}: ${e.message}`, cmdId: msg.cmdId });
+  let uploadDir;
+  let cleanupUploadDir;
+  if (fs.existsSync(path.join(transientDir, 'manifest.json'))) {
+    manifest = JSON.parse(fs.readFileSync(path.join(transientDir, 'manifest.json'), 'utf8'));
+    uploadDir = transientDir;
+    cleanupUploadDir = true;
+  } else if (archiveAudioDir && fs.existsSync(path.join(archiveRoot, archiveName, 'manifest.json')) && fs.existsSync(archiveAudioDir)) {
+    manifest = JSON.parse(fs.readFileSync(path.join(archiveRoot, archiveName, 'manifest.json'), 'utf8'));
+    uploadDir = archiveAudioDir; // re-finalize from the archived originals
+    cleanupUploadDir = false;
+  } else {
+    send(ws, { type: 'error', code: 'NO_MANIFEST', message: `no uploaded manifest and no archive for session ${sessionId}`, cmdId: msg.cmdId });
     return;
   }
 
@@ -161,10 +175,10 @@ async function handleFinalize(ws, msg) {
 
   // Lock against the idle timer so manual + auto finalize never both run.
   autoTimer.markFinalizing(sessionId);
-  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: 'started', utterances: manifest.utterances?.length ?? 0 });
+  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
 
   try {
-    const result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap });
+    const result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir });
     send(ws, {
       type: 'finalize_result',
       cmdId: msg.cmdId,

@@ -114,7 +114,7 @@ export async function finalizeSession({
   transcribeFn = null, speakerMap = {},
   archiveRoot = process.env.ARCHIVE_DIR ?? './archive',
   transcriptRoot = process.env.TRANSCRIPT_DIR ?? './transcripts',
-  jsonlPath = null, opts = {},
+  jsonlPath = null, opts = {}, cleanupUploadDir = true,
 }) {
   const timeZone = opts.timeZone || process.env.FINALIZE_TZ || 'Europe/Berlin';
   const { verified, missing, mismatched } = verifyUploads(manifest, uploadDir);
@@ -184,9 +184,10 @@ export async function finalizeSession({
     files.push({ name, sha256: sha256File(fp), bytes: st.size });
   }
 
-  // The uploaded WAVs are transient — remove them once fully verified and
-  // archived (the OGG archive + bot retention hold the durable copies).
-  if (missing.length === 0 && mismatched.length === 0
+  // The transient uploaded WAVs are removed once fully verified and archived
+  // (the archive holds the durable originals). Never delete on re-finalize,
+  // where the source IS the archive.
+  if (cleanupUploadDir && missing.length === 0 && mismatched.length === 0
       && (process.env.FINALIZE_KEEP_UPLOADS ?? 'false') !== 'true') {
     try { fs.rmSync(uploadDir, { recursive: true, force: true }); }
     catch (e) { warn('finalize: upload cleanup failed:', e.message); }

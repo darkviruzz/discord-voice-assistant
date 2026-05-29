@@ -59,13 +59,13 @@ dann:
   - [ ] Wake-Word + Stop-Wörter **fett**.
   - [ ] Assistant-Antworten als eigener Sprecher `**Rabenauge:**`.
   - [ ] Pausen > 30 s → `## HH:MM — Pause (N min)`.
-- [ ] **Archiv** (`<ARCHIVE_DIR>/<datum>-<id>/`) enthält: `transcript.md`,
-      `session.jsonl`, `manifest.json`, `speaker-map.json`, `audio/` mit
-      `session_mix.ogg` + Per-Äußerung-`*.ogg` + `index.json`.
+- [ ] **Archiv** (`<ARCHIVE_DIR>/<session-id>/`) enthält: `transcript.md`,
+      `session.jsonl`, `manifest.json`, `speaker-map.json`, `audio/` mit den
+      **Original-WAVs** pro Äußerung + `session_mix.ogg` (gemergt) + `index.json`.
+- [ ] **Server-Upload-Cleanup**: der transiente `<FINALIZE_UPLOAD_DIR>/<sessionId>/`
+      ist nach erfolgreichem Finalize weg; die Originale liegen jetzt im Archiv.
 - [ ] **Retention**: lokale Bot-WAVs nach `<DATA_DIR>/_archived/<id>/chunks/`
       verschoben (bei `move`) bzw. gelöscht (bei `delete`).
-- [ ] **Server-Upload-Cleanup**: `<FINALIZE_UPLOAD_DIR>/<sessionId>/` ist nach
-      erfolgreichem Finalize entfernt (außer `FINALIZE_KEEP_UPLOADS=true`).
 - [ ] `/finalize list` zeigt die Session als `finalized`; `/finalize show <id>`
       nennt Transkript-/Archiv-Pfad.
 
@@ -128,11 +128,11 @@ dann:
 
 - **Whisper-Wort-Timestamps**: abhängig vom whisper.cpp-Build. Ohne sie greift
   der Utterance-Fallback (kein wortgenaues Splitting).
-- **Re-Finalize**: `/finalize run session:<id>` funktioniert auch für bereits
-  finalisierte Sessions — der Bot lädt die ins `_archived/<id>/chunks/`
-  verschobenen WAVs erneut hoch (Retention `move`). Bei Retention `delete` gibt
-  es keine lokale Quelle mehr; ein Re-STT direkt aus den Archiv-OGGs des Servers
-  (OGG→PCM-Decode) ist noch nicht verdrahtet.
+- **Re-Finalize**: `/finalize run session:<id>` für eine finalisierte Session
+  baut **ohne erneuten Upload** aus den Original-WAVs im Server-Archiv neu
+  (`ARCHIVE_DIR/<id>/audio/*.wav`). Voraussetzung: `ARCHIVE_AUDIO_FORMAT=wav`
+  (Standard). Bei `ARCHIVE_AUDIO_FORMAT=ogg` liegen im Archiv nur OGGs → Re-STT
+  daraus (OGG→PCM-Decode) ist noch nicht verdrahtet.
 - **Server-Restart während des Idle-Fensters**: der In-Memory-Timer geht verloren.
   Der Bot flaggt solche Sessions beim Start im Log; Abschluss dann via
   `/finalize run`. (Timer-Persistenz = Folgearbeit.)

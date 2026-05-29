@@ -9,6 +9,8 @@ import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession } from './state.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
+import { rebuildLiveContext } from './rollingSummary.js';
+import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
@@ -78,6 +80,17 @@ function logSessionMeta(sessionId, msg) {
       systemPromptFile: process.env.SYSTEM_PROMPT_FILE ?? null,
       systemPromptInline: !!process.env.SYSTEM_PROMPT,
     },
+    liveContext: {
+      enabled: (process.env.LIVE_CONTEXT_ENABLED ?? 'true') !== 'false',
+      rawWindowChars: Number(process.env.LIVE_RAW_WINDOW_CHARS ?? 6000),
+      foldChars: Number(process.env.LIVE_FOLD_CHARS ?? 3000),
+      renderMaxChars: Number(process.env.LIVE_RENDER_MAX_CHARS ?? 6000),
+      foldMinIntervalMs: Number(process.env.LIVE_FOLD_MIN_INTERVAL_MS ?? 0),
+      summaryModel: process.env.SUMMARY_MODEL || (process.env.OLLAMA_MODEL ?? 'llama3'),
+      summaryMaxChars: Number(process.env.SUMMARY_MAX_CHARS ?? 2000),
+      campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
+      campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),
+    },
     stt: {
       provider: 'whisper.cpp',
       url: process.env.WHISPER_URL ?? 'http://localhost:8080',
@@ -111,10 +124,6 @@ function send(ws, obj) {
   try { ws.send(JSON.stringify(obj)); } catch (e) { warn('control send failed:', e.message); }
 }
 
-function transcriptDir() {
-  return (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
-}
-
 function uploadRootDir() {
   return (process.env.FINALIZE_UPLOAD_DIR ?? './uploads').replace(/\/+$/, '');
 }
@@ -125,18 +134,6 @@ function ensureUploadDir(sessionId) {
   const dir = path.join(uploadRootDir(), String(sessionId));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-function readSessionEvents(sessionId) {
-  const fp = path.join(transcriptDir(), `session_${sessionId}.jsonl`);
-  if (!fs.existsSync(fp)) return { events: [], jsonlPath: null };
-  const events = [];
-  for (const line of fs.readFileSync(fp, 'utf8').split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    try { events.push(JSON.parse(t)); } catch { /* skip malformed */ }
-  }
-  return { events, jsonlPath: fp };
 }
 
 // Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
@@ -253,9 +250,18 @@ export function initControlWSS({ bearer } = {}) {
               return;
             }
             activeSessionId = BigInt(msg.sessionId);
-            ensureSession(activeSessionId);
+            const startedSession = ensureSession(activeSessionId);
+            // Stash Discord context so the live/LLM pipeline can resolve the
+            // speaker map (campaign labels) and the campaign-context file.
+            startedSession.guildId = msg.guildId ?? startedSession.guildId ?? null;
+            startedSession.guildName = msg.guildName ?? startedSession.guildName ?? null;
+            startedSession.channelName = msg.channelName ?? startedSession.channelName ?? null;
             logSessionMeta(activeSessionId, msg);
             log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId, msg.resume ? '(resume)' : '(new)');
+            // Rebuild the live-transcript context from the JSONL (resume, or any
+            // start where the buffer is still empty). Fire-and-forget — must not
+            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off.
+            rebuildLiveContext(startedSession, activeSessionId).catch((e) => warn('live-context rebuild failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

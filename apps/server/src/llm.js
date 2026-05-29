@@ -58,15 +58,22 @@ function parseResponse(raw) {
 
 // Send a query to Ollama. Returns { text, speakerId, model }.
 // `history` is an array of { role, content } objects (mutable — caller manages it).
-export async function chat(history, query) {
+// `systemBlocks` are extra `system` messages (campaign context, rolling summary,
+// live transcript) appended after the base system prompt — empty/blank entries
+// are dropped so an unavailable block costs nothing.
+export async function chat(history, query, { systemBlocks = [] } = {}) {
   const base     = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
   const model    = process.env.OLLAMA_MODEL ?? 'llama3';
   const system   = LOADED_SYSTEM;
   const maxTurns = Number(process.env.HISTORY_TURNS ?? 6);
 
   const recentHistory = history.slice(-(maxTurns * 2));
+  const extraBlocks = (Array.isArray(systemBlocks) ? systemBlocks : [])
+    .filter((b) => typeof b === 'string' && b.trim())
+    .map((b) => ({ role: 'system', content: b }));
   const messages = [
     { role: 'system', content: system },
+    ...extraBlocks,
     ...recentHistory,
     { role: 'user',   content: query },
   ];

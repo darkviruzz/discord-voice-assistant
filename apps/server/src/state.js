@@ -10,6 +10,20 @@ export function ensureSession(sessionId) {
       speakers: new Map(),
       downlinks: new Set(),
       conversationHistory: [],   // { role, content }[] for LLM context
+      // Discord context (stashed at session_start) — needed for the speaker map
+      // (campaign labels) and campaign-context file resolution.
+      guildId: null,
+      guildName: null,
+      channelName: null,
+      // Live-transcript context fed to the LLM as system blocks. Pure in-RAM,
+      // rebuilt from the JSONL on resume (see rollingSummary.rebuildLiveContext).
+      liveContext: {
+        buffer: [],         // { label, text, startMs, kind:'user'|'assistant' }[], sorted by startMs
+        summary: '',        // rolling summary of folded-out older turns
+        summarizing: false, // single-flight guard so two folds never overlap
+        lastFoldAt: 0,      // epoch ms of last fold (optional min-interval throttle)
+        rebuilt: false,     // resume rebuild has run for this session
+      },
       createdAt: Date.now(),
     });
     debug('new session', sid.toString());

@@ -5,6 +5,8 @@
   "scripts": {
     "register": "npm -w apps/bot run register",
     "start:bot": "npm -w apps/bot start",
-    "start:server": "npm -w apps/server start"
+    "start:server": "npm -w apps/server start",
+    "test": "node --test 'apps/**/test/**/*.test.js'",
+    "transcript": "node scripts/build-transcript.mjs"
   }
 }

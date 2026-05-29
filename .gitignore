@@ -1,6 +1,12 @@
 # Projektspezifische Dateien (kein Commit)
 apps/server/prompt.txt
 apps/server/transcripts/
+# Finalize: uploaded WAVs (transient) + long-term archive + speaker map
+apps/server/uploads/
+apps/server/archive/
+apps/server/data/
+uploads/
+archive/
 __pycache__/
 *.pyc
 

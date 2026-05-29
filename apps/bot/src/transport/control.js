@@ -35,6 +35,12 @@ export class ControlClient extends EventEmitter {
     this.serverParams = null;
     this.serverInfo = null;
 
+    // NTP-style clock offset estimate (serverClock − botClock, ms), smoothed
+    // with an EMA over app-ping round-trips. Bot time is authoritative; this is
+    // reported to the server so finalize can map server-stamped event
+    // timestamps onto the bot timeline. null until the first measurement.
+    this.clockOffsetMs = null;
+
     this.lastServerMsgAt = 0;
     this.hbTimer = null;
     this.appPingTimer = null;
@@ -43,6 +49,42 @@ export class ControlClient extends EventEmitter {
     this.reconnectTimer = null;
 
     this.pendingSession = null;
+    // cmdId → { resolve, reject, timer } for in-flight request/response calls.
+    this.pending = new Map();
+  }
+
+  // Generic request/response over the control socket, matched by cmdId.
+  _request(type, payload = {}, { timeoutMs = 15_000 } = {}) {
+    const cmdId = randomUUID();
+    if (!this._sendIfReady({ type, cmdId, ...payload })) {
+      return Promise.reject(new Error('Server nicht verbunden'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(cmdId);
+        reject(new Error(`${type}: Timeout`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(cmdId, { resolve, reject, timer });
+    });
+  }
+
+  _resolvePending(cmdId, value) {
+    const p = this.pending.get(cmdId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(cmdId);
+    p.resolve(value);
+    return true;
+  }
+
+  _rejectPending(cmdId, err) {
+    const p = this.pending.get(cmdId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(cmdId);
+    p.reject(err);
+    return true;
   }
 
   start() {
@@ -90,6 +132,17 @@ export class ControlClient extends EventEmitter {
     this._sendIfReady({ type: 'playback_event', cmdId: randomUUID(), ...event });
   }
 
+  // Voice-channel presence signal driving the server-side idle/auto-finalize
+  // timer. state ∈ 'joined' | 'left' | 'alone' | 'occupied'.
+  voiceState({ sessionId, state }) {
+    this._sendIfReady({ type: 'voice_state', cmdId: randomUUID(), sessionId, state });
+  }
+
+  // Per-user voice channel join/leave → participant times in the transcript.
+  voiceMember({ sessionId, userId, displayName, state }) {
+    this._sendIfReady({ type: 'voice_member', cmdId: randomUUID(), sessionId, userId, displayName, state });
+  }
+
   debugTts({ sessionId, text }) {
     this._sendIfReady({ type: 'debug_tts', cmdId: randomUUID(), sessionId, text });
   }
@@ -106,6 +159,25 @@ export class ControlClient extends EventEmitter {
       userDisplayName,
       source,
     });
+  }
+
+  // Ask the server to create the per-session upload dir before transferring WAVs.
+  finalizePrepare(sessionId) {
+    return this._request('finalize_prepare', { sessionId });
+  }
+
+  // Request server-side finalize. Resolves with the server's finalize_result.
+  // Re-STT of long sessions can take minutes → long timeout.
+  finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
+    return this._request('finalize_session', payload, { timeoutMs });
+  }
+
+  // Speaker-map read/write (server-persisted, per guild).
+  speakerMapGet(guildId) {
+    return this._request('speaker_map_get', { guildId }).then((m) => m.map || {});
+  }
+  speakerMapSet(guildId, userId, entry) {
+    return this._request('speaker_map_set', { guildId, userId, entry });
   }
 
   _sendIfReady(obj) {
@@ -226,8 +298,19 @@ export class ControlClient extends EventEmitter {
       }
       case 'pong': {
         if (typeof msg.t === 'number') {
-          const rtt = Date.now() - msg.t;
+          const now = Date.now();
+          const rtt = now - msg.t;
           debug(`control: app rtt ${rtt}ms`);
+          // Estimate clock offset when the server echoed its receive-time.
+          // Server received the ping at ≈ msg.t + rtt/2 on the bot clock.
+          if (typeof msg.srvT === 'number') {
+            const sample = msg.srvT - (msg.t + rtt / 2);
+            // EMA (α=0.2) once seeded; ignore wild samples from rare RTT spikes.
+            this.clockOffsetMs = this.clockOffsetMs === null
+              ? sample
+              : 0.8 * this.clockOffsetMs + 0.2 * sample;
+            this._send({ type: 'clock_sync', offsetMs: Math.round(this.clockOffsetMs), rttMs: rtt });
+          }
         }
         return;
       }
@@ -237,6 +320,18 @@ export class ControlClient extends EventEmitter {
       }
       case 'error': {
         warn('control: server error', msg.code, msg.message || '', 'cmdId=', msg.cmdId);
+        this._rejectPending(msg.cmdId, new Error(msg.message || msg.code || 'server error'));
+        return;
+      }
+      case 'finalize_progress': {
+        this.emit('finalizeProgress', msg);
+        return;
+      }
+      case 'finalize_result':
+      case 'finalize_prepared':
+      case 'speaker_map':
+      case 'speaker_map_result': {
+        this._resolvePending(msg.cmdId, msg);
         return;
       }
       // Server→bot commands: dispatch to transport/index.js via event.
@@ -247,6 +342,7 @@ export class ControlClient extends EventEmitter {
       case 'set_params':
       case 'save_session':
       case 'stop_playback':
+      case 'finalize_request':
       case 'chat_message': {
         debug('control: server command:', msg.type);
         this.emit('serverCommand', msg);

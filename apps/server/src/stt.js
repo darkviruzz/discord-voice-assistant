@@ -1,5 +1,30 @@
 import { log, debug, warn } from './logger.js';
 
+// Normalize Whisper word/token timestamps from whatever shape the server
+// returned into a flat [{ w, t0, t1 }] array, times in SECONDS relative to the
+// submitted audio. Handles:
+//   - OpenAI-style top-level `words: [{ word, start, end }]`
+//   - per-segment `words` arrays (whisper.cpp with token timestamps)
+// Returns null when no word-level data is present → caller falls back to
+// utterance-level timing.
+function parseWords(data) {
+  const out = [];
+  const push = (w) => {
+    const t0 = Number(w.start ?? w.t0 ?? w.from);
+    const t1 = Number(w.end ?? w.t1 ?? w.to);
+    const word = (w.word ?? w.text ?? w.w ?? '').trim();
+    if (!word || !Number.isFinite(t0)) return;
+    out.push({ w: word, t0, t1: Number.isFinite(t1) ? t1 : t0 });
+  };
+  if (Array.isArray(data.words)) data.words.forEach(push);
+  if (out.length === 0 && Array.isArray(data.segments)) {
+    for (const seg of data.segments) {
+      if (Array.isArray(seg.words)) seg.words.forEach(push);
+    }
+  }
+  return out.length > 0 ? out : null;
+}
+
 // POST a WAV buffer to the whisper.cpp HTTP server and return transcript + metadata.
 //
 // Behaviour:
@@ -18,6 +43,11 @@ export async function transcribe(wavBuffer) {
   if (language !== 'auto') form.append('language', language);
   form.append('response_format', 'verbose_json');
   form.append('temperature', String(temperature));
+  // Ask for word-level timestamps. Harmless if the server ignores it (older
+  // whisper.cpp builds); parseWords() falls back to utterance-level timing.
+  if ((process.env.WHISPER_WORD_TIMESTAMPS ?? 'true') !== 'false') {
+    form.append('timestamp_granularities[]', 'word');
+  }
 
   let res;
   try {
@@ -63,6 +93,9 @@ export async function transcribe(wavBuffer) {
     }
   }
 
+  const words = parseWords(data);
+  if (words) meta.wordCount = words.length;
+
   log('stt: transcript=', JSON.stringify(text));
-  return { text, meta };
+  return { text, meta, words };
 }

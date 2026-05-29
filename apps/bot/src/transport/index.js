@@ -7,6 +7,12 @@ import { log, warn, debug } from '../logger.js';
 let _instance = null;
 let _chatMessageCallback = null;
 let _serverInfoCallback = null;
+let _finalizeRequestCallback = null;
+
+// Server-initiated finalize (idle auto-finalize). cb receives { sessionId, reason }.
+export function onFinalizeRequest(cb) {
+  _finalizeRequestCallback = cb;
+}
 
 export function onChatMessage(cb) {
   _chatMessageCallback = cb;
@@ -99,6 +105,10 @@ export function start({ botId } = {}) {
         if (_chatMessageCallback) _chatMessageCallback(msg);
         control.ack(msg.cmdId, true);
         break;
+      case 'finalize_request':
+        control.ack(msg.cmdId, true);
+        if (_finalizeRequestCallback) _finalizeRequestCallback({ sessionId: msg.sessionId, reason: msg.reason });
+        break;
       default:
         debug('transport: unhandled server command', msg.type);
         control.ack(msg.cmdId, false, 'NOT_IMPLEMENTED');
@@ -131,6 +141,18 @@ export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   if (!_instance) return;
   try { _instance.uplink.sendFrame({ sessionId, userId, tsMs, opus }); }
   catch (e) { warn('transport.sendUplinkFrame:', e.message); }
+}
+
+export function voiceState({ sessionId, state } = {}) {
+  if (!_instance) return;
+  try { _instance.control.voiceState({ sessionId, state }); }
+  catch (e) { warn('transport.voiceState:', e.message); }
+}
+
+export function voiceMember({ sessionId, userId, displayName, state } = {}) {
+  if (!_instance) return;
+  try { _instance.control.voiceMember({ sessionId, userId, displayName, state }); }
+  catch (e) { warn('transport.voiceMember:', e.message); }
 }
 
 export function sendUtteranceEnd({ sessionId, userId, durationMs, startTsMs, endTsMs, userDisplayName }) {
@@ -167,6 +189,31 @@ export function textQuery({ question, tts = false, channelId, userId, userDispla
     warn('transport.textQuery:', e.message);
     return false;
   }
+}
+
+export function finalizePrepare(sessionId) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.finalizePrepare(sessionId);
+}
+
+export function finalizeSession(payload, opts) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.finalizeSession(payload, opts);
+}
+
+export function onFinalizeProgress(cb) {
+  if (!_instance) return;
+  _instance.control.on('finalizeProgress', cb);
+}
+
+export function getSpeakerMap(guildId) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.speakerMapGet(guildId);
+}
+
+export function setSpeakerMapping(guildId, userId, entry) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.speakerMapSet(guildId, userId, entry);
 }
 
 export function setVoiceConnection(conn) {

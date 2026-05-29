@@ -105,7 +105,7 @@ function frameRms(pcm, sampleOffset) {
 function splitAtSilence(pcm) {
   const totalSamples = pcm.length / 2;
   const maxChunk = maxChunkSamples();
-  if (totalSamples <= maxChunk) return [{ pcm, hasOverlap: false, split: 'single' }];
+  if (totalSamples <= maxChunk) return [{ pcm, hasOverlap: false, split: 'single', startSample: 0 }];
 
   const thresh = Number(process.env.STT_SILENCE_THRESH ?? 300);
   const chunks = [];
@@ -139,6 +139,7 @@ function splitAtSilence(pcm) {
             pcm: pcm.subarray(chunkStart * 2, silenceStart * 2),
             hasOverlap: nextHasOverlap,
             split: 'natural-silence',
+            startSample: chunkStart,
           });
           nextHasOverlap = false;
           chunkStart     = off;
@@ -157,6 +158,7 @@ function splitAtSilence(pcm) {
           pcm: pcm.subarray(chunkStart * 2, bestSilStart * 2),
           hasOverlap: nextHasOverlap,
           split: 'natural-silence',
+          startSample: chunkStart,
         });
         nextHasOverlap = false;
         chunkStart     = bestSilEnd; // skip silence
@@ -167,6 +169,7 @@ function splitAtSilence(pcm) {
           pcm: pcm.subarray(chunkStart * 2, splitAt * 2),
           hasOverlap: nextHasOverlap,
           split: 'forced-overlap',
+          startSample: chunkStart,
         });
         nextHasOverlap = true; // next chunk carries the overlap flag
         chunkStart     = Math.max(0, splitAt - OVERLAP_SAMPLES);
@@ -181,9 +184,10 @@ function splitAtSilence(pcm) {
       pcm: pcm.subarray(chunkStart * 2),
       hasOverlap: nextHasOverlap,
       split: 'tail',
+      startSample: chunkStart,
     });
   }
-  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false, split: 'single' }];
+  return chunks.length > 0 ? chunks : [{ pcm, hasOverlap: false, split: 'single', startSample: 0 }];
 }
 
 function logSilenceSplitDebug(pcm48k, chunks) {
@@ -252,7 +256,7 @@ function summarizeStt(chunks, chunkResults) {
 }
 
 // Transcribe PCM split at silence boundaries. Returns text chunks plus STT metadata.
-async function transcribeChunked(pcm48k) {
+export async function transcribeChunked(pcm48k) {
   const chunks = splitAtSilence(pcm48k);
   logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {
@@ -260,14 +264,33 @@ async function transcribeChunked(pcm48k) {
   }
   const parts = [];
   const chunkResults = [];
-  for (const { pcm, hasOverlap } of chunks) {
-    const { text, meta } = await transcribe(pcmToWav(pcm));
+  // Flat word-timestamp list across all chunks, in ms relative to utterance start.
+  const words = [];
+  let anyWords = false;
+  const overlapSec = OVERLAP_SAMPLES / SAMPLE_RATE;
+  for (const { pcm, hasOverlap, startSample } of chunks) {
+    const { text, meta, words: chunkWords } = await transcribe(pcmToWav(pcm));
     const result = {
       text,
       meta,
       durationMs: Math.round((pcm.length / 2 / SAMPLE_RATE) * 1000),
     };
     chunkResults.push(result);
+
+    if (Array.isArray(chunkWords)) {
+      anyWords = true;
+      const offsetSec = (startSample ?? 0) / SAMPLE_RATE;
+      for (const w of chunkWords) {
+        // Drop words inside the duplicated overlap region of a stitched chunk.
+        if (hasOverlap && w.t0 < overlapSec) continue;
+        words.push({
+          w: w.w,
+          t0: Math.round((w.t0 + offsetSec) * 1000),
+          t1: Math.round((w.t1 + offsetSec) * 1000),
+        });
+      }
+    }
+
     if (!text) continue;
     if (hasOverlap && parts.length > 0) {
       parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], text);
@@ -275,7 +298,11 @@ async function transcribeChunked(pcm48k) {
       parts.push(text);
     }
   }
-  return { transcripts: parts, stt: summarizeStt(chunks, chunkResults) };
+  return {
+    transcripts: parts,
+    stt: summarizeStt(chunks, chunkResults),
+    words: anyWords ? words : null,
+  };
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -506,16 +533,20 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     // 3. STT — split at silence boundaries, transcribe each chunk independently.
     let transcripts;
     let stt;
+    let words;
     try {
       const result = await transcribeChunked(pcm48k);
       transcripts = result.transcripts;
       stt = result.stt;
+      words = result.words;
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;
     }
 
     // Log the full utterance (all chunks joined) to disk.
+    // `words` (ms relative to utterance start) enables word-level interrupt
+    // splitting at finalize; absent → merge falls back to utterance-level.
     const fullTranscript = transcripts.join(' ');
     logTranscriptEvent(sessionId, 'user_transcript', {
       userId,
@@ -525,6 +556,7 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       durationMs: metadata.durationMs ?? null,
       text: fullTranscript,
       chunks: transcripts,
+      words: words ?? null,
       stt,
     });
 

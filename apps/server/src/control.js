@@ -115,6 +115,18 @@ function transcriptDir() {
   return (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
 }
 
+function uploadRootDir() {
+  return (process.env.FINALIZE_UPLOAD_DIR ?? './uploads').replace(/\/+$/, '');
+}
+
+// Ensure the per-session upload dir exists before the bot transfers WAVs into
+// it (scp does not create missing remote directories).
+function ensureUploadDir(sessionId) {
+  const dir = path.join(uploadRootDir(), String(sessionId));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function readSessionEvents(sessionId) {
   const fp = path.join(transcriptDir(), `session_${sessionId}.jsonl`);
   if (!fs.existsSync(fp)) return { events: [], jsonlPath: null };
@@ -132,8 +144,7 @@ function readSessionEvents(sessionId) {
 // bot keeps its local WAVs for a retry.
 async function handleFinalize(ws, msg) {
   const sessionId = msg.sessionId;
-  const uploadRoot = (process.env.FINALIZE_UPLOAD_DIR ?? './uploads').replace(/\/+$/, '');
-  const uploadDir = path.join(uploadRoot, String(sessionId));
+  const uploadDir = ensureUploadDir(sessionId);
   const manifestPath = path.join(uploadDir, 'manifest.json');
 
   let manifest;
@@ -177,6 +188,7 @@ async function handleFinalize(ws, msg) {
 }
 
 export function initControlWSS({ bearer } = {}) {
+  try { fs.mkdirSync(uploadRootDir(), { recursive: true }); } catch (e) { warn('control: cannot create upload dir:', e.message); }
   const wss = new WebSocketServer({
     noServer: true,
     handleProtocols: pickProtocolFor(bearer),
@@ -403,6 +415,21 @@ export function initControlWSS({ bearer } = {}) {
             }
             const entry = setSpeakerMapping(msg.guildId, msg.userId, msg.entry || {});
             send(ws, { type: 'speaker_map_result', cmdId: msg.cmdId, ok: true, userId: String(msg.userId), entry });
+            return;
+          }
+          case 'finalize_prepare': {
+            // Create the per-session upload dir so the bot's scp target exists.
+            if (!registered) { send(ws, { type: 'error', code: 'NOT_REGISTERED', cmdId: msg.cmdId }); return; }
+            if (typeof msg.sessionId !== 'string' || !/^\d+$/.test(msg.sessionId)) {
+              send(ws, { type: 'error', code: 'BAD_SESSION_ID', cmdId: msg.cmdId });
+              return;
+            }
+            try {
+              const dir = ensureUploadDir(msg.sessionId);
+              send(ws, { type: 'finalize_prepared', cmdId: msg.cmdId, ok: true, uploadDir: dir });
+            } catch (e) {
+              send(ws, { type: 'error', code: 'PREPARE_FAILED', message: e.message, cmdId: msg.cmdId });
+            }
             return;
           }
           case 'finalize_session': {

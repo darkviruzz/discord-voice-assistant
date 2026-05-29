@@ -185,6 +185,11 @@ export function textQuery({ question, tts = false, channelId, userId, userDispla
   }
 }
 
+export function finalizePrepare(sessionId) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
+  return _instance.control.finalizePrepare(sessionId);
+}
+
 export function finalizeSession(payload, opts) {
   if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert'));
   return _instance.control.finalizeSession(payload, opts);

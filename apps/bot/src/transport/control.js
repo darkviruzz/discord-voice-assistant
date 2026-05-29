@@ -156,6 +156,11 @@ export class ControlClient extends EventEmitter {
     });
   }
 
+  // Ask the server to create the per-session upload dir before transferring WAVs.
+  finalizePrepare(sessionId) {
+    return this._request('finalize_prepare', { sessionId });
+  }
+
   // Request server-side finalize. Resolves with the server's finalize_result.
   // Re-STT of long sessions can take minutes → long timeout.
   finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
@@ -318,6 +323,7 @@ export class ControlClient extends EventEmitter {
         return;
       }
       case 'finalize_result':
+      case 'finalize_prepared':
       case 'speaker_map':
       case 'speaker_map_result': {
         this._resolvePending(msg.cmdId, msg);

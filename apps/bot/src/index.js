@@ -140,6 +140,9 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     writeManifest(session, manifest);
 
     onProgress(`⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …`);
+    // Ensure the server-side upload dir exists (scp won't create it remotely).
+    try { await transport.finalizePrepare(manifest.sessionId); }
+    catch (e) { warn('finalize: prepare failed (continuing):', e.message); }
     await uploadSession(session);
 
     onProgress('⏳ Server transkribiert und baut das Transkript …');

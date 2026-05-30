@@ -16,6 +16,7 @@ import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { getVersion } from './version.js';
+import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 
 // Server-side idle timer. On fire, ask the bot(s) to finalize — the bot owns
 // the WAVs and runs the upload + finalize flow. Broadcast: only the bot that
@@ -295,6 +296,9 @@ export function initControlWSS({ bearer } = {}) {
             if (!state) { send(ws, { type: 'error', code: 'BAD_STATE', cmdId: msg.cmdId }); return; }
             // Track presence for clock_sync gating regardless of finalize status.
             occupied = (state === 'joined' || state === 'occupied');
+            // Keep the LLM warm while the bot is in voice; release on leave.
+            if (occupied) startKeepWarm();
+            else stopKeepWarm();
             // Don't append presence to an already-finalized session.
             if (!autoTimer.isFinalizing(msg.sessionId)) {
               logTranscriptEvent(msg.sessionId, 'voice_state', { state });

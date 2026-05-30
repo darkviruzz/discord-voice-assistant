@@ -8,12 +8,12 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 ## Performance / Stabilität
 
-- [ ] **LLM-Keep-Warm beim Server-Start + `/join`** — aktuelle Symptome: Server-Start dauert lang; Ollama-Modell wird nach wenigen Minuten Idle aus dem VRAM entladen und muss bei der nächsten Wake-Word-Query erneut geladen werden (mehrere Sekunden Latenz).
-  - Beim Server-Start: leeren Chat-Call gegen das konfigurierte `OLLAMA_MODEL` absetzen, damit das Modell in den VRAM kommt
-  - Bei `/join`: erneut einen „warm-up"-Call absetzen (Server kann zwischenzeitlich idle gewesen sein)
-  - Periodischer Keep-Alive während aktiver Session (z. B. alle 2 min ein leerer/minimaler Call), solange der Bot im Voice-Channel ist
-  - Ollama-Parameter `keep_alive` im Request auf z. B. `30m` setzen — vermeidet das Idle-Unloading server-seitig
-  - Messen: Warm-Latenz vs. Cold-Latenz dokumentieren (DEBUG-Log)
+- [x] **LLM-Keep-Warm bei `/join`, Deaktivierung bei `/leave`** (1.4.1) — verhindert, dass das Ollama-Modell während ruhiger Phasen aus dem VRAM entladen wird und die nächste Wake-Word-Query mehrere Sekunden auf den Cold-Load wartet.
+  - `apps/server/src/keepWarm.js`: `startKeepWarm()` feuert beim `voice_state: joined/occupied` einen sofortigen Warm-Up und danach periodische Pings; `stopKeepWarm()` stoppt sie beim `left/alone`
+  - `apps/server/src/llm.js`: neue `warmUp()`-Funktion (leerer `/api/chat`-Call lädt das Modell); `keep_alive` wird zusätzlich an jede echte Chat-Anfrage gehängt
+  - Hook im `voice_state`-Handler in `apps/server/src/control.js`
+  - Konfigurierbar via `OLLAMA_KEEP_ALIVE` (Standard `30m`) und `OLLAMA_KEEP_WARM_INTERVAL_MS` (Standard `240000`)
+  - Offen für später: Warm-Up auch beim Server-Start (vor erstem `/join`), Latenz-Messung Warm vs. Cold im DEBUG-Log
 
 - [ ] **Claude Haiku API als optionaler LLM-Provider** — Vergleichstest gegen lokales Ollama.
   - API-Key-Setup (`ANTHROPIC_API_KEY` in `.env`), Provider-Switch via `LLM_PROVIDER=ollama|anthropic`
@@ -26,12 +26,11 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
 
 ## Phase 1 — Quick Wins
 
-- [ ] **Version-Anzeige in Bot-Activity** — Status zeigt Bot- + Server-Version (`1.0.1-d5b717a (server:1.0.1-d5b717a)`).
-  - `package.json`-Version + `git rev-parse --short HEAD` automatisch beim Start lesen
-  - `apps/server/src/control.js`: hardcoded `SERVER_VERSION = '0.1.0'` durch `getVersionString()` ersetzen
-  - `apps/bot/src/index.js`: `clientReady` → Activity setzen; `hello`-Handler → kombinierte Version updaten; Disconnect → zurücksetzen
-  - `apps/bot/src/transport/control.js`: `hello`-Message auswerten und Server-Version weitergeben
-  - Hilfsfunktion `getVersionString()` jeweils einmal in bot und server
+- [x] **Version-Anzeige in Bot-Activity** — Status zeigt Bot- + Server-Version (`1.4.1-<hash> (server:1.4.1-<hash>)`).
+  - `getVersion()` in `apps/bot/src/version.js` und `apps/server/src/version.js`: liest `package.json`-Version + `git rev-parse --short HEAD` (gecacht, Fallback auf reine Paketversion ohne git)
+  - `apps/bot/src/index.js`: `makeStatusText()`/`setBotStatus()` setzen die Custom-Activity; `clientReady` setzt sie initial (`server:null`), `transport.onServerInfo()` aktualisiert auf kombinierte Version bei Connect und zurück bei Disconnect
+  - Server sendet seine Version im `hello`-Frame (`apps/server/src/control.js`, Feld `version`); Bot wertet sie über die Transport-Schicht aus
+  - Es gibt **kein** hardcoded `SERVER_VERSION` mehr — beide Seiten lesen zur Laufzeit aus git
 
 - [x] **Whisper `temperature` + `no_speech_prob`-Diagnostik** — T>0.0 liefert deutlich korrektere `no_speech_prob`-Werte.
   - Whisper-Aufruf-Parameter: `temperature` über `WHISPER_TEMPERATURE`
@@ -205,7 +204,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 - [ ] **Autostart via Windows Task Scheduler** — wird durch „Server-Auto-Start via SSH bei `/join`" weitgehend redundant. Falls noch gebraucht: `Start-VoiceAssistant.ps1 -Mode silent` als Aufgabe „bei PC-Entsperrung".
 
-- [ ] **`package.json` Engine-Bump** — aktuell `node>=20`, benötigt aber 22.
+- [x] **`package.json` Engine-Bump** (1.4.1) — `engines.node` von `>=20` auf `>=22` in Root-, Bot- und Server-`package.json`.
 
 ---
 

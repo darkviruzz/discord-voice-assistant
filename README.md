@@ -199,6 +199,8 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 | `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. Relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`). Hat Vorrang vor `SYSTEM_PROMPT`. |
 | `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
 | `HISTORY_TURNS` | `6` | Anzahl der Gesprächs-Runden (User+Assistant je = 1 Turn), die als Kontext an Ollama übergeben werden. Höhere Werte = besserer Kontext, aber mehr Token-Verbrauch. |
+| `OLLAMA_KEEP_ALIVE` | `30m` | Wie lange Ollama das Modell nach einer Anfrage im VRAM hält. Wird bei jeder Chat-Anfrage und beim Keep-Warm gesetzt, damit das Modell zwischen Wake-Word-Queries nicht entladen wird. `-1` = dauerhaft geladen, `0` = sofort entladen. |
+| `OLLAMA_KEEP_WARM_INTERVAL_MS` | `240000` | Intervall (ms) für periodische Keep-Warm-Pings, solange der Bot im Voice-Channel ist. Hält das Modell auch in langen Gesprächspausen warm. `0` oder negativ deaktiviert die periodischen Pings (das `keep_alive` jeder echten Query wirkt weiterhin). |
 
 #### Live-Kontext & Kampagnen-Kontext
 

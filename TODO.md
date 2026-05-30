@@ -192,20 +192,14 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Match nächstes Audio-Snippet bei zuletzt erkanntem Satzzeichen (`.!?`)
   - Großer Aufwand (~3–4 h), MVP-irrelevant
 
-- [ ] **`session-rolling-summary`** — Llama fasst alle N Turns zu Summary, ersetzt alte Turns in `conversationHistory`.
-  - N=10 konfigurierbar
-  - Gegen Token-Blowup bei Mehrstunden-Sessions
+- [x] **`session-rolling-summary`** — umgesetzt in `feature/live-transcript-llm-context` (`apps/server/src/rollingSummary.js`). Statt `conversationHistory` faltet der Live-Transkript-Puffer ältere Turns asynchron in eine rollende Zusammenfassung (Schwellen `LIVE_RAW_WINDOW_CHARS`/`LIVE_FOLD_CHARS`, Single-Flight, Remove-after-Success). Gegen Token-Blowup bei Mehrstunden-Sessions.
 
 - [ ] **Conversation-History persistent als Markdown** — Sessions überleben Bot-Restart.
   - Format als Markdown (nicht JSON), damit der Inhalt direkt vom LLM als Kontext lesbar ist
   - Nur sinnvoll im Verbund mit „Transkript als Kontext" — sonst zu viel/zu langer Kontext, der das LLM verwirrt
   - Nicht eilig, evtl. ganz verworfen wenn `obsidian-per-query` (Phase 4) sowieso den nötigen Kontext liefert
 
-- [ ] **Transkript als LLM-Kontext** — laufendes Session-Transkript bzw. dessen Summary als Kontext bei Wake-Word-LLM-Calls einspielen.
-  - Eingabe: Markdown-Transkript der laufenden Session (siehe Format in README)
-  - Open: ganzer Inhalt vs. Rolling-Summary (zu viel Text verwirrt das LLM)
-  - Hängt zusammen mit `session-rolling-summary` (oben) und `obsidian-per-query` (Phase 4) — ggf. überflüssig wenn RAG den nötigen Kontext liefert
-  - Format: leserliches Markdown (Speaker/Text), keine Steuerzeichen/JSON-Klammern. Falls LLM JSON ausgeben soll, dialog auch in JSON-Form serialisieren — sonst Markdown
+- [x] **Transkript als LLM-Kontext** — umgesetzt in `feature/live-transcript-llm-context`. Live-Transkript (alle Sprecher) + rollende Zusammenfassung + statischer Kampagnen-Kontext (`CAMPAIGN.md`, Variante A) werden als `system`-Blöcke bei jedem Wake-Word-/Text-Call eingespielt (`apps/server/src/liveContext.js`, `rollingSummary.js`, `campaignContext.js`). Format: leserliches `[Label] Text` ohne Steuerzeichen. Bei Resume aus dem JSONL rekonstruiert. RAG (`obsidian-per-query`, Phase 4) kann den Kampagnen-Block später ersetzen (Signatur `getCampaignContext(query)` ist vorbereitet).
 
 - [x] **`Pipecat TTS Service Spec`-konforme TTS-API** — `GET /voices` Endpoint + `Content-Type: audio/pcm-s16le` Header hinzugefügt (`feature/piper-pipeline-rework`).
 

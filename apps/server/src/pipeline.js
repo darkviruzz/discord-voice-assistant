@@ -8,6 +8,11 @@ import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
+import { appendLive, renderLiveContext, liveContextEnabled } from './liveContext.js';
+import { maybeFold } from './rollingSummary.js';
+import { getCampaignContext } from './campaignContext.js';
+import { loadSpeakerMap } from './speakerMap.js';
+import { speakerLabel } from './finalize/merge.js';
 import opus from '@discordjs/opus';
 
 const { OpusEncoder } = opus;
@@ -319,6 +324,24 @@ function wakeWordName() {
   return process.env.WAKE_WORD ?? 'Rabenauge';
 }
 
+// Assemble the extra `system` blocks for a voice session, in priority order:
+// campaign context → rolling summary → live transcript. Empty parts are skipped
+// so an unavailable block costs nothing. `query` is forwarded to the campaign
+// lookup (RAG hook for later). Returns [] when live context is disabled.
+function buildSystemBlocks(session, query) {
+  if (!liveContextEnabled()) return [];
+  const blocks = [];
+  const campaign = getCampaignContext(query);
+  if (campaign) blocks.push(`Kampagnen-Kontext:\n${campaign}`);
+  const summary = session?.liveContext?.summary;
+  if (summary && summary.trim()) {
+    blocks.push(`Bisheriger Gesprächsverlauf (Zusammenfassung):\n${summary.trim()}`);
+  }
+  const live = renderLiveContext(session);
+  if (live) blocks.push(`Aktuelles Live-Transkript der Runde:\n${live}`);
+  return blocks;
+}
+
 function sessionlessHistory(scope) {
   const key = scope || 'global';
   if (!textHistories.has(key)) textHistories.set(key, []);
@@ -393,8 +416,9 @@ async function answerQuestion({
 }) {
   const turnId = randomUUID();
   const sid = sessionId ? BigInt(sessionId) : null;
+  const session = sid ? sessions.get(sid) : null;
   const history = sid
-    ? sessions.get(sid)?.conversationHistory
+    ? session?.conversationHistory
     : sessionlessHistory(channelId ? `channel_${channelId}` : 'global');
 
   if (!history) {
@@ -402,9 +426,13 @@ async function answerQuestion({
     return;
   }
 
+  // Voice sessions get campaign context + rolling summary + live transcript as
+  // extra system blocks; text/global queries get none (no live buffer).
+  const systemBlocks = session ? buildSystemBlocks(session, query) : [];
+
   let response;
   try {
-    response = await chat(history, query);
+    response = await chat(history, query, { systemBlocks });
   } catch (e) {
     warn('pipeline: llm error:', e.message);
     return;
@@ -426,6 +454,13 @@ async function answerQuestion({
 
   appendHistory(history, query, responseText);
   if (sid) lastResponses.set(sid.toString(), responseText);
+
+  // Mirror the reply into the live-transcript buffer so later turns see it,
+  // then fold if the raw window overflowed. Fire-and-forget (single-flight).
+  if (session) {
+    appendLive(session, { label: wakeWordName(), text: responseText, startMs: Date.now(), kind: 'assistant' });
+    maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
+  }
 
   broadcastToAllBots({
     type: 'chat_message',
@@ -563,6 +598,20 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     if (!fullTranscript) {
       debug('pipeline: empty transcript, skipping wake-word processing');
       return;
+    }
+
+    // Keep EVERY utterance in the live-transcript buffer (not just wake-word
+    // queries) so the LLM sees the whole table conversation as context.
+    const session = sessions.get(sessionId);
+    if (session) {
+      const label = speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId));
+      appendLive(session, {
+        label,
+        text: fullTranscript,
+        startMs: metadata.startTsMs ?? Date.now(),
+        kind: 'user',
+      });
+      maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
     }
 
     // 4. Read wake-word config.

@@ -149,6 +149,16 @@ OLLAMA_MODEL=llama3.2
 SYSTEM_PROMPT_FILE=./prompt.txt
 HISTORY_TURNS=6
 
+LIVE_CONTEXT_ENABLED=true
+LIVE_RAW_WINDOW_CHARS=6000
+LIVE_FOLD_CHARS=3000
+LIVE_RENDER_MAX_CHARS=6000
+# SUMMARY_MODEL=
+SUMMARY_MAX_CHARS=2000
+# OBSIDIAN_VAULT_PATH=/pfad/zum/vault
+CAMPAIGN_CONTEXT_FILE=CAMPAIGN.md
+CAMPAIGN_CONTEXT_MAX_CHARS=6000
+
 TTS_PROVIDER=piper
 TTS_URL=http://localhost:5000
 
@@ -189,6 +199,23 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 | `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. Relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`). Hat Vorrang vor `SYSTEM_PROMPT`. |
 | `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
 | `HISTORY_TURNS` | `6` | Anzahl der Gesprächs-Runden (User+Assistant je = 1 Turn), die als Kontext an Ollama übergeben werden. Höhere Werte = besserer Kontext, aber mehr Token-Verbrauch. |
+
+#### Live-Kontext & Kampagnen-Kontext
+
+Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfragen) wird im RAM gepuffert und dem LLM bei jeder Anfrage als zusätzliche `system`-Blöcke übergeben: Kampagnen-Kontext → laufende Zusammenfassung → Live-Transkript. Ältere Turns werden bei Überlauf asynchron in eine rollende Zusammenfassung gefaltet. Bei (Re-)Start wird der Puffer aus dem JSONL-Log rekonstruiert.
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `LIVE_CONTEXT_ENABLED` | `true` | Schaltet Live-Transkript, rollende Zusammenfassung und Kampagnen-Kontext gemeinsam ein/aus. Auf `false` verhält sich der Server wie zuvor (nur `HISTORY_TURNS`-Verlauf). |
+| `LIVE_RAW_WINDOW_CHARS` | `6000` | Zielgröße (Zeichen) des rohen Live-Puffers. Wird sie überschritten, werden die ältesten Turns in die Zusammenfassung gefaltet. |
+| `LIVE_FOLD_CHARS` | `3000` | Wie viele Zeichen pro Faltung (vom ältesten Ende) in die Zusammenfassung wandern. |
+| `LIVE_RENDER_MAX_CHARS` | `6000` | Obergrenze der Zeichen, die das Live-Transkript im Prompt belegt (neueste Zeilen bevorzugt). |
+| `LIVE_FOLD_MIN_INTERVAL_MS` | `0` | Mindestabstand zwischen zwei Faltungen (Drosselung). `0` = keine Drosselung. |
+| `SUMMARY_MODEL` | *(= `OLLAMA_MODEL`)* | Optionales separates Ollama-Modell für die Zusammenfassung. Leer = dasselbe Modell wie für Antworten. |
+| `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
+| `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn `CAMPAIGN_CONTEXT_FILE` ein relativer Pfad ist. |
+| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Feature deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
+| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). |
 
 #### TTS (Text-to-Speech)
 

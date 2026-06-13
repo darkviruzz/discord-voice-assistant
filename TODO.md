@@ -154,7 +154,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Phase 5 — Web-UI
 
-- [ ] **Live-Transkript-Web-UI** — Browser-View für das laufende Transkript.
+- [x] **Live-Transkript-Web-UI** — umgesetzt: read-only Browser-View unter `/transcript/` auf dem Server-Port (statisch aus `apps/server/src/public/`, kein Build, keine Fremdaufrufe). SSE (`/transcript/live`) primär, JSON-Polling (`/transcript/snapshot/:id`) als Fallback. Volle History beim Aufruf aus dem JSONL rekonstruiert (überlebt Reload + Summary-Folding); gefaltete Turns als einklappbare Zusammenfassung. Markdown-Rendering, farbige Sprechernamen (Rabenauge in Akzentfarbe), selbst gehostete Roboto-Schrift, `?debug=1` (Timestamps, Event-Art, `no_speech_prob`). Basic-Auth standardmäßig an (`greyhawk`/`greyhawk`, per `TRANSCRIPT_UI_*` konfigurier-/abschaltbar). Pub/sub `liveBus.js`; Endpunkte `transcriptApi.js` + `transcriptView.js` + `transcriptAuth.js`.
   - Auto-Sync / Auto-Reload (Server-sent events oder einfaches Polling)
   - Useful für Debugging *und* als Spieler-Begleit-Display während der Session
   - Reines Read-Only, kein User-Input

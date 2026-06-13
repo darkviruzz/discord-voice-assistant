@@ -58,6 +58,28 @@ Konventionen:
 * Pausen >30 s erzeugen einen Header `## HH:MM — Pause (N min)`.
 * **Monolog-Unterbrechungen** werden chronologisch eingebettet — der Algorithmus dafür rendert bei Finalize aus Whisper-Token-Timestamps und Discord-Per-User-Spuren-Timestamps (Live-Log ist chronologisch unkorrigiert; das finale Transkript ist sauber).
 
+### Live-Transkript-Web-UI
+
+Read-only Browser-View des laufenden Transkripts — nützlich zum Debuggen und als Spieler-Begleit-Display. Läuft auf demselben Server-Port wie die übrigen Endpunkte (Default `7440`), keine eigene App, kein Build-Schritt, keine Fremdaufrufe (Roboto ist selbst gehostet).
+
+Aufruf im Browser: `http://<server>:7440/transcript/`
+
+* **Auth**: standardmäßig HTTP-Basic mit `greyhawk` / `greyhawk` (per `TRANSCRIPT_UI_*` änderbar, mit `TRANSCRIPT_UI_AUTH=off` im vertrauten LAN abschaltbar).
+* **Live-Update**: primär über Server-Sent Events (`GET /transcript/live`), automatischer Fallback auf Polling (`GET /transcript/snapshot/:id`), wenn SSE wiederholt scheitert.
+* **History**: beim Seitenaufruf wird das vollständige Transkript aus dem JSONL-Log rekonstruiert (überlebt Reloads mitten in der Session und das Wegfalten älterer Turns in die rollende Zusammenfassung). Die gefalteten Turns sind als Zusammenfassung einklappbar sichtbar.
+* **Session**: ohne `?sessionId=` wird die neueste aktive Session automatisch gewählt; ein Dropdown listet die aktiven Sessions.
+* **Darstellung**: sinnvolle Markdown-Defaults (Fett/Kursiv/Code/Listen/Überschriften), farbige Sprechernamen (deterministischer Farbton pro Name, Rabenauge in der Akzentfarbe), Roboto-Schrift. Alle Stil-Variablen liegen als CSS-Custom-Properties in `style.css` und lassen sich offline feintunen.
+* **Debug-Modus** (`?debug=1` oder Checkbox): zeigt Timestamps, Event-Art (`user`/`assistant`) und `no_speech_prob` je Utterance.
+
+Endpunkte (alle unter `/transcript`, hinter der Basic-Auth):
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /transcript/` | Statische UI (HTML/CSS/JS). |
+| `GET /transcript/live?sessionId=<id>` | SSE-Stream: erst ein `snapshot`-Event (volle History), dann `entry`-Events live. Ohne `sessionId` → neueste aktive Session. |
+| `GET /transcript/snapshot/:id` | JSON-Snapshot der vollen History (Polling-Fallback; funktioniert auch für bereits beendete Sessions direkt aus dem JSONL). |
+| `GET /transcript/sessions` | JSON-Liste der aktiven In-RAM-Sessions für die Auswahl. |
+
 ## Audio-Archiv
 
 * **Während Aufnahme**: hohe Qualität (PCM 48 kHz / 16-bit WAV, ~1 GB/h pro Sprecher) — gibt Whisper bestmögliche Eingabe.
@@ -239,6 +261,18 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `STOP_WITHOUT_WAKE_MAX_WORDS` | `5` | Maximale Wortzahl für Stop-Phrases ohne Wake-Word. Verhindert, dass normale Sätze mit Stop-Wörtern versehentlich die Wiedergabe abbrechen. |
 
 > **Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Bei langen Aufnahmen (`> STT_MAX_CHUNK_SECONDS`) loggt der Server mit `DEBUG=1` Details wie Gesamtdauer, Threshold, Chunk-Anzahl, Chunk-Dauern und Split-Typ (`natural-silence`, `forced-overlap`, `tail`). Erscheint bei langen Fragen kein sinnvoller Natural-Split, ist der Schwellwert oft zu niedrig (zu viel Hintergrundrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+
+#### Live-Transkript-Web-UI
+
+Read-only Browser-View unter `http://<server>:<PORT>/transcript/` (siehe [Live-Transkript-Web-UI](#live-transkript-web-ui)).
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `TRANSCRIPT_UI_AUTH` | `basic` | `basic` = HTTP-Basic-Auth erforderlich. `off` (auch `none`/`false`/`0`) = ohne Auth erreichbar (nur für vertrautes LAN). |
+| `TRANSCRIPT_UI_USER` | `greyhawk` | Benutzername für die Basic-Auth. |
+| `TRANSCRIPT_UI_PASS` | `greyhawk` | Passwort für die Basic-Auth. |
+
+> Die UI nutzt denselben `PORT` wie der übrige Server und liest den vollständigen Verlauf aus `TRANSCRIPT_DIR` (siehe [Live-JSONL-Events](#live-jsonl-events)). Die rollende Zusammenfassung stammt aus dem RAM und ist nur für aktive Sessions verfügbar.
 
 ### Live-JSONL-Events
 

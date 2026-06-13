@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Live-Transkript</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1>Live-Transkript</h1>
+      <span id="status" class="status status--connecting" title="Verbindung">●&nbsp;verbinde…</span>
+    </div>
+    <div class="topbar-right">
+      <label class="field">
+        <span>Session</span>
+        <select id="session-select"></select>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="debug-toggle" />
+        <span>Debug</span>
+      </label>
+    </div>
+  </header>
+
+  <details id="summary-box" class="summary" hidden>
+    <summary>Zusammenfassung (gefaltete ältere Turns)</summary>
+    <div id="summary-text" class="summary-text"></div>
+  </details>
+
+  <main id="transcript" class="transcript" aria-live="polite">
+    <p class="empty" id="empty-hint">Warte auf Transkript…</p>
+  </main>
+
+  <button id="jump-latest" class="jump-latest" hidden>↓ Neueste</button>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

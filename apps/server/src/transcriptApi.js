@@ -1,0 +1,114 @@
+// Read-only live-transcript web UI: HTTP routes + SSE stream.
+//
+// All endpoints live under /transcript on the SAME Express app / port (7440)
+// as /health. SSE is a plain GET (text/event-stream), so it does NOT touch the
+// WebSocket upgrade dispatcher in index.js.
+//
+//   GET /transcript/            → static UI (public/index.html + assets)
+//   GET /transcript/sessions    → JSON list of in-RAM sessions (picker/auto-detect)
+//   GET /transcript/snapshot/:id→ JSON full snapshot (polling fallback)
+//   GET /transcript/live[?sessionId=] → SSE: snapshot event, then live entries
+//
+// Auth (Basic) is layered on in a separate step; see registerTranscriptRoutes.
+
+import express from 'express';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { debug } from './logger.js';
+import { subscribeEntries } from './liveBus.js';
+import { buildSnapshot, newestActiveSessionId, listSessions } from './transcriptView.js';
+
+const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
+const SSE_HEARTBEAT_MS = 15000;
+
+// Resolve the session to show: an explicit numeric query param wins; otherwise
+// fall back to the newest active session in RAM.
+function resolveSessionId(raw) {
+  if (raw != null && /^\d+$/.test(String(raw))) return String(raw);
+  return newestActiveSessionId();
+}
+
+// Shape a bus/entry into the wire form the client expects. `meta` is only
+// attached when present (debug-only fields like noSpeechProb).
+function toClientEntry(entry, meta) {
+  const out = { label: entry.label, text: entry.text, startMs: entry.startMs, kind: entry.kind };
+  if (entry.meta) out.meta = entry.meta;
+  if (meta) out.meta = { ...(out.meta || {}), ...meta };
+  return out;
+}
+
+function handleSessions(_req, res) {
+  res.json({ sessions: listSessions() });
+}
+
+function handleSnapshot(req, res) {
+  const sid = resolveSessionId(req.params.id);
+  if (!sid) { res.status(404).json({ error: 'no session' }); return; }
+  try {
+    res.json(buildSnapshot(sid));
+  } catch (e) {
+    debug('transcript: snapshot error', e.message);
+    res.status(500).json({ error: 'snapshot failed' });
+  }
+}
+
+function handleLive(req, res) {
+  const sid = resolveSessionId(req.query.sessionId);
+  if (!sid) { res.status(404).json({ error: 'no active session' }); return; }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // disable proxy buffering (nginx) so events flush live
+  });
+  res.write('retry: 3000\n\n');
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Subscribe BEFORE building the snapshot so entries appended in the gap
+  // aren't lost; buffer them, then replay only those newer than the snapshot.
+  const pending = [];
+  let ready = false;
+  const unsub = subscribeEntries((msg) => {
+    if (msg.sessionId !== sid) return;
+    if (!ready) { pending.push(msg); return; }
+    send('entry', toClientEntry(msg.entry, msg.meta));
+  });
+
+  try {
+    const snap = buildSnapshot(sid);
+    send('snapshot', snap);
+    const lastMs = snap.entries.length ? snap.entries[snap.entries.length - 1].startMs : -Infinity;
+    ready = true;
+    for (const msg of pending) {
+      if (msg.entry.startMs > lastMs) send('entry', toClientEntry(msg.entry, msg.meta));
+    }
+  } catch (e) {
+    debug('transcript: live snapshot error', e.message);
+    send('error', { message: 'snapshot failed' });
+    ready = true;
+  } finally {
+    pending.length = 0;
+  }
+
+  // Comment heartbeat keeps idle proxies/connections from timing out.
+  const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch {} }, SSE_HEARTBEAT_MS);
+  hb.unref?.();
+
+  req.on('close', () => { clearInterval(hb); unsub(); });
+}
+
+// Register all /transcript routes on the given Express app. `middleware`, when
+// provided, is mounted first and guards every /transcript request (used for
+// optional Basic auth).
+export function registerTranscriptRoutes(app, middleware = null) {
+  if (middleware) app.use('/transcript', middleware);
+  // API routes first, then the static fallback (so /transcript/live etc. win).
+  app.get('/transcript/sessions', handleSessions);
+  app.get('/transcript/snapshot/:id', handleSnapshot);
+  app.get('/transcript/live', handleLive);
+  app.use('/transcript', express.static(PUBLIC_DIR));
+}

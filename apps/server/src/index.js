@@ -9,6 +9,7 @@ import { initControlWSS } from './control.js';
 import { checkBearer } from './auth.js';
 import { getVersion } from './version.js';
 import { registerDebugTtsRoute } from './debugTts.js';
+import { registerTranscriptRoutes } from './transcriptApi.js';
 
 const HB_INTERVAL_MS = 15000;
 
@@ -16,6 +17,7 @@ const app = express();
 app.use(express.json({ limit: '32kb' }));
 app.get('/health', (_req, res) => res.json({ ok: true, t: Date.now() }));
 registerDebugTtsRoute(app);
+registerTranscriptRoutes(app);
 app.post('/shutdown', (_req, res) => {
   res.json({ status: 'shutting down' });
   setTimeout(() => shutdown('HTTP /shutdown'), 200);

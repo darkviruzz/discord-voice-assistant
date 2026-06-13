@@ -9,6 +9,7 @@ import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import { appendLive, renderLiveContext, liveContextEnabled } from './liveContext.js';
+import { publishEntry } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
 import { getCampaignContext } from './campaignContext.js';
 import { loadSpeakerMap } from './speakerMap.js';
@@ -458,7 +459,8 @@ async function answerQuestion({
   // Mirror the reply into the live-transcript buffer so later turns see it,
   // then fold if the raw window overflowed. Fire-and-forget (single-flight).
   if (session) {
-    appendLive(session, { label: wakeWordName(), text: responseText, startMs: Date.now(), kind: 'assistant' });
+    const stored = appendLive(session, { label: wakeWordName(), text: responseText, startMs: Date.now(), kind: 'assistant' });
+    if (stored && sid) publishEntry(sid, stored);
     maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
   }
 
@@ -605,12 +607,13 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     const session = sessions.get(sessionId);
     if (session) {
       const label = speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId));
-      appendLive(session, {
+      const stored = appendLive(session, {
         label,
         text: fullTranscript,
         startMs: metadata.startTsMs ?? Date.now(),
         kind: 'user',
       });
+      if (stored) publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
       maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
     }
 

@@ -17,6 +17,7 @@ import { dirname, join } from 'path';
 import { debug } from './logger.js';
 import { subscribeEntries } from './liveBus.js';
 import { buildSnapshot, newestActiveSessionId, listSessions } from './transcriptView.js';
+import { makeTranscriptAuth } from './transcriptAuth.js';
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
 const SSE_HEARTBEAT_MS = 15000;
@@ -101,11 +102,12 @@ function handleLive(req, res) {
   req.on('close', () => { clearInterval(hb); unsub(); });
 }
 
-// Register all /transcript routes on the given Express app. `middleware`, when
-// provided, is mounted first and guards every /transcript request (used for
-// optional Basic auth).
-export function registerTranscriptRoutes(app, middleware = null) {
-  if (middleware) app.use('/transcript', middleware);
+// Register all /transcript routes on the given Express app. Optional Basic auth
+// (on by default, see transcriptAuth.js) guards every /transcript request,
+// static assets included.
+export function registerTranscriptRoutes(app) {
+  const auth = makeTranscriptAuth();
+  if (auth) app.use('/transcript', auth);
   // API routes first, then the static fallback (so /transcript/live etc. win).
   app.get('/transcript/sessions', handleSessions);
   app.get('/transcript/snapshot/:id', handleSnapshot);

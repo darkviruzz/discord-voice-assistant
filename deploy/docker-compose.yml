@@ -1,0 +1,158 @@
+# ============================================================================
+# Discord Voice Assistant — server-side stack for temporary GPU cloud instances.
+#
+#   start:  deploy/scripts/start.sh
+#   stop:   deploy/scripts/stop.sh
+#   health: deploy/scripts/healthcheck.sh
+#
+# All services share the internal `voice` network and reach each other by
+# service name (e.g. http://whisper:8080). Only the Node server port is
+# published — bind it to the WireGuard/Tailscale interface (see README).
+#
+# GPU: every service requests an NVIDIA GPU. Which physical GPU each one uses is
+# controlled per-service via CUDA_VISIBLE_DEVICES (see .env.example for the
+# RTX 4090 / 2x A100 / H200 staging plan).
+# ============================================================================
+
+services:
+  whisper:
+    # CUDA build from source (deploy/whisper/Dockerfile). To use the official
+    # image instead, comment `build:` and uncomment the image/entrypoint block.
+    build:
+      context: ./whisper
+      args:
+        WHISPER_CPP_REF: ${WHISPER_CPP_REF:-master}
+    # image: ghcr.io/ggml-org/whisper.cpp:main-cuda
+    # entrypoint: ["whisper-server"]
+    # command: ["--model","/models/${WHISPER_MODEL_FILE:-ggml-medium-q5_0.bin}","--host","0.0.0.0","--port","8080","--language","${WHISPER_LANGUAGE:-de}"]
+    container_name: va-whisper
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL_FILE: ${WHISPER_MODEL_FILE:-ggml-medium-q5_0.bin}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-de}
+      NVIDIA_VISIBLE_DEVICES: ${WHISPER_VISIBLE_DEVICES:-0}
+    volumes:
+      - whisper-models:/models
+    networks: [voice]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: va-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      NVIDIA_VISIBLE_DEVICES: ${OLLAMA_VISIBLE_DEVICES:-0}
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [voice]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  piper:
+    build:
+      context: ../services/piper
+      dockerfile: Dockerfile
+    container_name: va-piper
+    restart: unless-stopped
+    environment:
+      PIPER_VOICES_DIR: /voices
+      PIPER_USE_DIRECTML: "0"
+      PIPER_USE_CUDA: ${PIPER_USE_CUDA:-1}
+      NVIDIA_VISIBLE_DEVICES: ${PIPER_VISIBLE_DEVICES:-0}
+    volumes:
+      - piper-voices:/voices
+    networks: [voice]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  server:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    container_name: va-server
+    restart: unless-stopped
+    # Publish ONLY on the WireGuard/Tailscale interface (no public exposure).
+    # Set SERVER_BIND to the instance's wg IP (e.g. 10.10.0.2); 127.0.0.1 keeps
+    # it host-local until the tunnel is configured. 0.0.0.0 = all interfaces.
+    ports:
+      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-7440}:7440"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "7440"
+      CONTROL_BEARER: ${CONTROL_BEARER:?set CONTROL_BEARER in deploy/.env}
+      DEBUG: ${DEBUG:-0}
+      # Service URLs resolve over the internal network by service name.
+      WHISPER_URL: http://whisper:8080
+      OLLAMA_URL: http://ollama:11434
+      TTS_URL: http://piper:5000
+      RAG_URL: ${RAG_URL:-}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-de}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      TTS_PROVIDER: ${TTS_PROVIDER:-piper}
+      FINALIZE_UPLOAD_DIR: /data/uploads
+      ARCHIVE_DIR: /data/archive
+      SPEAKER_MAP_FILE: /data/speaker-map.json
+      FINALIZE_TZ: ${FINALIZE_TZ:-Europe/Berlin}
+    env_file:
+      - path: ./server.env
+        required: false
+    volumes:
+      - transcripts:/data/uploads
+      - archive:/data/archive
+      - server-data:/data
+    networks: [voice]
+    depends_on:
+      whisper:
+        condition: service_started
+      ollama:
+        condition: service_started
+      piper:
+        condition: service_started
+
+  # ── RAG (Phase 4 — placeholder, not yet implemented) ──────────────────────
+  # Uncomment once apps/rag/ exists. The server already reads RAG_URL.
+  # rag:
+  #   build:
+  #     context: ..
+  #     dockerfile: apps/rag/Dockerfile
+  #   container_name: va-rag
+  #   restart: unless-stopped
+  #   environment:
+  #     NVIDIA_VISIBLE_DEVICES: ${RAG_VISIBLE_DEVICES:-0}
+  #   networks: [voice]
+
+networks:
+  voice:
+    driver: bridge
+
+volumes:
+  ollama-models:
+  whisper-models:
+  piper-voices:
+  transcripts:
+  archive:
+  server-data:

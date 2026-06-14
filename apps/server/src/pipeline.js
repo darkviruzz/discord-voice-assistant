@@ -327,11 +327,13 @@ function wakeWordName() {
 // Assemble the extra `system` blocks for a voice session, in priority order:
 // campaign context → rolling summary → live transcript. Empty parts are skipped
 // so an unavailable block costs nothing. `query` is forwarded to the campaign
-// lookup (RAG hook for later). Returns [] when live context is disabled.
-function buildSystemBlocks(session, query) {
+// lookup (semantic RAG when RAG_URL is set, else the static CAMPAIGN.md).
+// Async because that lookup may be an HTTP call. Returns [] when live context
+// is disabled.
+async function buildSystemBlocks(session, query) {
   if (!liveContextEnabled()) return [];
   const blocks = [];
-  const campaign = getCampaignContext(query);
+  const campaign = await getCampaignContext(query);
   if (campaign) blocks.push(`Kampagnen-Kontext:\n${campaign}`);
   const summary = session?.liveContext?.summary;
   if (summary && summary.trim()) {
@@ -428,7 +430,7 @@ async function answerQuestion({
 
   // Voice sessions get campaign context + rolling summary + live transcript as
   // extra system blocks; text/global queries get none (no live buffer).
-  const systemBlocks = session ? buildSystemBlocks(session, query) : [];
+  const systemBlocks = session ? await buildSystemBlocks(session, query) : [];
 
   let response;
   try {

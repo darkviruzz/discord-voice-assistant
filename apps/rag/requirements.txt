@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn>=0.29
+chromadb>=0.5
+requests>=2.31
+pyyaml>=6.0
+watchdog>=4.0
+
+# Embeddings are produced by the already-running Ollama instance — no extra
+# service needed. Pull the model once:
+#
+#   ollama pull nomic-embed-text

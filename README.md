@@ -216,8 +216,20 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `SUMMARY_MODEL` | *(= `OLLAMA_MODEL`)* | Optionales separates Ollama-Modell für die Zusammenfassung. Leer = dasselbe Modell wie für Antworten. |
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
 | `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn `CAMPAIGN_CONTEXT_FILE` ein relativer Pfad ist. |
-| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Feature deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
+| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn `RAG_URL` nicht gesetzt oder der RAG-Dienst nicht erreichbar ist). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
 | `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). |
+
+#### RAG (semantische Vault-Suche, Phase 4)
+
+Der Python-RAG-Dienst (`apps/rag/`) indiziert den Obsidian-Vault und liefert pro Wake-Word-Query die relevantesten Chunks. Bei gesetztem `RAG_URL` ersetzt die semantische Suche das statische `CAMPAIGN.md`; ist der Dienst aus/nicht erreichbar, degradiert der Server lautlos auf die Datei.
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `RAG_URL` | — | Basis-URL des RAG-Dienstes (z. B. `http://localhost:5001`). Leer = RAG aus, nur `CAMPAIGN.md`. |
+| `RAG_TIMEOUT_MS` | `800` | Timeout pro RAG-Abfrage; danach Fallback auf die Datei, ohne die Pipeline zu blockieren. |
+| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join`: RAG-Query mit der rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Nur wirksam bei gesetztem `RAG_URL` und vorhandenem Summary. |
+| `RAG_BRIEFING_TOP_K` | `3` | Anzahl der Vault-Chunks fürs Briefing. |
+| `RAG_BRIEFING_POST_CHAT` | `false` | Briefing zusätzlich als kurze Discord-Textnachricht posten. `false` = nur als LLM-Kontext injizieren. |
 
 #### TTS (Text-to-Speech)
 
@@ -434,8 +446,9 @@ Setup-Anleitung für die drei lokalen AI-Services.
 | Whisper | 8080 | Sprache → Text (STT) | whisper.cpp + Vulkan |
 | Ollama | 11434 | Text → Antwort (LLM) | llama3.2 |
 | Piper | 5000 | Text → Sprache (TTS) | Piper + FastAPI |
+| RAG | 5001 | Vault-Suche (optional) | FastAPI + ChromaDB + Ollama-Embeddings |
 
-Alle drei Services müssen laufen bevor der Discord-Server gestartet wird.
+Whisper, Ollama und Piper müssen laufen bevor der Discord-Server gestartet wird; der RAG-Dienst ist optional (Server degradiert ohne ihn auf `CAMPAIGN.md`).
 
 ---
 

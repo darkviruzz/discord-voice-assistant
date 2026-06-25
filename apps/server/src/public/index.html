@@ -15,9 +15,17 @@
       <span id="status" class="status status--connecting" title="Datenverbindung (SSE/Polling)">●&nbsp;verbinde…</span>
     </div>
     <div class="topbar-right">
+      <details id="members-pop" class="members-pop" hidden>
+        <summary id="members-toggle" title="Im Voice-Channel">👥&nbsp;<span id="members-count">0</span></summary>
+        <ul id="members-list" class="members-list"></ul>
+      </details>
       <label class="field">
         <span>Session</span>
         <select id="session-select"></select>
+      </label>
+      <label class="toggle" title="Auch beendete Sessions aus dem Log anzeigen">
+        <input type="checkbox" id="past-toggle" />
+        <span>vergangene</span>
       </label>
       <label class="toggle">
         <input type="checkbox" id="debug-toggle" />
@@ -26,9 +34,9 @@
     </div>
   </header>
 
-  <details id="members-box" class="members" hidden>
-    <summary><span id="members-count">Im Voice-Channel</span></summary>
-    <ul id="members-list" class="members-list"></ul>
+  <details id="session-meta" class="session-meta" hidden>
+    <summary>Session-Infos</summary>
+    <dl id="session-meta-body" class="session-meta-body"></dl>
   </details>
 
   <details id="summary-box" class="summary" hidden>

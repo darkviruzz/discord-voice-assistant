@@ -3,7 +3,8 @@
  * Flow:
  *   1. Load the session list, fill the picker, pick the URL/?sessionId or newest.
  *   2. Open an EventSource to /transcript/live; render the `snapshot` (full
- *      history from the JSONL) then append each live `entry`.
+ *      history from the JSONL) then append each live `entry`. `presence` updates
+ *      the voice pill/members; `annotation` retro-marks a line (wake/stop).
  *   3. If SSE is unavailable or keeps failing, fall back to JSON polling of
  *      /transcript/snapshot/:id.
  *
@@ -18,13 +19,16 @@
     voice: $('#voice'),
     select: $('#session-select'),
     debug: $('#debug-toggle'),
+    past: $('#past-toggle'),
     transcript: $('#transcript'),
     emptyHint: $('#empty-hint'),
     summaryBox: $('#summary-box'),
     summaryText: $('#summary-text'),
-    membersBox: $('#members-box'),
+    membersPop: $('#members-pop'),
     membersCount: $('#members-count'),
     membersList: $('#members-list'),
+    sessionMeta: $('#session-meta'),
+    sessionMetaBody: $('#session-meta-body'),
     jump: $('#jump-latest'),
   };
 
@@ -32,16 +36,20 @@
   const state = {
     sessionId: params.get('sessionId') || null,
     debug: params.get('debug') === '1',
+    showPast: false,
     es: null,            // EventSource
     pollTimer: null,     // polling fallback interval
     sseFailures: 0,
     lastStartMs: -Infinity, // newest rendered entry time (dedupe across reconnect/poll)
     atBottom: true,
+    rendered: new Map(), // startMs → { data, el } so annotations can patch a line
+    stopPhrases: [],     // from session_meta, for stop-token highlighting
+    wakeWord: 'Rabenauge',
   };
 
   // ── tiny, XSS-safe markdown renderer ───────────────────────────────────────
   function escapeHtml(s) {
-    return s.replace(/[&<>"]/g, (c) => (
+    return String(s).replace(/[&<>"]/g, (c) => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
     ));
   }
@@ -59,7 +67,7 @@
 
   // Block-level: headings, unordered/ordered lists, blockquotes, paragraphs.
   function renderMarkdown(text) {
-    const lines = escapeHtml(String(text)).split(/\r?\n/);
+    const lines = escapeHtml(text).split(/\r?\n/);
     const html = [];
     let list = null; // 'ul' | 'ol' | null
     const closeList = () => { if (list) { html.push(`</${list}>`); list = null; } };
@@ -90,7 +98,36 @@
     return html.join('');
   }
 
-  // ── speaker colors ──────────────────────────────────────────────────────────
+  // Locate the first stop-phrase occurrence in `text` (case-insensitive). Stop
+  // commands are short, so a plain earliest-substring scan is enough.
+  function findStopToken(text, phrases) {
+    const hay = text.toLowerCase();
+    let best = null;
+    for (const p of phrases) {
+      const needle = String(p).toLowerCase().trim();
+      if (!needle) continue;
+      const i = hay.indexOf(needle);
+      if (i >= 0 && (!best || i < best.index)) best = { index: i, length: needle.length };
+    }
+    return best;
+  }
+
+  // Body HTML for an entry: full markdown, except stop lines render the matched
+  // stop token in a <mark> (rest as plain escaped text — stop commands are tiny).
+  function renderBody(entry) {
+    if (entry.stopDetected && state.stopPhrases.length) {
+      const tok = findStopToken(entry.text || '', state.stopPhrases);
+      if (tok) {
+        const t = entry.text;
+        return `${escapeHtml(t.slice(0, tok.index))}`
+          + `<mark class="stop-token">${escapeHtml(t.slice(tok.index, tok.index + tok.length))}</mark>`
+          + `${escapeHtml(t.slice(tok.index + tok.length))}`;
+      }
+    }
+    return renderMarkdown(entry.text || '');
+  }
+
+  // ── colors / time formatting ────────────────────────────────────────────────
   function hueFor(label) {
     let h = 0;
     for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
@@ -99,17 +136,26 @@
   function speakerColor(label) {
     return `hsl(${hueFor(label)}, var(--speaker-sat), var(--speaker-light))`;
   }
-
+  function pad2(n) { return String(n).padStart(2, '0'); }
   function fmtTime(ms) {
-    const d = new Date(ms);
+    const d = new Date(Number(ms));
     if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  }
+  // Human-readable session timestamp from the epoch-ms session id.
+  function fmtDateTime(ms) {
+    const d = new Date(Number(ms));
+    if (Number.isNaN(d.getTime())) return String(ms);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   }
 
-  // ── rendering ─────────────────────────────────────────────────────────────
+  // ── entry rendering ───────────────────────────────────────────────────────
   function entryEl(entry) {
     const wrap = document.createElement('article');
-    wrap.className = 'entry' + (entry.kind === 'assistant' ? ' entry--assistant' : '');
+    wrap.className = 'entry'
+      + (entry.kind === 'assistant' ? ' entry--assistant' : '')
+      + (entry.wakeDetected ? ' entry--wake' : '')
+      + (entry.stopDetected ? ' entry--stop' : '');
 
     const meta = document.createElement('div');
     meta.className = 'entry-meta';
@@ -120,66 +166,123 @@
     speaker.textContent = entry.label || '?';
     meta.appendChild(speaker);
 
-    if (state.debug) {
-      const time = document.createElement('span');
-      time.className = 'entry-time';
-      time.textContent = `${fmtTime(entry.startMs)} · ${entry.startMs}`;
-      meta.appendChild(time);
+    if (entry.wakeDetected) meta.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
+    if (entry.stopDetected) meta.appendChild(badge('Stop', 'badge-stop'));
+    if (state.debug && entry.marker) meta.appendChild(badge(entry.marker, 'badge-marker'));
 
+    const time = document.createElement('span');
+    time.className = 'entry-time';
+    time.textContent = state.debug ? `${fmtTime(entry.startMs)} · ${entry.startMs}` : fmtTime(entry.startMs);
+    meta.appendChild(time);
+
+    if (state.debug) {
       const kind = document.createElement('span');
       kind.className = 'entry-kind';
       kind.textContent = entry.kind;
       meta.appendChild(kind);
-
-      const nsp = entry.meta && entry.meta.noSpeechProb;
-      if (nsp != null) {
-        const n = document.createElement('span');
-        n.className = 'entry-nsp' + (nsp >= 0.5 ? ' high' : '');
-        n.textContent = `no_speech ${Number(nsp).toFixed(2)}`;
-        meta.appendChild(n);
-      }
-    } else {
-      const time = document.createElement('span');
-      time.className = 'entry-time';
-      time.textContent = fmtTime(entry.startMs);
-      meta.appendChild(time);
     }
 
     const body = document.createElement('div');
     body.className = 'entry-body';
-    body.innerHTML = renderMarkdown(entry.text || '');
+    body.innerHTML = renderBody(entry);
 
     wrap.appendChild(meta);
     wrap.appendChild(body);
+
+    if (state.debug) {
+      const dbg = debugDetail(entry);
+      if (dbg) wrap.appendChild(dbg);
+    }
     return wrap;
+  }
+
+  function badge(text, cls) {
+    const b = document.createElement('span');
+    b.className = `badge ${cls}`;
+    b.textContent = text;
+    return b;
+  }
+
+  // Debug footer for an entry: STT diagnostics (user) or TTS/turn info (assistant).
+  function debugDetail(entry) {
+    const bits = [];
+    if (entry.kind === 'user' && entry.stt) {
+      const s = entry.stt;
+      if (s.noSpeechProb != null) bits.push(`no_speech ${Number(s.noSpeechProb).toFixed(2)}`);
+      if (s.durationMs != null) bits.push(`${Math.round(s.durationMs)}ms`);
+      if (s.wordCount != null) bits.push(`${s.wordCount} W`);
+      if (s.provider) bits.push(s.provider);
+      if (Array.isArray(s.chunkDurationsMs) && s.chunkDurationsMs.length > 1) bits.push(`chunks ${s.chunkDurationsMs.length}`);
+      if (Array.isArray(s.splitTypes) && s.splitTypes.length) bits.push(s.splitTypes.join('/'));
+    } else if (entry.kind === 'assistant' && entry.turn) {
+      const t = entry.turn;
+      if (t.ttsStatus) bits.push(`tts:${t.ttsStatus}${t.ttsError ? ` (${t.ttsError})` : ''}`);
+      if (t.ttsDurationMs != null) bits.push(`${Math.round(t.ttsDurationMs)}ms`);
+      if (t.ttsModel) bits.push(t.ttsModel);
+      if (t.speakerId != null) bits.push(`spk ${t.speakerId}`);
+      if (t.truncated) bits.push('abgebrochen');
+      for (const it of (t.interruptions || [])) {
+        bits.push(`⏸ ${it.by || '?'}${it.msPlayed != null ? ` @${Math.round(it.msPlayed)}ms` : ''}`);
+      }
+    }
+    if (entry.kind === 'assistant' && entry.interrupted && !(entry.turn && entry.turn.truncated)) bits.push('abgebrochen');
+    if (!bits.length) return null;
+    const d = document.createElement('div');
+    d.className = 'entry-debug';
+    d.textContent = bits.join(' · ');
+    return d;
   }
 
   function clearTranscript() {
     els.transcript.innerHTML = '';
     state.lastStartMs = -Infinity;
+    state.rendered.clear();
+  }
+
+  function pushEntry(entry, { scroll }) {
+    if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
+    const el = entryEl(entry);
+    els.transcript.appendChild(el);
+    state.rendered.set(entry.startMs, { data: entry, el });
+    state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
+    if (scroll) {
+      if (state.atBottom) scrollToBottom();
+      else els.jump.hidden = false;
+    }
   }
 
   function appendEntry(entry) {
-    if (entry.startMs <= state.lastStartMs && state.lastStartMs !== -Infinity) {
-      // Already shown (snapshot/poll overlap) — skip unless it's a brand-new ms.
-      if (entry.startMs < state.lastStartMs) return;
-    }
-    if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
-    els.transcript.appendChild(entryEl(entry));
-    state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
-    if (state.atBottom) scrollToBottom();
-    else els.jump.hidden = false;
+    if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // already shown
+    if (state.rendered.has(entry.startMs)) return; // exact dup
+    pushEntry(entry, { scroll: true });
+  }
+
+  // Retro-mark a line by startMs (wake/stop detected after it was sent).
+  function applyAnnotation(ann) {
+    if (!ann || ann.startMs == null) return;
+    const rec = state.rendered.get(ann.startMs);
+    if (!rec) return;
+    if (ann.wakeDetected) rec.data.wakeDetected = true;
+    if (ann.stopDetected) rec.data.stopDetected = true;
+    const fresh = entryEl(rec.data);
+    rec.el.replaceWith(fresh);
+    rec.el = fresh;
   }
 
   function renderSnapshot(snap) {
     clearTranscript();
+    state.stopPhrases = (snap.sessionMeta && snap.sessionMeta.stopPhrases) || [];
+    state.wakeWord = (snap.sessionMeta && snap.sessionMeta.wakeword && snap.sessionMeta.wakeword.word) || 'Rabenauge';
     renderVoice(snap.voice);
+    renderSessionMeta(snap);
+
     if (snap.summary && snap.summary.trim()) {
       els.summaryText.textContent = snap.summary;
       els.summaryBox.hidden = false;
     } else {
       els.summaryBox.hidden = true;
     }
+
     if (!snap.entries || snap.entries.length === 0) {
       const p = document.createElement('p');
       p.className = 'empty';
@@ -187,10 +290,7 @@
       els.transcript.appendChild(p);
       return;
     }
-    for (const e of snap.entries) {
-      els.transcript.appendChild(entryEl(e));
-      state.lastStartMs = Math.max(state.lastStartMs, e.startMs);
-    }
+    for (const e of snap.entries) pushEntry(e, { scroll: false });
     scrollToBottom();
   }
 
@@ -205,12 +305,12 @@
     els.status.innerHTML = `●&nbsp;${text}`;
   }
 
-  // ── voice-channel / bot presence (independent of the transport above) ────────
+  // ── voice-channel / bot presence (header pill + members popover) ─────────────
   function renderVoice(voice) {
     if (!voice) {
       els.voice.className = 'voice voice--unknown';
       els.voice.textContent = '🎙 unbekannt';
-      els.membersBox.hidden = true;
+      els.membersPop.hidden = true;
       return;
     }
     const n = (voice.members || []).length;
@@ -225,14 +325,9 @@
       els.voice.textContent = '🎙 Rabenauge nicht verbunden';
     }
 
-    // Members panel (collapsible/hideable). Shown whenever anyone is/was listed.
     els.membersList.innerHTML = '';
-    if (n === 0) {
-      els.membersBox.hidden = true;
-      return;
-    }
-    els.membersBox.hidden = false;
-    els.membersCount.textContent = `Im Voice-Channel (${n})`;
+    els.membersCount.textContent = String(n);
+    els.membersPop.hidden = n === 0;
     for (const m of voice.members) {
       const li = document.createElement('li');
       li.textContent = m.label || '?';
@@ -241,9 +336,34 @@
     }
   }
 
+  // ── debug-only session-meta header ──────────────────────────────────────────
+  function renderSessionMeta(snap) {
+    const meta = snap.sessionMeta;
+    if (!state.debug || !meta) { els.sessionMeta.hidden = true; return; }
+    const rows = [];
+    const add = (k, v) => { if (v != null && v !== '') rows.push([k, v]); };
+    const where = [meta.guildName, meta.channelName].filter(Boolean).join(' / ');
+    add('Channel', where);
+    add('Start', fmtDateTime(snap.startedAt));
+    add('Wake-Word', meta.wakeword && meta.wakeword.word);
+    add('Stop-Phrases', Array.isArray(meta.stopPhrases) ? meta.stopPhrases.join(', ') : null);
+    add('LLM', meta.llm && [meta.llm.provider, meta.llm.model].filter(Boolean).join(' / '));
+    add('STT', meta.stt && [meta.stt.provider, meta.stt.language, meta.stt.temperature != null ? `T=${meta.stt.temperature}` : null].filter(Boolean).join(' / '));
+    add('TTS', meta.tts && meta.tts.provider);
+    add('Version', [meta.botVersion ? `bot ${meta.botVersion}` : null, meta.serverVersion ? `server ${meta.serverVersion}` : null].filter(Boolean).join(' · '));
+    if (snap.debug) add('Clock', `offset ${Math.round(snap.debug.clockOffsetMs || 0)}ms${snap.debug.lastRttMs != null ? `, rtt ${Math.round(snap.debug.lastRttMs)}ms` : ''} (${snap.debug.clockSyncCount || 0}×)`);
+
+    els.sessionMetaBody.innerHTML = '';
+    for (const [k, v] of rows) {
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v;
+      els.sessionMetaBody.appendChild(dt);
+      els.sessionMetaBody.appendChild(dd);
+    }
+    els.sessionMeta.hidden = false;
+  }
+
   // ── transport: SSE primary ──────────────────────────────────────────────────
-  // Resolve API paths relative to where index.html is served (/transcript/),
-  // so the UI keeps working if the route is ever mounted elsewhere.
   function baseUrl() {
     return location.pathname.replace(/\/[^/]*$/, '');
   }
@@ -261,12 +381,7 @@
     stopTransport();
     setStatus('connecting', 'verbinde…');
     let es;
-    try {
-      es = new EventSource(liveUrl());
-    } catch {
-      startPolling();
-      return;
-    }
+    try { es = new EventSource(liveUrl()); } catch { startPolling(); return; }
     state.es = es;
 
     es.addEventListener('snapshot', (ev) => {
@@ -274,18 +389,13 @@
       setStatus('live', 'SSE');
       try { renderSnapshot(JSON.parse(ev.data)); } catch {}
     });
-    es.addEventListener('entry', (ev) => {
-      try { appendEntry(JSON.parse(ev.data)); } catch {}
-    });
-    es.addEventListener('presence', (ev) => {
-      try { renderVoice(JSON.parse(ev.data)); } catch {}
-    });
+    es.addEventListener('entry', (ev) => { try { appendEntry(JSON.parse(ev.data)); } catch {} });
+    es.addEventListener('presence', (ev) => { try { renderVoice(JSON.parse(ev.data)); } catch {} });
+    es.addEventListener('annotation', (ev) => { try { applyAnnotation(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('error', (ev) => {
-      // Custom server 'error' event carries data; transport errors do not.
       if (ev && ev.data) { try { console.warn('transcript:', JSON.parse(ev.data)); } catch {} }
     });
     es.onerror = () => {
-      // EventSource auto-reconnects; surface the gap and fall back after a while.
       state.sseFailures++;
       if (es.readyState === EventSource.CLOSED || state.sseFailures >= 4) {
         setStatus('error', 'SSE getrennt → Polling');
@@ -305,7 +415,7 @@
       const snap = await res.json();
       setStatus('polling', 'Polling');
       renderSnapshot(snap);
-    } catch (e) {
+    } catch {
       setStatus('error', 'Polling fehlgeschlagen');
     }
   }
@@ -317,26 +427,44 @@
   }
 
   // ── session picker ────────────────────────────────────────────────────────
+  function sessionLabel(s) {
+    const when = fmtDateTime(s.startedAt != null ? s.startedAt : Number(s.sessionId));
+    const where = [s.guildName, s.channelName].filter(Boolean).join(' / ');
+    return where ? `${when} · ${where}` : when;
+  }
+  function addOption(parent, s) {
+    const opt = document.createElement('option');
+    opt.value = s.sessionId;
+    opt.textContent = sessionLabel(s);
+    opt.title = s.sessionId; // raw id still reachable
+    parent.appendChild(opt);
+  }
+
   async function loadSessions() {
     try {
-      const res = await fetch(`${baseUrl()}/sessions`, { cache: 'no-store' });
+      const res = await fetch(`${baseUrl()}/sessions${state.showPast ? '?all=1' : ''}`, { cache: 'no-store' });
       const data = await res.json();
-      const list = (data && data.sessions) || [];
+      const active = (data && data.sessions) || [];
+      const past = (data && data.past) || [];
       els.select.innerHTML = '';
-      if (list.length === 0) {
+
+      if (active.length === 0 && past.length === 0) {
         const opt = document.createElement('option');
         opt.value = '';
-        opt.textContent = '(keine aktive Session)';
+        opt.textContent = '(keine Session)';
         els.select.appendChild(opt);
       }
-      for (const s of list) {
-        const opt = document.createElement('option');
-        opt.value = s.sessionId;
-        const where = [s.guildName, s.channelName].filter(Boolean).join(' / ');
-        opt.textContent = where ? `${where} — ${s.sessionId}` : s.sessionId;
-        els.select.appendChild(opt);
+      if (active.length) {
+        const g = document.createElement('optgroup'); g.label = 'Aktiv';
+        for (const s of active) addOption(g, s);
+        els.select.appendChild(g);
       }
-      if (!state.sessionId && list.length) state.sessionId = list[0].sessionId; // newest first
+      if (past.length) {
+        const g = document.createElement('optgroup'); g.label = 'Vergangen';
+        for (const s of past) addOption(g, s);
+        els.select.appendChild(g);
+      }
+      if (!state.sessionId && active.length) state.sessionId = active[0].sessionId; // newest active
       if (state.sessionId) els.select.value = state.sessionId;
     } catch {
       /* picker stays empty; live endpoint still auto-detects newest */
@@ -359,7 +487,12 @@
     state.debug = els.debug.checked;
     document.body.classList.toggle('debug', state.debug);
     syncUrl();
-    startSse(); // re-render with/without debug fields via a fresh snapshot
+    startSse(); // fresh snapshot re-renders with/without debug fields
+  });
+
+  els.past.addEventListener('change', async () => {
+    state.showPast = els.past.checked;
+    await loadSessions();
   });
 
   els.select.addEventListener('change', () => {
@@ -370,7 +503,6 @@
 
   els.jump.addEventListener('click', () => { state.atBottom = true; scrollToBottom(); });
 
-  // Track whether the user is pinned to the bottom (auto-scroll) or scrolled up.
   window.addEventListener('scroll', () => {
     const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     state.atBottom = nearBottom;

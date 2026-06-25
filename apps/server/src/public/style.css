@@ -115,21 +115,39 @@ body {
 .voice--offline { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
 .voice--unknown { color: var(--text-dim); }
 
-/* members panel */
-.members {
-  max-width: var(--maxw);
-  width: 100%;
-  margin: 12px auto 0;
-  padding: 0 16px;
+/* members popover — lives in the header so it's always reachable without
+   scrolling; a collapsed <details> that opens a small floating panel. */
+.members-pop { position: relative; }
+.members-pop > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: .82rem;
+  color: var(--text-dim);
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-line);
+  white-space: nowrap;
 }
-.members > summary { cursor: pointer; color: var(--text-dim); font-size: .85rem; }
+.members-pop > summary::-webkit-details-marker { display: none; }
+.members-pop[open] > summary { color: var(--text); border-color: var(--accent); }
 .members-list {
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 8;
+  margin: 0;
+  padding: 8px;
+  min-width: 160px;
+  max-width: 280px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
 }
 .members-list li {
   font-size: .85rem;
@@ -140,7 +158,28 @@ body {
   border: 1px solid var(--border);
   /* name color set inline per speaker (hue) from JS */
 }
-.members-list li.empty { font-weight: 400; color: var(--text-dim); background: none; border: none; padding-left: 0; }
+
+/* debug-only session-meta header (collapsed) */
+.session-meta {
+  max-width: var(--maxw);
+  width: 100%;
+  margin: 12px auto 0;
+  padding: 0 16px;
+}
+.session-meta > summary { cursor: pointer; color: var(--text-dim); font-size: .85rem; }
+.session-meta-body {
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  font-size: .85rem;
+}
+.session-meta-body dt { color: var(--text-dim); }
+.session-meta-body dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
 
 .field { display: flex; align-items: center; gap: 6px; font-size: .82rem; color: var(--text-dim); }
 .field select {
@@ -239,6 +278,44 @@ body {
 /* debug: show the structural grid lines + kind tag */
 body.debug .entry { outline: 1px dashed var(--border); }
 .entry-kind { font-size: .68rem; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
+
+/* wake-word trigger: the whole line that went to the LLM is emphasized */
+.entry--wake {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* stop: just the stop token is marked (see .stop-token), line stays subtle */
+.entry--stop { box-shadow: inset 3px 0 0 var(--err); }
+.stop-token {
+  background: color-mix(in srgb, var(--err) 30%, transparent);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 .25em;
+  font-weight: 700;
+}
+
+/* meta badges (wake/stop/interrupt markers) */
+.badge {
+  font-size: .68rem;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  width: max-content;
+}
+.badge-wake { color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.badge-stop { color: var(--err); background: color-mix(in srgb, var(--err) 18%, transparent); }
+.badge-marker { color: var(--text-dim); background: var(--bg-line); text-transform: uppercase; letter-spacing: .4px; }
+
+/* per-entry debug footer (STT diagnostics / TTS lifecycle) */
+.entry-debug {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  font-size: .72rem;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
 
 /* ── jump-to-latest ──────────────────────────────────────────────────────── */
 .jump-latest {

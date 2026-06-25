@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { sessions, ensureSession, dropSession } from '../src/state.js';
-import { buildSnapshot, listSessions, newestActiveSessionId } from '../src/transcriptView.js';
+import { buildSnapshot, buildVoice, listSessions, newestActiveSessionId } from '../src/transcriptView.js';
 import { publishEntry, subscribeEntries } from '../src/liveBus.js';
 
 const SID = '1778422813219';
@@ -76,6 +76,46 @@ test('listSessions / newestActiveSessionId reflect the RAM map', () => {
   assert.ok(ids.includes('100') && ids.includes('200'));
   assert.ok(['100', '200'].includes(newestActiveSessionId()));
   dropSession('100'); dropSession('200');
+});
+
+test('buildVoice reports live presence from the in-RAM session', () => {
+  const s = ensureSession(SID);
+  s.voice.state = 'occupied';
+  s.voice.members.set('111', 'Greta');
+  s.voice.members.set('222', 'Nogâr');
+  const v = buildVoice(SID);
+  assert.equal(v.connected, true);
+  assert.equal(v.populated, true);
+  assert.equal(v.members.length, 2);
+  assert.ok(v.members.some((m) => m.label === 'Greta'));
+});
+
+test('buildVoice reports "alone" as connected-but-not-populated', () => {
+  const s = ensureSession(SID);
+  s.voice.state = 'alone';
+  const v = buildVoice(SID);
+  assert.equal(v.connected, true);
+  assert.equal(v.populated, false);
+});
+
+test('buildVoice falls back to JSONL for an ended session (not connected)', () => {
+  // No RAM session: replay voice events from a log.
+  writeFileSync(join(dir, `session_${SID}.jsonl`), [
+    JSON.stringify({ type: 'voice_state', tsMs: 1, sessionId: SID, state: 'joined' }),
+    JSON.stringify({ type: 'voice_member', tsMs: 2, sessionId: SID, userId: '111', displayName: 'Greta', state: 'join' }),
+    JSON.stringify({ type: 'voice_member', tsMs: 3, sessionId: SID, userId: '222', displayName: 'Nogâr', state: 'join' }),
+    JSON.stringify({ type: 'voice_member', tsMs: 4, sessionId: SID, userId: '111', displayName: 'Greta', state: 'leave' }),
+  ].join('\n') + '\n');
+  const v = buildVoice(SID);
+  assert.equal(v.connected, false, 'ended session: bot not currently connected');
+  assert.equal(v.members.length, 1, 'Greta left, only Nogâr remains');
+  assert.equal(v.members[0].label, 'Nogâr');
+});
+
+test('buildSnapshot includes a voice block', () => {
+  const snap = buildSnapshot(SID);
+  assert.ok(snap.voice, 'voice present');
+  assert.ok(Array.isArray(snap.voice.members));
 });
 
 test('liveBus publishes to subscribers filtered by sessionId string', () => {

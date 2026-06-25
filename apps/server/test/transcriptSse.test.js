@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { registerTranscriptRoutes } from '../src/transcriptApi.js';
-import { publishEntry } from '../src/liveBus.js';
+import { publishEntry, publishPresence } from '../src/liveBus.js';
+import { ensureSession, dropSession } from '../src/state.js';
 
 const SID = '999000111222';
 let server, base, dir;
@@ -74,6 +75,25 @@ test('SSE sends a snapshot then a live entry published to the bus', async () => 
   assert.ok(entry, 'live entry received');
   assert.equal(entry.data.label, 'Greta');
   assert.equal(entry.data.meta.noSpeechProb, 0.03);
+});
+
+test('SSE streams a presence event when voice state changes', async () => {
+  const url = `${base}/transcript/live?sessionId=${SID}`;
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'presence'));
+  setTimeout(() => {
+    const s = ensureSession(SID);
+    s.voice.state = 'occupied';
+    s.voice.members.set('111', 'Greta');
+    publishPresence(SID);
+  }, 200);
+
+  const events = await got;
+  const presence = events.find((e) => e.event === 'presence');
+  assert.ok(presence, 'presence event received');
+  assert.equal(presence.data.connected, true);
+  assert.equal(presence.data.populated, true);
+  assert.ok(presence.data.members.some((m) => m.label === 'Greta'));
+  dropSession(SID);
 });
 
 test('SSE ignores entries for a different session', async () => {

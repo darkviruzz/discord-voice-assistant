@@ -9,9 +9,54 @@
 // UI can show what was folded away.
 
 import { readSessionEvents } from './sessionEvents.js';
-import { buildModelFromEvents } from './finalize/merge.js';
+import { buildModelFromEvents, speakerLabel } from './finalize/merge.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { sessions } from './state.js';
+
+// States in which the bot is actually sitting in the voice channel.
+const CONNECTED_STATES = new Set(['joined', 'occupied', 'alone']);
+// …and additionally has humans present (not sitting alone).
+const POPULATED_STATES = new Set(['joined', 'occupied']);
+
+// Current voice-channel presence for a session. Prefers the authoritative
+// in-RAM state (live), and falls back to replaying voice_state/voice_member
+// from the JSONL for sessions no longer in RAM (where the bot is, by
+// definition, not currently connected).
+export function buildVoice(sessionId) {
+  const sid = String(sessionId);
+  const session = sessions.get(toBig(sid));
+  const speakerMap = loadSpeakerMap(session?.guildId ?? null);
+  const label = (userId, name) => speakerLabel(userId, name, speakerMap);
+
+  if (session?.voice) {
+    const v = session.voice;
+    return {
+      state: v.state,
+      connected: CONNECTED_STATES.has(v.state),
+      populated: POPULATED_STATES.has(v.state),
+      members: [...v.members.entries()].map(([userId, name]) => ({ userId, label: label(userId, name) })),
+    };
+  }
+
+  // Cold/ended session: reconstruct from the log; bot is not connected now.
+  const { events } = readSessionEvents(sid);
+  const members = new Map();
+  let state = null;
+  for (const e of events) {
+    if (e?.type === 'voice_member' && e.userId != null) {
+      if (e.state === 'leave') members.delete(String(e.userId));
+      else members.set(String(e.userId), e.displayName ?? null);
+    } else if (e?.type === 'voice_state' && e.state) {
+      state = e.state;
+    }
+  }
+  return {
+    state,
+    connected: false,
+    populated: false,
+    members: [...members.entries()].map(([userId, name]) => ({ userId, label: label(userId, name) })),
+  };
+}
 
 function toBig(sessionId) {
   try { return BigInt(sessionId); } catch { return null; }
@@ -61,6 +106,7 @@ export function buildSnapshot(sessionId) {
     entries,
     summary: session?.liveContext?.summary || '',
     participants: model.participants || [],
+    voice: buildVoice(sid),
     guildName: session?.guildName ?? null,
     channelName: session?.channelName ?? null,
     active: !!session,

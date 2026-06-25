@@ -7,7 +7,8 @@ import { finalizeSession } from './finalize/index.js';
 import { loadSpeakerMap, setSpeakerMapping } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
-import { ensureSession, dropSession } from './state.js';
+import { ensureSession, dropSession, sessions } from './state.js';
+import { publishPresence } from './liveBus.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext } from './rollingSummary.js';
 import { readSessionEvents } from './sessionEvents.js';
@@ -304,6 +305,16 @@ export function initControlWSS({ bearer } = {}) {
               logTranscriptEvent(msg.sessionId, 'voice_state', { state });
               autoTimer.notify(msg.sessionId, state);
             }
+            // Mirror onto the session so the transcript UI can show bot presence.
+            {
+              const sess = sessions.get(BigInt(msg.sessionId));
+              if (sess) {
+                sess.voice.state = state;
+                sess.voice.updatedAt = Date.now();
+                if (state === 'left') sess.voice.members.clear();
+                publishPresence(msg.sessionId);
+              }
+            }
             onVoiceState?.(BigInt(msg.sessionId), state);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;
@@ -316,11 +327,24 @@ export function initControlWSS({ bearer } = {}) {
               return;
             }
             if (msg.userId != null && !autoTimer.isFinalizing(msg.sessionId)) {
+              const memberState = msg.state === 'join' ? 'join' : 'leave';
               logTranscriptEvent(msg.sessionId, 'voice_member', {
                 userId: String(msg.userId),
                 displayName: typeof msg.displayName === 'string' ? msg.displayName : null,
-                state: msg.state === 'join' ? 'join' : 'leave',
+                state: memberState,
               });
+              // Mirror current membership onto the session for the transcript UI.
+              const sess = sessions.get(BigInt(msg.sessionId));
+              if (sess) {
+                const uid = String(msg.userId);
+                if (memberState === 'join') {
+                  sess.voice.members.set(uid, typeof msg.displayName === 'string' ? msg.displayName : null);
+                } else {
+                  sess.voice.members.delete(uid);
+                }
+                sess.voice.updatedAt = Date.now();
+                publishPresence(msg.sessionId);
+              }
             }
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_member' });
             return;

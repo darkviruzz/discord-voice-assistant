@@ -11,7 +11,8 @@
   <header class="topbar">
     <div class="topbar-left">
       <h1>Live-Transkript</h1>
-      <span id="status" class="status status--connecting" title="Verbindung">●&nbsp;verbinde…</span>
+      <span id="voice" class="voice voice--unknown" title="Voice-Status">🎙 unbekannt</span>
+      <span id="status" class="status status--connecting" title="Datenverbindung (SSE/Polling)">●&nbsp;verbinde…</span>
     </div>
     <div class="topbar-right">
       <label class="field">
@@ -24,6 +25,11 @@
       </label>
     </div>
   </header>
+
+  <details id="members-box" class="members" hidden>
+    <summary><span id="members-count">Im Voice-Channel</span></summary>
+    <ul id="members-list" class="members-list"></ul>
+  </details>
 
   <details id="summary-box" class="summary" hidden>
     <summary>Zusammenfassung (gefaltete ältere Turns)</summary>

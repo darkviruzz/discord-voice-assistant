@@ -90,8 +90,8 @@ body {
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
 }
-.topbar-left { display: flex; align-items: baseline; gap: 12px; }
-.topbar-right { display: flex; align-items: center; gap: 16px; }
+.topbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.topbar-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .topbar h1 { font-size: 1.05rem; margin: 0; font-weight: 700; letter-spacing: .2px; }
 
 .status { font-size: .82rem; color: var(--text-dim); white-space: nowrap; }
@@ -99,6 +99,48 @@ body {
 .status--live { color: var(--ok); }
 .status--polling { color: var(--accent); }
 .status--error { color: var(--err); }
+
+/* voice-channel / bot presence — independent of the data connection above */
+.voice {
+  font-size: .82rem;
+  white-space: nowrap;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-line);
+  color: var(--text-dim);
+}
+.voice--connected { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.voice--alone { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+.voice--offline { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.voice--unknown { color: var(--text-dim); }
+
+/* members panel */
+.members {
+  max-width: var(--maxw);
+  width: 100%;
+  margin: 12px auto 0;
+  padding: 0 16px;
+}
+.members > summary { cursor: pointer; color: var(--text-dim); font-size: .85rem; }
+.members-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.members-list li {
+  font-size: .85rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--bg-line);
+  border: 1px solid var(--border);
+  /* name color set inline per speaker (hue) from JS */
+}
+.members-list li.empty { font-weight: 400; color: var(--text-dim); background: none; border: none; padding-left: 0; }
 
 .field { display: flex; align-items: center; gap: 6px; font-size: .82rem; color: var(--text-dim); }
 .field select {
@@ -219,4 +261,12 @@ body.debug .entry { outline: 1px dashed var(--border); }
 @media (max-width: 560px) {
   .entry { grid-template-columns: 1fr; gap: 4px; }
   .entry-meta { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+  /* Stack the bar so the Debug toggle wraps onto its own line instead of
+     being clipped off the right edge on phones. */
+  .topbar { flex-direction: column; align-items: stretch; gap: 8px; }
+  .topbar-right { width: 100%; justify-content: space-between; gap: 10px; }
+  .topbar-right .field { flex: 1; min-width: 0; }
+  .topbar-right .field select { flex: 1; max-width: none; min-width: 0; }
+  .toggle { flex: 0 0 auto; }
 }

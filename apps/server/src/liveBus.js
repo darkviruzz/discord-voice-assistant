@@ -33,3 +33,16 @@ export function subscribeEntries(handler) {
   bus.on('entry', handler);
   return () => bus.off('entry', handler);
 }
+
+// Voice-presence changed for a session (bot joined/left, member in/out). Carries
+// only the sessionId; subscribers rebuild the current presence themselves (the
+// authoritative state lives on the session object, not in the event).
+export function publishPresence(sessionId) {
+  if (sessionId == null) return;
+  bus.emit('presence', { sessionId: String(sessionId) });
+}
+
+export function subscribePresence(handler) {
+  bus.on('presence', handler);
+  return () => bus.off('presence', handler);
+}

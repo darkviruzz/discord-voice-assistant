@@ -15,12 +15,16 @@
   const $ = (sel) => document.querySelector(sel);
   const els = {
     status: $('#status'),
+    voice: $('#voice'),
     select: $('#session-select'),
     debug: $('#debug-toggle'),
     transcript: $('#transcript'),
     emptyHint: $('#empty-hint'),
     summaryBox: $('#summary-box'),
     summaryText: $('#summary-text'),
+    membersBox: $('#members-box'),
+    membersCount: $('#members-count'),
+    membersList: $('#members-list'),
     jump: $('#jump-latest'),
   };
 
@@ -169,6 +173,7 @@
 
   function renderSnapshot(snap) {
     clearTranscript();
+    renderVoice(snap.voice);
     if (snap.summary && snap.summary.trim()) {
       els.summaryText.textContent = snap.summary;
       els.summaryBox.hidden = false;
@@ -194,10 +199,46 @@
     els.jump.hidden = true;
   }
 
-  // ── status ──────────────────────────────────────────────────────────────────
+  // ── status (data transport: SSE / polling) ──────────────────────────────────
   function setStatus(kind, text) {
     els.status.className = `status status--${kind}`;
     els.status.innerHTML = `●&nbsp;${text}`;
+  }
+
+  // ── voice-channel / bot presence (independent of the transport above) ────────
+  function renderVoice(voice) {
+    if (!voice) {
+      els.voice.className = 'voice voice--unknown';
+      els.voice.textContent = '🎙 unbekannt';
+      els.membersBox.hidden = true;
+      return;
+    }
+    const n = (voice.members || []).length;
+    if (voice.populated) {
+      els.voice.className = 'voice voice--connected';
+      els.voice.textContent = `🎙 Rabenauge verbunden · ${n} im Channel`;
+    } else if (voice.connected) {
+      els.voice.className = 'voice voice--alone';
+      els.voice.textContent = '🎙 Rabenauge verbunden · allein';
+    } else {
+      els.voice.className = 'voice voice--offline';
+      els.voice.textContent = '🎙 Rabenauge nicht verbunden';
+    }
+
+    // Members panel (collapsible/hideable). Shown whenever anyone is/was listed.
+    els.membersList.innerHTML = '';
+    if (n === 0) {
+      els.membersBox.hidden = true;
+      return;
+    }
+    els.membersBox.hidden = false;
+    els.membersCount.textContent = `Im Voice-Channel (${n})`;
+    for (const m of voice.members) {
+      const li = document.createElement('li');
+      li.textContent = m.label || '?';
+      li.style.color = speakerColor(m.label || '?');
+      els.membersList.appendChild(li);
+    }
   }
 
   // ── transport: SSE primary ──────────────────────────────────────────────────
@@ -230,11 +271,14 @@
 
     es.addEventListener('snapshot', (ev) => {
       state.sseFailures = 0;
-      setStatus('live', 'live (SSE)');
+      setStatus('live', 'SSE');
       try { renderSnapshot(JSON.parse(ev.data)); } catch {}
     });
     es.addEventListener('entry', (ev) => {
       try { appendEntry(JSON.parse(ev.data)); } catch {}
+    });
+    es.addEventListener('presence', (ev) => {
+      try { renderVoice(JSON.parse(ev.data)); } catch {}
     });
     es.addEventListener('error', (ev) => {
       // Custom server 'error' event carries data; transport errors do not.
@@ -259,7 +303,7 @@
       const res = await fetch(`${baseUrl()}/snapshot/${encodeURIComponent(state.sessionId)}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const snap = await res.json();
-      setStatus('polling', 'live (Polling)');
+      setStatus('polling', 'Polling');
       renderSnapshot(snap);
     } catch (e) {
       setStatus('error', 'Polling fehlgeschlagen');

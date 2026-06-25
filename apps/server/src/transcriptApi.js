@@ -15,8 +15,8 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { debug } from './logger.js';
-import { subscribeEntries } from './liveBus.js';
-import { buildSnapshot, newestActiveSessionId, listSessions } from './transcriptView.js';
+import { subscribeEntries, subscribePresence } from './liveBus.js';
+import { buildSnapshot, buildVoice, newestActiveSessionId, listSessions } from './transcriptView.js';
 import { makeTranscriptAuth } from './transcriptAuth.js';
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
@@ -73,10 +73,15 @@ function handleLive(req, res) {
   // aren't lost; buffer them, then replay only those newer than the snapshot.
   const pending = [];
   let ready = false;
-  const unsub = subscribeEntries((msg) => {
+  const unsubEntries = subscribeEntries((msg) => {
     if (msg.sessionId !== sid) return;
     if (!ready) { pending.push(msg); return; }
     send('entry', toClientEntry(msg.entry, msg.meta));
+  });
+  // Voice presence changes (bot join/leave, members in/out) for this session.
+  const unsubPresence = subscribePresence((msg) => {
+    if (msg.sessionId !== sid) return;
+    try { send('presence', buildVoice(sid)); } catch {}
   });
 
   try {
@@ -99,7 +104,7 @@ function handleLive(req, res) {
   const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch {} }, SSE_HEARTBEAT_MS);
   hb.unref?.();
 
-  req.on('close', () => { clearInterval(hb); unsub(); });
+  req.on('close', () => { clearInterval(hb); unsubEntries(); unsubPresence(); });
 }
 
 // Register all /transcript routes on the given Express app. Optional Basic auth

@@ -56,6 +56,20 @@ Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimm
   - Timeout-Handling: nach 30 s ohne Server → Offline-Cache-Modus, Hinweis im Chat
   - Macht Feature `Autostart via Task Scheduler` (5.1) damit weitgehend obsolet
 
+- [ ] **SSH-Host-Erreichbarkeit vor Auto-Start prüfen** — aktuell wird `SERVER_START_CMD` (SSH) ausgeführt und dann 30 s auf den Server gewartet, auch wenn der SSH-Zielhost gar nicht im Netz ist (z. B. PC aus). Das führt zu unnötigem Warten.
+  - **Neue Logik in `apps/bot/src/serverAutoStart.js`**: vor `runStartCmd()` einen schnellen TCP-Check auf Port 22 des SSH-Hosts durchführen (Host aus `SERVER_SSH_HOST` oder aus `SERVER_START_CMD` parsen — einfachere Variante: neue Env-Var `SERVER_SSH_HOST=192.168.20.101`)
+  - Wenn Port 22 nicht erreichbar: sofort `'no-route'` zurückgeben, **kein** `runStartCmd()`, kein 30-s-Warten
+  - Discord-Feedback: „Server-PC nicht erreichbar (offline?) — trete ohne Server bei"
+  - Wenn Port 22 erreichbar aber Server-Port noch offline: wie bisher SSH-Befehl + Poll
+  - **Auto-Reconnect ist bereits implementiert** (`apps/bot/src/transport/control.js` hat Exponential-Backoff-Reconnect) — wenn der Server später doch hochkommt, verbindet sich der Bot automatisch ohne erneutes `/join`
+
+- [ ] **`/start-server`-Command** — Server unabhängig von `/join` starten (z. B. vor der Session vorab hochfahren).
+  - Neuer Slash-Command `start-server` in `apps/bot/src/commands.js`
+  - Selbe Logik wie der Auto-Start-Pfad in `/join`: TCP-Probe → SSH-Erreichbarkeit → `runStartCmd()` → Poll mit Discord-Feedback
+  - Kein Voice-Join — nur den Server hochfahren, Bot bleibt aus dem Channel
+  - Wenn Server bereits online: „Server ist bereits erreichbar." zurückgeben
+  - Design-Richtlinie beachten: `/start-server` als eigener Command akzeptabel da funktional klar getrennt von `/join` und selten genutzt; alternativ als `/join --no-voice` oder Subcommand überdenken
+
 - [x] **Session-Log enriched (JSONL Schema v1)** — bestehender `transcripts/session_*.jsonl` wird angereichert.
   - Common fields: `tsMs`, `type`, `sessionId`
   - `session_meta` wird einmal pro Session geloggt: Discord-Kontext, Bot-/Server-Version, LLM-/STT-/TTS-Konfig, Wake-Word, Stop-Phrases, vorbereitetes `users`-Mapping

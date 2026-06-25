@@ -67,18 +67,20 @@ Aufruf im Browser: `http://<server>:7440/transcript/`
 * **Auth**: standardmäßig HTTP-Basic mit `greyhawk` / `greyhawk` (per `TRANSCRIPT_UI_*` änderbar, mit `TRANSCRIPT_UI_AUTH=off` im vertrauten LAN abschaltbar).
 * **Live-Update**: primär über Server-Sent Events (`GET /transcript/live`), automatischer Fallback auf Polling (`GET /transcript/snapshot/:id`), wenn SSE wiederholt scheitert.
 * **History**: beim Seitenaufruf wird das vollständige Transkript aus dem JSONL-Log rekonstruiert (überlebt Reloads mitten in der Session und das Wegfalten älterer Turns in die rollende Zusammenfassung). Die gefalteten Turns sind als Zusammenfassung einklappbar sichtbar.
-* **Session**: ohne `?sessionId=` wird die neueste aktive Session automatisch gewählt; ein Dropdown listet die aktiven Sessions.
+* **Session-Auswahl**: ohne `?sessionId=` wird die neueste aktive Session automatisch gewählt. Das Dropdown zeigt standardmäßig nur **aktive** Sessions; die Checkbox **„vergangene"** ergänzt die beendeten Sessions aus dem JSONL-Log. Sessions werden als lesbarer Zeitstempel (`YYYY-MM-DD HH:MM`, abgeleitet aus der Session-ID = Epoch-ms) angezeigt; die Roh-ID bleibt als Tooltip/in der URL.
+* **Voice-Status & Teilnehmer**: ein Pill im Header zeigt, ob der Bot im Voice-Channel ist (verbunden / allein / nicht verbunden) — unabhängig von der Datenverbindung (SSE/Polling). Ein Member-Popover im Header listet die aktuell anwesenden Sprecher (live über `presence`-Events).
+* **Wake-Word-/Stop-Markierung**: Zeilen, die Rabenauge ausgelöst haben, werden komplett hervorgehoben (gesamter an das LLM gesendeter Text + „→ Rabenauge"-Badge). Stop-Kommandos markieren nur das Stop-Token. Live nachgereicht über `annotation`-Events (Erkennung läuft erst nach dem Append).
 * **Darstellung**: sinnvolle Markdown-Defaults (Fett/Kursiv/Code/Listen/Überschriften), farbige Sprechernamen (deterministischer Farbton pro Name, Rabenauge in der Akzentfarbe), Roboto-Schrift. Alle Stil-Variablen liegen als CSS-Custom-Properties in `style.css` und lassen sich offline feintunen.
-* **Debug-Modus** (`?debug=1` oder Checkbox): zeigt Timestamps, Event-Art (`user`/`assistant`) und `no_speech_prob` je Utterance.
+* **Debug-Modus** (`?debug=1` oder Checkbox): Timestamps + Event-Art je Zeile; pro Utterance STT-Diagnostik (`no_speech_prob`, Dauer, Wortzahl, Chunks/Splits, Provider); pro Antwort TTS-Lifecycle (gesprochen/abgebrochen/Fehler + Dauer, Modell, Speaker-ID, Interrupts). Zusätzlich ein einklappbarer **Session-Header** aus `session_meta` (Channel, Start, Wake-Word, Stop-Phrases, LLM-/STT-/TTS-Modelle, Versionen, Clock-Offset). Alles aus dem JSONL → funktioniert live und für vergangene Sessions.
 
 Endpunkte (alle unter `/transcript`, hinter der Basic-Auth):
 
 | Endpunkt | Zweck |
 |---|---|
 | `GET /transcript/` | Statische UI (HTML/CSS/JS). |
-| `GET /transcript/live?sessionId=<id>` | SSE-Stream: erst ein `snapshot`-Event (volle History), dann `entry`-Events live. Ohne `sessionId` → neueste aktive Session. |
+| `GET /transcript/live?sessionId=<id>` | SSE-Stream: `snapshot` (volle History), dann live `entry` / `presence` / `annotation`. Ohne `sessionId` → neueste aktive Session. |
 | `GET /transcript/snapshot/:id` | JSON-Snapshot der vollen History (Polling-Fallback; funktioniert auch für bereits beendete Sessions direkt aus dem JSONL). |
-| `GET /transcript/sessions` | JSON-Liste der aktiven In-RAM-Sessions für die Auswahl. |
+| `GET /transcript/sessions[?all=1]` | JSON-Liste der aktiven In-RAM-Sessions; mit `?all=1` zusätzlich die vergangenen Sessions aus dem Log-Verzeichnis. |
 
 ## Audio-Archiv
 

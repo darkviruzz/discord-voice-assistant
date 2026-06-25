@@ -159,6 +159,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Useful für Debugging *und* als Spieler-Begleit-Display während der Session
   - Reines Read-Only, kein User-Input
   - Renderer kann den Markdown direkt anzeigen, oder strukturiert mit Sprecher-Spalten / Timestamps für Debug-Modus
+  - **Erweiterungen (1.5.1/1.5.2)**: Voice-Status-Pill + Member-Popover im Header (live `presence`); Session-Picker mit lesbaren Zeitstempeln + Checkbox für vergangene Sessions (`?all=1`, JSONL-Scan); Wake-Word-Markierung der ganzen getriggerten Zeile + Stop-Token-Markierung (live via `annotation`); Debug-Modus erweitert um STT-Diagnostik, TTS-Lifecycle/Interrupts und einklappbaren `session_meta`-Header; Mobile-Topbar-Fix.
 
 ---
 

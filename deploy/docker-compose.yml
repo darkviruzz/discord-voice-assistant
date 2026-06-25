@@ -16,6 +16,10 @@
 
 services:
   whisper:
+    # Pre-built image from the registry (CI publishes it). On the target host:
+    #   docker compose pull && docker compose up -d
+    # `build:` is used by CI / local builds and tags the result as `image:`.
+    image: ${REGISTRY:-ghcr.io/darkviruzz/discord-voice-assistant}/va-whisper:${IMAGE_TAG:-latest}
     # CUDA build from source (deploy/whisper/Dockerfile). To use the official
     # image instead, comment `build:` and uncomment the image/entrypoint block.
     build:
@@ -67,6 +71,7 @@ services:
               capabilities: [gpu]
 
   piper:
+    image: ${REGISTRY:-ghcr.io/darkviruzz/discord-voice-assistant}/va-piper:${IMAGE_TAG:-latest}
     build:
       context: ../services/piper
       dockerfile: Dockerfile
@@ -89,6 +94,7 @@ services:
               capabilities: [gpu]
 
   server:
+    image: ${REGISTRY:-ghcr.io/darkviruzz/discord-voice-assistant}/va-server:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: apps/server/Dockerfile

@@ -195,7 +195,7 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
       if (e.type === 'assistant_response') key = `__solo_${solo++}`;
       else continue;
     }
-    const rec = turns.get(key) || { pauses: [], resumes: [] };
+    const rec = turns.get(key) || { pauses: [], resumes: [], turnId: key };
     if (e.type === 'playback_paused') rec.pauses.push(e);
     else if (e.type === 'playback_resumed') rec.resumes.push(e);
     else rec[e.type] = e;
@@ -211,6 +211,8 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
   for (const rec of ordered) {
     const full = String(rec.assistant_response.text || '').trim();
     if (!full) continue;
+    // Real turnId for debug correlation (null for synthetic text-reply turns).
+    const turnId = (rec.turnId && !String(rec.turnId).startsWith('__solo_')) ? rec.turnId : null;
     const startWall = norm(rec.tts_start?.tsMs ?? rec.assistant_response.tsMs) ?? 0;
     const durationMs = rec.tts_done?.durationMs || estimateSpeechMs(full);
     const cut = charCutter(full, durationMs);
@@ -221,7 +223,7 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
     if (pauses.length === 0) {
       const played = rec.assistant_response_played;
       const text = (played && played.truncated && played.text) ? String(played.text).trim() : full;
-      out.push({ type: 'assistant', label: assistantName, startMs: startWall, endMs: startWall + estimateSpeechMs(text), text, words: null, forceMarker: null, interrupted: !!(played && played.truncated) });
+      out.push({ type: 'assistant', label: assistantName, startMs: startWall, endMs: startWall + estimateSpeechMs(text), text, words: null, forceMarker: null, interrupted: !!(played && played.truncated), turnId });
       continue;
     }
 
@@ -234,7 +236,7 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
       const pausePos = Number(pauses[k].msPlayed) || 0;
       const text = full.slice(cut(segStartPos), cut(pausePos)).trim();
       const endWall = norm(pauses[k].tsMs) ?? (segStartWall + (pausePos - segStartPos));
-      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: endWall, text, words: null, forceMarker: k > 0 ? 'weiter' : null });
+      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: endWall, text, words: null, forceMarker: k > 0 ? 'weiter' : null, turnId });
 
       // Weave in the interrupting user utterance.
       const interrupterId = pauses[k].interruptedByUserId != null ? String(pauses[k].interruptedByUserId) : null;
@@ -258,7 +260,7 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
     // Final segment to the end, when playback resumed after the last pause.
     if (resumes.length >= pauses.length) {
       const text = full.slice(cut(segStartPos)).trim();
-      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: segStartWall + estimateSpeechMs(text), text, words: null, forceMarker: 'weiter' });
+      if (text) push({ type: 'assistant', label: assistantName, startMs: segStartWall, endMs: segStartWall + estimateSpeechMs(text), text, words: null, forceMarker: 'weiter', turnId });
     }
   }
 

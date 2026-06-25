@@ -15,8 +15,8 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { debug } from './logger.js';
-import { subscribeEntries, subscribePresence } from './liveBus.js';
-import { buildSnapshot, buildVoice, newestActiveSessionId, listSessions } from './transcriptView.js';
+import { subscribeEntries, subscribePresence, subscribeAnnotation } from './liveBus.js';
+import { buildSnapshot, buildVoice, newestActiveSessionId, listSessions, listSessionsOnDisk } from './transcriptView.js';
 import { makeTranscriptAuth } from './transcriptAuth.js';
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
@@ -38,8 +38,15 @@ function toClientEntry(entry, meta) {
   return out;
 }
 
-function handleSessions(_req, res) {
-  res.json({ sessions: listSessions() });
+// Active (in-RAM) sessions by default; `?all=1` additionally returns the past
+// sessions found on disk (those not already active), so the UI can offer them.
+function handleSessions(req, res) {
+  const active = listSessions();
+  const wantAll = req.query.all === '1' || req.query.all === 'true';
+  if (!wantAll) { res.json({ sessions: active }); return; }
+  const activeIds = new Set(active.map((s) => s.sessionId));
+  const past = listSessionsOnDisk().filter((s) => !activeIds.has(s.sessionId));
+  res.json({ sessions: active, past });
 }
 
 function handleSnapshot(req, res) {
@@ -83,6 +90,12 @@ function handleLive(req, res) {
     if (msg.sessionId !== sid) return;
     try { send('presence', buildVoice(sid)); } catch {}
   });
+  // Retro-classification of an already-sent line (wake-word/stop detected after
+  // the utterance was appended). Client patches the line by startMs.
+  const unsubAnnotation = subscribeAnnotation((msg) => {
+    if (msg.sessionId !== sid) return;
+    send('annotation', msg.annotation);
+  });
 
   try {
     const snap = buildSnapshot(sid);
@@ -104,7 +117,7 @@ function handleLive(req, res) {
   const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch {} }, SSE_HEARTBEAT_MS);
   hb.unref?.();
 
-  req.on('close', () => { clearInterval(hb); unsubEntries(); unsubPresence(); });
+  req.on('close', () => { clearInterval(hb); unsubEntries(); unsubPresence(); unsubAnnotation(); });
 }
 
 // Register all /transcript routes on the given Express app. Optional Basic auth

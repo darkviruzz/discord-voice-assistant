@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { sessions, ensureSession, dropSession } from '../src/state.js';
-import { buildSnapshot, buildVoice, listSessions, newestActiveSessionId } from '../src/transcriptView.js';
+import { buildSnapshot, buildVoice, listSessions, listSessionsOnDisk, newestActiveSessionId } from '../src/transcriptView.js';
 import { publishEntry, subscribeEntries } from '../src/liveBus.js';
 
 const SID = '1778422813219';
@@ -45,10 +45,10 @@ test('buildSnapshot returns entries sorted by startMs from the JSONL', () => {
   assert.equal(snap.entries[0].kind, 'user');
 });
 
-test('buildSnapshot attaches no_speech_prob as debug meta for user spans', () => {
+test('buildSnapshot attaches STT diagnostics (incl. no_speech_prob) to user spans', () => {
   const snap = buildSnapshot(SID);
-  assert.equal(snap.entries[0].meta.noSpeechProb, 0.05);
-  assert.equal(snap.entries[1].meta.noSpeechProb, 0.02);
+  assert.equal(snap.entries[0].stt.noSpeechProb, 0.05);
+  assert.equal(snap.entries[1].stt.noSpeechProb, 0.02);
 });
 
 test('buildSnapshot surfaces the rolling summary from the in-RAM session', () => {
@@ -76,6 +76,44 @@ test('listSessions / newestActiveSessionId reflect the RAM map', () => {
   assert.ok(ids.includes('100') && ids.includes('200'));
   assert.ok(['100', '200'].includes(newestActiveSessionId()));
   dropSession('100'); dropSession('200');
+});
+
+test('buildSnapshot flags wake/stop and surfaces session_meta + TTS turn debug', () => {
+  writeFileSync(join(dir, `session_${SID}.jsonl`), [
+    JSON.stringify({ tsMs: 900, type: 'session_meta', sessionId: SID, guildName: 'Greyhawk', channelName: 'Tavern', wakeword: { word: 'Rabenauge' }, stopPhrases: ['stop'] }),
+    JSON.stringify({ tsMs: 1000, type: 'user_transcript', sessionId: SID, userId: '222', userDisplayName: 'Nogâr', startTsMs: 1000, durationMs: 1000, text: 'Hey Rabenauge, wer ist Kelthur?', chunks: ['x'], stt: { noSpeechProbAvg: 0.05 } }),
+    JSON.stringify({ tsMs: 1100, type: 'wakeword_query', sessionId: SID, userId: '222', query: 'wer ist Kelthur?' }),
+    JSON.stringify({ tsMs: 1500, type: 'assistant_response', sessionId: SID, turnId: 't1', userId: '222', text: 'Kelthur war ein Söldner.', speakerId: 0, model: 'emotional' }),
+    JSON.stringify({ tsMs: 1550, type: 'tts_start', sessionId: SID, id: 'a1', turnId: 't1', model: 'emotional', speakerId: 0 }),
+    JSON.stringify({ tsMs: 3000, type: 'tts_done', sessionId: SID, id: 'a1', turnId: 't1', durationMs: 1800 }),
+    JSON.stringify({ tsMs: 4000, type: 'user_transcript', sessionId: SID, userId: '111', userDisplayName: 'Greta', startTsMs: 4000, durationMs: 500, text: 'Stop', chunks: ['Stop'], stt: { noSpeechProbAvg: 0.4 } }),
+    JSON.stringify({ tsMs: 4100, type: 'stop_command', sessionId: SID, userId: '111', text: 'Stop' }),
+  ].join('\n') + '\n');
+
+  const snap = buildSnapshot(SID);
+  const wake = snap.entries.find((e) => e.text.startsWith('Hey Rabenauge'));
+  const stop = snap.entries.find((e) => e.text === 'Stop');
+  const reply = snap.entries.find((e) => e.kind === 'assistant');
+
+  assert.equal(wake.wakeDetected, true);
+  assert.equal(wake.stt.noSpeechProb, 0.05); // stt diagnostics attached
+  assert.equal(stop.stopDetected, true);
+  assert.equal(reply.turn.ttsStatus, 'done');
+  assert.equal(reply.turn.ttsModel, 'emotional');
+  assert.equal(reply.turn.ttsDurationMs, 1800);
+  assert.equal(snap.sessionMeta.wakeword.word, 'Rabenauge');
+  assert.equal(snap.startedAt, Number(SID));
+});
+
+test('listSessionsOnDisk lists past sessions from the log dir, newest first', () => {
+  const other = '1778100000000';
+  writeFileSync(join(dir, `session_${SID}.jsonl`), '{"type":"user_transcript","tsMs":1,"sessionId":"' + SID + '","userId":"1","text":"hi","startTsMs":1}\n');
+  writeFileSync(join(dir, `session_${other}.jsonl`), '{"type":"user_transcript","tsMs":1,"sessionId":"' + other + '","userId":"1","text":"alt","startTsMs":1}\n');
+  const list = listSessionsOnDisk();
+  const ids = list.map((s) => s.sessionId);
+  assert.ok(ids.includes(SID) && ids.includes(other));
+  assert.equal(list[0].sessionId, SID, 'newest (larger epoch id) first');
+  assert.equal(list.find((s) => s.sessionId === SID).startedAt, Number(SID));
 });
 
 test('buildVoice reports live presence from the in-RAM session', () => {

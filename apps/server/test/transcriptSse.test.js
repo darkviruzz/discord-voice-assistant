@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { registerTranscriptRoutes } from '../src/transcriptApi.js';
-import { publishEntry, publishPresence } from '../src/liveBus.js';
+import { publishEntry, publishPresence, publishAnnotation } from '../src/liveBus.js';
 import { ensureSession, dropSession } from '../src/state.js';
 
 const SID = '999000111222';
@@ -94,6 +94,22 @@ test('SSE streams a presence event when voice state changes', async () => {
   assert.equal(presence.data.populated, true);
   assert.ok(presence.data.members.some((m) => m.label === 'Greta'));
   dropSession(SID);
+});
+
+test('SSE streams an annotation (retro wake/stop marking)', async () => {
+  const url = `${base}/transcript/live?sessionId=${SID}`;
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'annotation'));
+  setTimeout(() => {
+    publishAnnotation(SID, { startMs: 1234, wakeDetected: true });
+    publishAnnotation('777', { startMs: 9, wakeDetected: true }); // other session, ignored
+  }, 200);
+
+  const events = await got;
+  const ann = events.find((e) => e.event === 'annotation');
+  assert.ok(ann, 'annotation received');
+  assert.equal(ann.data.startMs, 1234);
+  assert.equal(ann.data.wakeDetected, true);
+  assert.ok(!events.some((e) => e.event === 'annotation' && e.data.startMs === 9), 'foreign annotation must not leak');
 });
 
 test('SSE ignores entries for a different session', async () => {

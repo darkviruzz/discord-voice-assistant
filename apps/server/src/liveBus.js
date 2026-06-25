@@ -46,3 +46,17 @@ export function subscribePresence(handler) {
   bus.on('presence', handler);
   return () => bus.off('presence', handler);
 }
+
+// A live entry was retro-classified after it was first published — e.g. a
+// wake-word/stop was detected in it (detection runs AFTER the utterance is
+// appended). The annotation references the entry by startMs so the client can
+// patch the already-rendered line. { startMs, wakeDetected?, stopDetected? }.
+export function publishAnnotation(sessionId, annotation) {
+  if (sessionId == null || !annotation) return;
+  bus.emit('annotation', { sessionId: String(sessionId), annotation });
+}
+
+export function subscribeAnnotation(handler) {
+  bus.on('annotation', handler);
+  return () => bus.off('annotation', handler);
+}

@@ -9,7 +9,7 @@ import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
 import { appendLive, renderLiveContext, liveContextEnabled } from './liveContext.js';
-import { publishEntry } from './liveBus.js';
+import { publishEntry, publishAnnotation } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
 import { getCampaignContext } from './campaignContext.js';
 import { loadSpeakerMap } from './speakerMap.js';
@@ -605,6 +605,9 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     // Keep EVERY utterance in the live-transcript buffer (not just wake-word
     // queries) so the LLM sees the whole table conversation as context.
     const session = sessions.get(sessionId);
+    // startMs of the live entry for this utterance — reused below to annotate it
+    // (wake/stop) once detection has run. null when no entry was stored.
+    let liveEntryStartMs = null;
     if (session) {
       const label = speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId));
       const stored = appendLive(session, {
@@ -613,7 +616,10 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         startMs: metadata.startTsMs ?? Date.now(),
         kind: 'user',
       });
-      if (stored) publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
+      if (stored) {
+        liveEntryStartMs = stored.startMs;
+        publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
+      }
       maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
     }
 
@@ -635,6 +641,10 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
                      (!wr.detected && wordCount <= maxStopWordsWithoutWake() && isStopCommand(chunk));
 
       if (isStop) {
+        // Retro-mark the live line as a stop (detection runs after append).
+        if (liveEntryStartMs != null) {
+          publishAnnotation(sessionId, { startMs: liveEntryStartMs, stopDetected: true });
+        }
         handleStopCommand({
           sessionId,
           userId,
@@ -661,6 +671,10 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     const { query } = wakeResult;
     log('pipeline: wake word detected, query=', JSON.stringify(query));
+    // Retro-mark the live line as a wake-word trigger (whole utterance).
+    if (liveEntryStartMs != null) {
+      publishAnnotation(sessionId, { startMs: liveEntryStartMs, wakeDetected: true });
+    }
     logTranscriptEvent(sessionId, 'wakeword_query', {
       userId,
       userDisplayName: metadata.userDisplayName ?? null,

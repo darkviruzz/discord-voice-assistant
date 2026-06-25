@@ -137,10 +137,13 @@
     return `hsl(${hueFor(label)}, var(--speaker-sat), var(--speaker-light))`;
   }
   function pad2(n) { return String(n).padStart(2, '0'); }
-  function fmtTime(ms) {
+  function pad3(n) { return String(n).padStart(3, '0'); }
+  // hh:mm:ss, or hh:mm:ss.mmm with millisecond precision (debug).
+  function fmtTime(ms, withMs = false) {
     const d = new Date(Number(ms));
     if (Number.isNaN(d.getTime())) return '';
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    const base = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    return withMs ? `${base}.${pad3(d.getMilliseconds())}` : base;
   }
   // Human-readable session timestamp from the epoch-ms session id.
   function fmtDateTime(ms) {
@@ -172,7 +175,7 @@
 
     const time = document.createElement('span');
     time.className = 'entry-time';
-    time.textContent = state.debug ? `${fmtTime(entry.startMs)} · ${entry.startMs}` : fmtTime(entry.startMs);
+    time.textContent = fmtTime(entry.startMs, state.debug); // hh:mm:ss.mmm in debug
     meta.appendChild(time);
 
     if (state.debug) {

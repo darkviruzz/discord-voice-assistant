@@ -61,12 +61,14 @@
 
 * { box-sizing: border-box; }
 
-html, body {
-  margin: 0;
-  height: 100%;
-}
+html, body { margin: 0; }
 
 body {
+  /* min-height (not a fixed height:100%): a fixed body height clips the
+     sticky topbar's containing block to one viewport, so it scrolls away
+     once the transcript grows past it. min-height lets the box grow with
+     content and keeps the bar pinned throughout. */
+  min-height: 100vh;
   font-family: var(--font);
   background: var(--bg);
   color: var(--text);

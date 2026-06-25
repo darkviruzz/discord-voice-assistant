@@ -10,7 +10,8 @@ import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession, sessions } from './state.js';
 import { publishPresence } from './liveBus.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
-import { rebuildLiveContext } from './rollingSummary.js';
+import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
+import { appendLive } from './liveContext.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -396,7 +397,34 @@ export function initControlWSS({ bearer } = {}) {
             const text = typeof msg.text === 'string' && msg.text.trim()
               ? msg.text
               : defaultDebugTtsText();
-            streamTtsToSession(sid, text).catch((e) => warn('debug_tts failed:', e.message));
+            // This is Rabenauge speaking (e.g. the automatic join greeting), so
+            // record it in the transcript like any other reply: log it for the
+            // history/snapshot and append it to the live buffer for instant
+            // display. turnId ties the TTS lifecycle to the line (debug view).
+            const ttsTurnId = randomUUID();
+            logTranscriptEvent(sid, 'assistant_response', {
+              turnId: ttsTurnId,
+              userId: null,
+              userDisplayName: null,
+              source: 'auto',
+              query: null,
+              text,
+              speakerId: msg.speakerId ?? 0,
+              model: msg.model ?? null,
+              ttsRequested: true,
+            });
+            const greetSession = sessions.get(sid);
+            if (greetSession) {
+              const stored = appendLive(greetSession, {
+                label: process.env.WAKE_WORD ?? 'Rabenauge',
+                text,
+                startMs: Date.now(),
+                kind: 'assistant',
+              });
+              if (stored) publishEntry(sid, stored);
+              maybeFold(greetSession).catch((e) => warn('debug_tts fold error:', e.message));
+            }
+            streamTtsToSession(sid, text, { turnId: ttsTurnId }).catch((e) => warn('debug_tts failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'debug_tts' });
             return;
           }

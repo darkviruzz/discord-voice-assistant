@@ -26,6 +26,75 @@ is fragile). It is just a Docker host reachable over the tunnel.
 
 ---
 
+## Choosing a provider
+
+Two design goals drive the choice: **portability** (what you debug on a cheap
+GPU must run unchanged on a big one) and **security** (no public exposure,
+ideally EU jurisdiction for the P&P data).
+
+**Portability is solved by version-pinned images, not by the provider.** CI
+publishes `va-server` / `va-piper` / `va-whisper` to GHCR; you pin `IMAGE_TAG`
+and `docker compose pull` the *exact same bytes* on any host — RTX 4090 today,
+H100/H200 next month. See [Portable images](#portable-images-the-transfer-guarantee).
+
+That leaves one real decision: **does the host give you a Docker daemon?**
+
+| Model | Providers | Compose runs as-is? | WireGuard (kernel) | Notes |
+|-------|-----------|--------------------|--------------------|-------|
+| **Real VM / root + Docker** ✅ recommended | **TensorDock**, **DataCrunch/Verda** (EU 🇫🇮), **Hetzner** (EU 🇩🇪), Lambda, Paperspace Core | **Yes** — `compose pull && up` | Yes | Maximum portability + control; this `deploy/` stack works directly |
+| **Container pod (no Docker-in-Docker)** | RunPod, Vast.ai | No (needs one bundled image) | No (use Tailscale userspace) | Cheapest 4090s, but not the recommended path here |
+
+### Recommendation
+
+1. **Iterate cheap on TensorDock RTX 4090 (~$0.35/hr).** Root VM + Docker
+   pre-installed → this Compose stack runs with zero changes; real WireGuard
+   works. Validate the whole pipeline here.
+2. **Scale on the same provider** to A100 (~$0.75–0.95/hr) / H100 (~$1.99–2.25/hr)
+   for the 120B model — *same image tag, same compose, no rework.*
+3. **If EU data residency matters** (it likely does for the campaign data —
+   you're on a `uni-jena.de` address): prefer **DataCrunch/Verda** (Finland) or
+   **Hetzner** (Germany/Finland, GDPR by default). Both are real-VM hosts, so
+   the workflow is identical.
+
+> Prices are early-2026 ballparks and move constantly — check the live page
+> before you launch. H200 availability is thinner than H100/A100; if your Phase 3
+> target GPU is unavailable, H100 80GB is the practical large tier.
+
+RunPod/Vast stay viable if you want the absolute cheapest compute, but they
+need a single bundled image + Tailscale-in-userspace instead of WireGuard. Ask
+and I'll add that image target; it's intentionally **not** the default because
+it trades portability and the simple WireGuard story for ~$0.30/hr.
+
+---
+
+## Portable images (the transfer guarantee)
+
+CI (`.github/workflows/build-images.yml`) builds and pushes three images to GHCR
+on every push to the deploy branch and on `v*` tags:
+
+```
+ghcr.io/darkviruzz/discord-voice-assistant/va-server:<tag>
+ghcr.io/darkviruzz/discord-voice-assistant/va-piper:<tag>
+ghcr.io/darkviruzz/discord-voice-assistant/va-whisper:<tag>
+```
+
+On the target host you **pull instead of build** — fast, and bit-for-bit
+identical across GPU tiers:
+
+```bash
+# deploy/.env
+REGISTRY=ghcr.io/darkviruzz/discord-voice-assistant
+IMAGE_TAG=v1.4.1        # pin a release/SHA, not "latest", for reproducibility
+
+docker compose pull && docker compose up -d
+```
+
+`start.sh` still works for build-on-host; pulling is just faster and guarantees
+the cheap-GPU test == big-GPU run. Make GHCR packages private and log in once
+per instance with a read-only PAT (`docker login ghcr.io`) — see Security below.
+
+---
+
 ## Prerequisites on the instance
 
 - NVIDIA GPU + driver
@@ -232,6 +301,33 @@ The bot's only change is where it points — no code change:
 SERVER_BASE_URL=ws://10.10.0.2:7440      # WireGuard IP (or 100.x.y.z Tailscale)
 CONTROL_BEARER=<same secret as deploy/.env>
 ```
+
+---
+
+## Security checklist
+
+Ephemeral cloud instances are only as safe as their exposure surface. The stack
+is built so that, done right, **nothing is reachable from the public internet**.
+
+- **No public ports.** Only the server's `7440` is published, and `SERVER_BIND`
+  pins it to the WireGuard/Tailscale IP. Never set `SERVER_BIND=0.0.0.0` on a
+  public IP. The internal `voice` network keeps whisper/ollama/piper unreachable
+  from outside the host entirely.
+- **Provider firewall.** Close everything except your WireGuard UDP port (and
+  SSH, ideally key-only and IP-restricted) in the provider's firewall/security
+  group as a second layer.
+- **Bearer secret.** `CONTROL_BEARER` (uplink + control WS) must be a long random
+  value (`openssl rand -hex 32`), identical in `deploy/.env` and the bot.
+- **Prefer a dedicated machine.** On marketplace/community tiers you may share a
+  physical host. For the campaign data, prefer real-VM hosts and, ideally, EU
+  jurisdiction (DataCrunch/Verda, Hetzner).
+- **Private images.** Keep the GHCR packages private; `docker login ghcr.io` on
+  the instance with a **read-only** Personal Access Token (`read:packages`).
+- **Destroy, don't just stop.** After a session, pull the data back (`stop.sh`)
+  and **terminate** the instance so no disk lingers on the provider. Persist only
+  the model volume (no session data) if you want fast restarts.
+- **Data minimisation.** Only per-request audio chunks and (Phase 4) RAG chunks
+  leave home — see below.
 
 ---
 

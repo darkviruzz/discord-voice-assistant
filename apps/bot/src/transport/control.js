@@ -89,6 +89,7 @@ export class ControlClient extends EventEmitter {
 
   start() {
     this.stopped = false;
+    this.attempt = 0; // fresh start (e.g. new session) → reset backoff
     this._connect();
   }
 

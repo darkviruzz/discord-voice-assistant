@@ -24,6 +24,35 @@ this stack is exposed to the public internet.
 The instance does **not** join the Proxmox cluster (Corosync over the internet
 is fragile). It is just a Docker host reachable over the tunnel.
 
+The **AI-server bundles server + STT + LLM + TTS** and runs wherever you point
+it. The orchestration server and the `.env` schema are identical everywhere;
+only the GPU backend changes per environment.
+
+---
+
+## Deployment profiles (same config, different backend)
+
+| Profile | Host | GPU backend | How to start | Self-start |
+|---------|------|-------------|--------------|------------|
+| **Cloud / Linux + NVIDIA** | rented GPU instance | whisper CUDA · ollama CUDA · piper CUDA | `./scripts/launch.sh` → `start.sh` | compose `restart: unless-stopped` + healthcheck wait |
+| **Desktop / Windows + AMD** (current) | your desktop (RX 6800 XT) | whisper Vulkan · ollama · piper DirectML | `scripts/Start-VoiceAssistant.ps1` | the PS1 checks each port and starts what's down |
+
+`scripts/launch.sh` auto-detects the environment: NVIDIA on Linux → the CUDA
+docker stack; Windows → it tells you to use the PowerShell stack. **Nothing in
+the new cloud work touches the desktop path** — `apps/server/src`,
+`services/piper/server.py`, and `Start-VoiceAssistant.ps1` are unchanged, so the
+desktop keeps working exactly as today.
+
+> **Why AMD uses the native stack:** an AMD GPU can't be passed into Docker on
+> Windows (no CUDA, no DirectML-in-container, no ROCm-on-Windows). So on the
+> desktop the bundle is the existing native processes, not containers. If you
+> ever move the desktop to **Linux**, I can add an AMD-on-Linux docker profile
+> (`ollama:rocm` + a Vulkan whisper image + CPU piper) — ask and I'll build it.
+
+The data source/sink config below is shared by both profiles: on the desktop you
+point the paths at local folders (your OneDrive/Nextcloud client syncs them); in
+the cloud you let `start.sh`/`stop.sh` pull/push via rclone.
+
 ---
 
 ## Choosing a provider
@@ -199,6 +228,46 @@ Output volumes copied off the instance by `stop.sh`:
 |---------------|---------|
 | `transcripts` | finalize uploads (`/data/uploads`) |
 | `archive`     | long-term audio + transcript archive (`/data/archive`) |
+
+---
+
+## Campaign data (in) & finished output (out)
+
+Both endpoints are **configurable and optional**, local or cloud, via `rclone`
+(Nextcloud = WebDAV, OneDrive, S3, …). Persistent campaign data and transcripts
+never need to *live* on the rented instance — they pass through it for the
+session and land back in your own storage.
+
+```
+                 start.sh (pull)            stop.sh (push)
+  CAMPAIGN_REMOTE ───rclone──▶ campaign vol      transcripts+archive vols ──rclone──▶ OUTPUT_REMOTE
+  (nextcloud:DnD/Campaign)      (server reads,    (server writes)            (nextcloud:DnD/Sessions)
+                                 read-only)
+```
+
+Configure once, then it's automatic:
+
+```bash
+rclone config                                  # create remotes: nextcloud / onedrive / …
+cp ~/.config/rclone/rclone.conf deploy/rclone.conf
+
+# deploy/.env
+RCLONE_CONFIG=./rclone.conf
+CAMPAIGN_REMOTE=nextcloud:DnD/Campaign         # pulled on start (empty = skip)
+CAMPAIGN_CONTEXT_FILE=CAMPAIGN.md              # file the LLM context is read from
+OUTPUT_REMOTE=nextcloud:DnD/Sessions           # pushed on stop  (empty = skip)
+```
+
+- **Empty values = pure-local.** On the **desktop** leave them empty and point
+  the server's paths at local folders; your OneDrive/Nextcloud *client* syncs
+  them. Same config keys, no rclone needed.
+- **Set values = cloud.** On an **ephemeral instance**, `start.sh` pulls the
+  campaign folder into the read-only `campaign` volume and `stop.sh` pushes
+  `transcripts`/`archive` to `OUTPUT_REMOTE` before you destroy the box. `stop.sh`
+  also keeps a local tarball backup regardless.
+
+`rclone.conf` holds credentials — it's git-ignored; mount it read-only and treat
+it like a secret.
 
 ---
 

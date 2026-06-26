@@ -26,6 +26,7 @@ services:
       context: ./whisper
       args:
         WHISPER_CPP_REF: ${WHISPER_CPP_REF:-master}
+        CUDA_ARCHS: ${CUDA_ARCHS:-80;86;89;90}
     # image: ghcr.io/ggml-org/whisper.cpp:main-cuda
     # entrypoint: ["whisper-server"]
     # command: ["--model","/models/${WHISPER_MODEL_FILE:-ggml-medium-q5_0.bin}","--host","0.0.0.0","--port","8080","--language","${WHISPER_LANGUAGE:-de}"]

@@ -18,14 +18,20 @@ RUN git clone --depth 1 --branch "${WHISPER_CPP_REF}" \
         https://github.com/ggml-org/whisper.cpp /src
 WORKDIR /src
 
+# Pin CUDA archs to the staging-plan GPUs, otherwise nvcc compiles for the full
+# default matrix (~50 min build, disk-heavy). Covers: 80=A100, 86=Ampere
+# consumer/A40, 89=RTX 4090, 90=H100/H200. Override via build-arg if needed.
+ARG CUDA_ARCHS=80;86;89;90
+
 # Static ggml/whisper libs → the only dynamic deps left are the CUDA runtime
 # libraries, which are provided by the runtime base image below.
 RUN cmake -B build \
         -DGGML_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
         -DBUILD_SHARED_LIBS=OFF \
         -DWHISPER_BUILD_SERVER=ON \
         -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build build -j --config Release --target whisper-server
+    && cmake --build build -j"$(nproc)" --config Release --target whisper-server
 
 # ── runtime stage ────────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04

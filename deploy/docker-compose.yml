@@ -124,6 +124,9 @@ services:
       ARCHIVE_DIR: /data/archive
       SPEAKER_MAP_FILE: /data/speaker-map.json
       FINALIZE_TZ: ${FINALIZE_TZ:-Europe/Berlin}
+      # Campaign context source (pulled into the campaign volume by start.sh).
+      OBSIDIAN_VAULT_PATH: /data/campaign
+      CAMPAIGN_CONTEXT_FILE: ${CAMPAIGN_CONTEXT_FILE:-CAMPAIGN.md}
     env_file:
       - path: ./server.env
         required: false
@@ -131,6 +134,7 @@ services:
       - transcripts:/data/uploads
       - archive:/data/archive
       - server-data:/data
+      - campaign:/data/campaign:ro
     networks: [voice]
     depends_on:
       whisper:
@@ -163,3 +167,4 @@ volumes:
   transcripts:
   archive:
   server-data:
+  campaign:

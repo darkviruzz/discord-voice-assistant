@@ -74,6 +74,27 @@ fetch_to_vol piper-voices "de_DE-thorsten_emotional-medium.onnx" \
 fetch_to_vol piper-voices "de_DE-thorsten_emotional-medium.onnx.json" \
   "$PIPER_VOICE_BASE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json"
 
+# ── 2b. Pull campaign data into the campaign volume (local or remote) ────────
+# CAMPAIGN_REMOTE empty  → use whatever is already in the campaign volume
+#                          (bind a local dir, or copy files in manually).
+# CAMPAIGN_REMOTE set     → rclone copy from e.g. nextcloud:DnD/Campaign or
+#                          onedrive:DnD/Campaign, using RCLONE_CONFIG.
+pull_campaign() {
+  if [ -z "${CAMPAIGN_REMOTE:-}" ]; then
+    ok "No CAMPAIGN_REMOTE set — using the campaign volume as-is"
+    return
+  fi
+  [ -f "${RCLONE_CONFIG:-}" ] || die "RCLONE_CONFIG not found: ${RCLONE_CONFIG:-<unset>}"
+  step "Pulling campaign data from $CAMPAIGN_REMOTE"
+  docker run --rm \
+    -v "$(readlink -f "$RCLONE_CONFIG"):/config/rclone/rclone.conf:ro" \
+    -v "${PROJECT}_campaign:/data" \
+    rclone/rclone copy "$CAMPAIGN_REMOTE" /data --transfers=8 \
+    || die "campaign pull failed (check rclone remote + RCLONE_CONFIG)"
+  ok "campaign data synced into volume"
+}
+pull_campaign
+
 # ── 3. Build + start ─────────────────────────────────────────────────────────
 step "Building images (first run may take a while: whisper.cpp CUDA build)"
 "${COMPOSE[@]}" build

@@ -43,6 +43,28 @@ backup_vol transcripts "transcripts.tar.gz"
 backup_vol archive     "archive.tar.gz"
 backup_vol server-data "server-data.tar.gz"
 
+# Push finished data to a remote (Nextcloud / OneDrive / …) if configured.
+# OUTPUT_REMOTE empty → keep the local tarball backup only.
+push_outputs() {
+  [ -n "${OUTPUT_REMOTE:-}" ] || { ok "No OUTPUT_REMOTE set — keeping local backup only"; return; }
+  [ -f "${RCLONE_CONFIG:-}" ] || { echo "RCLONE_CONFIG not found: ${RCLONE_CONFIG:-<unset>}" >&2; return; }
+  local rc; rc="$(readlink -f "$RCLONE_CONFIG")"
+  for v in transcripts archive; do
+    docker volume inspect "${PROJECT}_$v" >/dev/null 2>&1 || continue
+    step "Pushing $v -> $OUTPUT_REMOTE/$v"
+    docker run --rm \
+      -v "$rc:/config/rclone/rclone.conf:ro" \
+      -v "${PROJECT}_$v:/data:ro" \
+      rclone/rclone copy /data "$OUTPUT_REMOTE/$v" --transfers=8 \
+      && ok "pushed $v" || echo "[warn] push of $v failed" >&2
+  done
+}
+
+# Load .env so OUTPUT_REMOTE / RCLONE_CONFIG are available.
+# shellcheck disable=SC1091
+[ -f "$DEPLOY_DIR/.env" ] && { set -a; . "$DEPLOY_DIR/.env"; set +a; }
+push_outputs
+
 step "Stopping the stack"
 if [ "$PURGE" -eq 1 ]; then
   "${COMPOSE[@]}" down -v

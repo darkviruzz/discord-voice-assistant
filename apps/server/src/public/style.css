@@ -319,6 +319,12 @@ body.debug .entry { outline: 1px dashed var(--border); }
   overflow-wrap: anywhere;
 }
 
+/* Live streaming: new paragraphs (finalized chunks) fade/slide in instead of
+   snapping in — existing paragraphs stay put (append-only). */
+@keyframes para-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.entry-body > .para-enter { animation: para-enter .28s ease-out; }
+@media (prefers-reduced-motion: reduce) { .entry-body > .para-enter { animation: none; } }
+
 /* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */
 .entry-body p.chunk { position: relative; padding-left: 2px; margin: 0 0 .35em; }
 .chunk-split {

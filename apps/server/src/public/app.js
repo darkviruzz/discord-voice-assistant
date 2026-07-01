@@ -122,17 +122,22 @@
     return `<span class="chunk-split ${cls}">${escapeHtml(s)}</span>`;
   }
 
-  // Debug: one line per raw whisper chunk, verbatim, tagged with its split type.
-  function renderChunks(chunks) {
-    return chunks.map((c) => `<p class="chunk">${chunkSplitTag(c.split)}${inlineMd(escapeHtml(c.text || ''))}</p>`).join('');
-  }
+  // One paragraph of HTML per raw whisper chunk (debug) or natural-silence group.
+  const chunkPart = (c) => `<p class="chunk">${chunkSplitTag(c.split)}${inlineMd(escapeHtml(c.text || ''))}</p>`;
+  const segmentPart = (s) => `<p>${inlineMd(escapeHtml(String(s)))}</p>`;
 
-  // Non-debug: one <p> per natural-silence group (forced boundaries already
-  // merged server-side). A single continuous utterance → one block; genuine
-  // pauses → paragraph breaks. No mid-word breaks, overlap de-duplicated.
-  function renderSegments(segments) {
-    const parts = segments.map((s) => String(s || '')).filter((s) => s.trim());
-    return parts.map((s) => `<p>${inlineMd(escapeHtml(s))}</p>`).join('');
+  // Paragraph-HTML array for a streamed user entry, or null when this entry
+  // isn't the segment/chunk kind (assistant markdown, stop-line, plain text).
+  // Returning an array lets the live updater patch append-only (finalized
+  // paragraphs stay put; only new ones fade in) — cf. interim/final results in
+  // streaming ASR: finals are stable and never jump/disappear.
+  function userParts(entry) {
+    if (entry.stopDetected && state.stopPhrases.length) return null;
+    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return entry.chunks.map(chunkPart);
+    if (Array.isArray(entry.segments) && entry.segments.length) {
+      return entry.segments.map((s) => String(s || '')).filter((s) => s.trim()).map(segmentPart);
+    }
+    return null;
   }
 
   // Body HTML for an entry: full markdown, except stop lines render the matched
@@ -147,10 +152,23 @@
           + `${escapeHtml(t.slice(tok.index + tok.length))}`;
       }
     }
-    // Debug → raw per-chunk view; otherwise the merged natural-silence blocks.
-    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return renderChunks(entry.chunks);
-    if (Array.isArray(entry.segments) && entry.segments.length) return renderSegments(entry.segments);
+    const parts = userParts(entry);
+    if (parts) return parts.join('');
     return renderMarkdown(entry.text || '');
+  }
+
+  function htmlToEl(html) {
+    const t = document.createElement('template');
+    t.innerHTML = String(html).trim();
+    return t.content.firstChild;
+  }
+
+  // Build a paragraph element, tagging it with its source HTML so later diffs
+  // compare against the logical content (ignoring the transient para-enter class).
+  function makePart(html) {
+    const el = htmlToEl(html);
+    el._src = html;
+    return el;
   }
 
   // ── colors / time formatting ────────────────────────────────────────────────
@@ -281,20 +299,50 @@
   }
 
   // Insert a new entry, or update an existing one in place (same startMs). Live
-  // streaming publishes an utterance repeatedly as chunks arrive — each update
-  // replaces the rendered element so the text grows without duplicating the line.
+  // streaming publishes an utterance repeatedly as chunks arrive.
   function upsertEntry(entry) {
     const rec = state.rendered.get(entry.startMs);
     if (rec) {
-      rec.data = entry;
-      const fresh = entryEl(entry);
-      rec.el.replaceWith(fresh);
-      rec.el = fresh;
+      const parts = entry.kind === 'user' ? userParts(entry) : null;
+      if (parts) patchEntry(rec, entry, parts);       // smooth, append-only
+      else { rec.data = entry; const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; }
       if (state.atBottom) scrollToBottom();
       return;
     }
     if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // out of order, older
     pushEntry(entry, { scroll: true });
+  }
+
+  // Append-only paragraph patch: keep already-rendered paragraphs stable, update
+  // changed ones in place, fade in new ones. Never removes paragraphs during a
+  // partial (finalized text must not disappear); reconciles length + adds the
+  // debug footer only on the final (partial=false) update.
+  function patchEntry(rec, entry, parts) {
+    rec.data = entry;
+    const bodyEl = rec.el.querySelector('.entry-body');
+    if (!bodyEl) { const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; return; }
+
+    const existing = Array.from(bodyEl.children);
+    for (let i = 0; i < parts.length; i++) {
+      if (i < existing.length) {
+        const cur = existing[i]._src ?? existing[i].outerHTML;
+        if (cur !== parts[i]) bodyEl.replaceChild(makePart(parts[i]), existing[i]);
+      } else {
+        const el = makePart(parts[i]);
+        el.classList.add('para-enter'); // fade/slide-in (the "ease")
+        bodyEl.appendChild(el);
+      }
+    }
+    if (!entry.partial) {
+      // Final: drop any surplus paragraphs (normally none — updates are monotonic)
+      // and sync the debug footer.
+      for (let i = bodyEl.children.length - 1; i >= parts.length; i--) bodyEl.children[i].remove();
+      const dbg = state.debug ? debugDetail(entry) : null;
+      const oldDbg = rec.el.querySelector('.entry-debug');
+      if (oldDbg && dbg) oldDbg.replaceWith(dbg);
+      else if (oldDbg && !dbg) oldDbg.remove();
+      else if (dbg) rec.el.appendChild(dbg);
+    }
   }
 
   // Retro-mark a line by startMs (wake/stop detected after it was sent).
@@ -548,6 +596,12 @@
     state.atBottom = nearBottom;
     if (nearBottom) els.jump.hidden = true;
   }, { passive: true });
+
+  // Minimal test seam (only when ?e2e=1) to drive the live updater from tests
+  // without a real STT/audio backend.
+  if (new URLSearchParams(location.search).has('e2e')) {
+    window.__transcript = { upsertEntry, clearTranscript, state };
+  }
 
   (async function init() {
     await loadSessions();

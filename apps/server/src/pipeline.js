@@ -720,7 +720,12 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     let words;
     let rawChunks;
     try {
-      const onProgress = (session && liveContextEnabled())
+      // Only stream growing partials here when the live streamer did NOT already
+      // handle this utterance. Otherwise the re-transcription would restart the
+      // preview from chunk 1 and make the on-screen bubble shrink then regrow
+      // (finalized text must stay stable — append-only). When the streamer ran,
+      // the single final publish below reconciles the entry in one step.
+      const onProgress = (session && liveContextEnabled() && !streamStartMs)
         ? ({ segments, chunks }) => publishEntry(sessionId, {
             label: liveLabel,
             text: segments.join(' '),

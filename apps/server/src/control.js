@@ -8,7 +8,7 @@ import { loadSpeakerMap, setSpeakerMapping } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession, sessions } from './state.js';
-import { publishPresence } from './liveBus.js';
+import { publishPresence, publishEntry } from './liveBus.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';

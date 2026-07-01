@@ -16,6 +16,7 @@ import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
+import { getBotOverrides } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
@@ -244,6 +245,13 @@ export function initControlWSS({ bearer } = {}) {
             botConnections.add(ws);
             log('control: bot registered botId=', msg.botId, 'version=', msg.version);
             send(ws, { type: 'registered', serverParams: serverParams() });
+            // Desired State der Bot-Overrides (vom Settings-Panel verwaltet) an den
+            // frisch verbundenen Bot pushen, damit er die persistierten Werte
+            // übernimmt. persist=true → der Bot schreibt sie in seinen Override-Layer.
+            const botDesired = getBotOverrides();
+            if (Object.keys(botDesired).length > 0) {
+              send(ws, { type: 'config_update', cmdId: randomUUID(), persist: true, set: botDesired, reset: [] });
+            }
             return;
           }
           case 'session_start': {

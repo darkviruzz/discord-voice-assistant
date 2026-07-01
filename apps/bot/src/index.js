@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './bootConfig.js'; // MUSS zuerst stehen: dotenv + Bot-Override-Layer vor allen anderen Imports
 import { Client, GatewayIntentBits, Partials, MessageFlags, ActivityType } from 'discord.js';
 import {
   joinVoiceChannel,

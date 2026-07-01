@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark light" />
   <title>Live-Transkript</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="settings.css" />
 </head>
 <body>
   <header class="topbar">
@@ -31,8 +32,40 @@
         <input type="checkbox" id="debug-toggle" />
         <span>Debug</span>
       </label>
+      <button id="open-settings" class="btn-icon" title="Einstellungen" aria-haspopup="dialog">⚙ Einstellungen</button>
     </div>
   </header>
+
+  <!-- Settings-Panel (Overlay). Inhalt wird von settings.js gerendert. -->
+  <div id="settings-overlay" class="settings-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="settings-panel">
+      <header class="settings-head">
+        <h2 id="settings-title">⚙ Einstellungen</h2>
+        <span id="settings-botconn" class="chip chip--muted" title="Bot-Control-Verbindung">Bot: —</span>
+        <div class="settings-head-right">
+          <input type="search" id="settings-filter" class="settings-filter" placeholder="filtern (Name, Variable, Text)…" />
+          <button id="settings-close" class="btn-icon" title="Schließen">✕</button>
+        </div>
+      </header>
+
+      <div id="settings-legend" class="settings-legend"></div>
+
+      <div class="settings-persistbar">
+        <fieldset class="persist-mode">
+          <legend>Speichermodus</legend>
+          <label class="radio"><input type="radio" name="persist" value="persist" checked /> <b>Dauerhaft</b> — schreibt in den Override-Layer, übersteht Neustart</label>
+          <label class="radio"><input type="radio" name="persist" value="temp" /> <b>Nur temporär</b> — nur zur Laufzeit, geht bei Neustart verloren</label>
+        </fieldset>
+        <div class="settings-actions">
+          <span id="settings-dirty" class="chip chip--warn" hidden>0 Änderungen</span>
+          <button id="settings-save" class="btn-primary" disabled>Änderungen anwenden</button>
+        </div>
+      </div>
+
+      <div id="settings-result" class="settings-result" hidden></div>
+      <div id="settings-body" class="settings-body"><p class="empty">Lade Konfiguration…</p></div>
+    </div>
+  </div>
 
   <details id="session-meta" class="session-meta" hidden>
     <summary>Session-Infos</summary>
@@ -51,5 +84,6 @@
   <button id="jump-latest" class="jump-latest" hidden>↓ Neueste</button>
 
   <script src="app.js" defer></script>
+  <script src="settings.js" defer></script>
 </body>
 </html>

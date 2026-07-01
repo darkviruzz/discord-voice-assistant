@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { log, warn, debug } from '../logger.js';
 import { getVersion } from '../version.js';
 import { State } from './state.js';
+import { applyConfigUpdate } from '../configOverrides.js';
 
 const PROTO_VERSION = 1;
 
@@ -326,6 +327,21 @@ export class ControlClient extends EventEmitter {
       }
       case 'finalize_progress': {
         this.emit('finalizeProgress', msg);
+        return;
+      }
+      // Settings-Panel: Konfigurations-Push vom Server. Auf process.env anwenden
+      // + persistieren; reconnect-/restart-gebundene Werte greifen beim nächsten
+      // Reconnect bzw. Bot-Neustart.
+      case 'config_update': {
+        try {
+          const r = applyConfigUpdate({ set: msg.set, reset: msg.reset, persist: msg.persist !== false });
+          log('control: config_update applied', r.applied.join(',') || '(leer)',
+            'persist=', msg.persist !== false);
+          this._send({ type: 'ack', op: 'config_update', cmdId: msg.cmdId, ok: true, applied: r.applied });
+        } catch (e) {
+          warn('control: config_update failed:', e.message);
+          this._send({ type: 'ack', op: 'config_update', cmdId: msg.cmdId, ok: false, error: e.message });
+        }
         return;
       }
       case 'finalize_result':

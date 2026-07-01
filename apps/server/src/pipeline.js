@@ -345,6 +345,13 @@ function wakeWordName() {
   return process.env.WAKE_WORD ?? 'Rabenauge';
 }
 
+// Whether the assistant's Q&A (and stop notices) get mirrored into the Discord
+// text channel. Default OFF — the voice/transcript path is the primary output;
+// posting to chat is opt-in via DISCORD_POST_REPLIES=true.
+function discordPostRepliesEnabled() {
+  return (process.env.DISCORD_POST_REPLIES ?? 'false') === 'true';
+}
+
 // Assemble the extra `system` blocks for a voice session, in priority order:
 // campaign context → rolling summary → live transcript. Empty parts are skipped
 // so an unavailable block costs nothing. `query` is forwarded to the campaign
@@ -413,15 +420,17 @@ function handleStopCommand({ sessionId, userId, text, wakeWordDetected = false, 
     }
   }
 
-  broadcastToAllBots({
-    type: 'chat_message',
-    cmdId: randomUUID(),
-    channelId,
-    question: text,
-    userDisplayName,
-    assistantName: wakeWordName(),
-    isStop: true,
-  });
+  if (discordPostRepliesEnabled()) {
+    broadcastToAllBots({
+      type: 'chat_message',
+      cmdId: randomUUID(),
+      channelId,
+      question: text,
+      userDisplayName,
+      assistantName: wakeWordName(),
+      isStop: true,
+    });
+  }
   log('pipeline: stop command detected, playback cleared');
 }
 
@@ -484,16 +493,18 @@ async function answerQuestion({
     maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
   }
 
-  broadcastToAllBots({
-    type: 'chat_message',
-    cmdId: randomUUID(),
-    channelId,
-    question: transcript ?? query,
-    answer: responseText,
-    userDisplayName,
-    assistantName: wakeWordName(),
-    isStop: false,
-  });
+  if (discordPostRepliesEnabled()) {
+    broadcastToAllBots({
+      type: 'chat_message',
+      cmdId: randomUUID(),
+      channelId,
+      question: transcript ?? query,
+      answer: responseText,
+      userDisplayName,
+      assistantName: wakeWordName(),
+      isStop: false,
+    });
+  }
 
   if (!tts) return;
   if (!sid) {

@@ -12,7 +12,6 @@
   const dirtyChip = $('settings-dirty');
   const saveBtn = $('settings-save');
   const filterEl = $('settings-filter');
-  const botConnEl = $('settings-botconn');
 
   let data = null;                 // letzte GET-Antwort
   const pending = new Map();       // key `scope:key` → { scope, key, value } | { scope, key, reset:true }
@@ -59,17 +58,7 @@
       return;
     }
     renderLegend();
-    renderBotConn();
     render();
-  }
-
-  function renderBotConn() {
-    const n = data.botConnected || 0;
-    botConnEl.textContent = n > 0 ? `Bot: ${n} verbunden` : 'Bot: offline';
-    botConnEl.className = 'chip ' + (n > 0 ? 'chip--ok' : 'chip--muted');
-    botConnEl.title = n > 0
-      ? `${n} Bot(s) am Control-Kanal — Bot-Änderungen greifen sofort/gemäß applyMode.`
-      : 'Kein Bot verbunden — Bot-Änderungen werden gespeichert und beim nächsten Connect angewendet.';
   }
 
   function renderLegend() {
@@ -272,18 +261,32 @@
     });
   }
 
+  const panel = () => overlay.querySelector('.settings-panel');
+  let closingTimer = null;
+
   function open() {
+    if (closingTimer) { clearTimeout(closingTimer); closingTimer = null; }
+    overlay.classList.remove('closing');
     overlay.hidden = false;
     document.body.classList.add('settings-open');
     // Nur beim ersten Öffnen laden. Danach bleiben nicht angewendete Änderungen
     // erhalten (Slide-in), bis sie angewendet oder verworfen werden.
     if (!data) load();
     updateOpenBadge();
+    updateNarrow();
   }
+  // Schließen mit Slide-out-Animation (Gegenstück zum Einblenden). Nicht
+  // angewendete Änderungen bleiben erhalten.
   function close() {
-    overlay.hidden = true;
-    document.body.classList.remove('settings-open');
-    updateOpenBadge(); // roter Badge weist im geschlossenen Zustand auf offene Änderungen hin
+    if (overlay.hidden || overlay.classList.contains('closing')) return;
+    overlay.classList.add('closing');
+    closingTimer = setTimeout(() => {
+      overlay.hidden = true;
+      overlay.classList.remove('closing');
+      document.body.classList.remove('settings-open');
+      closingTimer = null;
+      updateOpenBadge(); // roter Badge weist im geschlossenen Zustand auf offene Änderungen hin
+    }, 180);
   }
   function toggle() { overlay.hidden ? open() : close(); }
 
@@ -303,11 +306,62 @@
     }
   }
 
+  // Unter 900px Panelbreite die zweispaltigen Grids auf eine Spalte umstellen
+  // (basiert auf der PANELBREITE, nicht der Viewportbreite — das Panel ist ziehbar).
+  function updateNarrow() {
+    const p = panel();
+    if (p) p.classList.toggle('narrow', p.clientWidth < 900);
+  }
+
+  // Breite ziehbar (Griff am linken Panelrand), Wert in localStorage gemerkt.
+  const WIDTH_KEY = 'settingsPanelWidth';
+  const clampWidth = (w) => Math.max(320, Math.min(w, window.innerWidth));
+  function applySavedWidth() {
+    const w = parseInt(localStorage.getItem(WIDTH_KEY) || '', 10);
+    if (Number.isFinite(w)) overlay.style.width = clampWidth(w) + 'px';
+  }
+  (function initResize() {
+    const handle = $('settings-resize');
+    if (!handle) return;
+    let dragging = false;
+    handle.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      try { handle.setPointerCapture(e.pointerId); } catch {}
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      overlay.style.width = clampWidth(window.innerWidth - e.clientX) + 'px';
+      updateNarrow();
+    });
+    const end = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      try { handle.releasePointerCapture(e.pointerId); } catch {}
+      localStorage.setItem(WIDTH_KEY, String(parseInt(overlay.style.width, 10) || ''));
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+  })();
+  applySavedWidth();
+  if (window.ResizeObserver) {
+    const p = panel();
+    if (p) new ResizeObserver(updateNarrow).observe(p);
+  }
+
   // --- Events ---
   $('open-settings')?.addEventListener('click', toggle);
   $('settings-close')?.addEventListener('click', close);
   $('settings-reload')?.addEventListener('click', () => load());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) close(); });
+  // Klick neben das Panel schließt es (nicht-destruktiv — Änderungen bleiben).
+  document.addEventListener('mousedown', (e) => {
+    if (overlay.hidden || overlay.classList.contains('closing')) return;
+    if (overlay.contains(e.target) || $('open-settings')?.contains(e.target)) return;
+    close();
+  });
   filterEl.addEventListener('input', applyFilter);
   saveBtn.addEventListener('click', save);
 

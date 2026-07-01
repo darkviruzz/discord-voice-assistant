@@ -281,6 +281,15 @@ export const CATALOG = [
       + '-1 = dauerhaft). Verhindert wiederholtes Nachladen. Wird pro Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'DISCORD_POST_REPLIES',
+    label: 'Antwort in Discord-Chat schreiben', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'false', applyMode: 'live',
+    desc: 'Ob die Antwort des Assistenten (und Stop-Hinweise) zusätzlich als Text in '
+      + 'den Discord-Textkanal geschrieben werden. Standard: aus — Sprachausgabe + '
+      + 'Transkript sind der primäre Ausgabeweg. true = Frage/Antwort erscheinen auch '
+      + 'als Chat-Nachricht. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'OLLAMA_KEEP_WARM_INTERVAL_MS',
     label: 'Keep-Warm-Ping-Intervall (ms)', type: 'number', def: '240000',
     applyMode: 'next-session',

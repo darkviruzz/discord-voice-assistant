@@ -319,6 +319,26 @@ body.debug .entry { outline: 1px dashed var(--border); }
   overflow-wrap: anywhere;
 }
 
+/* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */
+.entry-body p.chunk { position: relative; padding-left: 2px; margin: 0 0 .35em; }
+.chunk-split {
+  display: inline-block;
+  font-size: .62rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  padding: 0 5px;
+  margin-right: 6px;
+  border-radius: 4px;
+  vertical-align: 1px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.chunk-split.chunk--natural { color: var(--ok); border-color: rgba(123, 216, 143, .45); }
+.chunk-split.chunk--forced  { color: var(--warn); border-color: rgba(224, 175, 104, .45); }
+.chunk-split.chunk--other   { color: var(--text-dim); }
+
 /* ── jump-to-latest ──────────────────────────────────────────────────────── */
 .jump-latest {
   position: fixed;

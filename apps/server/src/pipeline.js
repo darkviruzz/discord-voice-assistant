@@ -13,7 +13,7 @@ import { publishEntry, publishAnnotation } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
 import { getCampaignContext } from './campaignContext.js';
 import { loadSpeakerMap } from './speakerMap.js';
-import { speakerLabel } from './finalize/merge.js';
+import { speakerLabel, normalizeText } from './finalize/merge.js';
 import opus from '@discordjs/opus';
 
 const { OpusEncoder } = opus;
@@ -262,20 +262,32 @@ function summarizeStt(chunks, chunkResults) {
 }
 
 // Transcribe PCM split at silence boundaries. Returns text chunks plus STT metadata.
-export async function transcribeChunked(pcm48k) {
+//
+// `parts` (aka segments) are the natural-silence-separated groups: forced-overlap
+// chunks are stitched (de-duplicated) into the previous part, so a part boundary
+// always corresponds to a natural silence. Chunk text is normalized (collapsing
+// whisper's internal segment newlines to single spaces) so live and reload render
+// identically — no mid-word line breaks.
+//
+// `rawChunks` keeps every whisper chunk verbatim ({ text, split }) for the debug
+// per-chunk view. `onProgress({ segments, chunks })` fires after each transcribed
+// chunk so the UI can update the utterance live as chunks arrive.
+export async function transcribeChunked(pcm48k, { onProgress } = {}) {
   const chunks = splitAtSilence(pcm48k);
   logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {
     log(`pipeline: ${(pcm48k.length / 2 / 48000).toFixed(1)}s → ${chunks.length} silence-split chunks`);
   }
   const parts = [];
+  const rawChunks = []; // [{ text, split }] per whisper chunk (debug view)
   const chunkResults = [];
   // Flat word-timestamp list across all chunks, in ms relative to utterance start.
   const words = [];
   let anyWords = false;
   const overlapSec = OVERLAP_SAMPLES / SAMPLE_RATE;
-  for (const { pcm, hasOverlap, startSample } of chunks) {
-    const { text, meta, words: chunkWords } = await transcribe(pcmToWav(pcm));
+  for (const { pcm, hasOverlap, startSample, split } of chunks) {
+    const { text: rawText, meta, words: chunkWords } = await transcribe(pcmToWav(pcm));
+    const text = normalizeText(rawText); // collapse whisper's internal \n → single spaces
     const result = {
       text,
       meta,
@@ -303,9 +315,17 @@ export async function transcribeChunked(pcm48k) {
     } else {
       parts.push(text);
     }
+    rawChunks.push({ text, split: split ?? null });
+
+    // Live progress: emit the current segments + raw chunks as each chunk lands.
+    if (onProgress) {
+      try { onProgress({ segments: parts.slice(), chunks: rawChunks.slice() }); }
+      catch (e) { debug('transcribeChunked: onProgress error:', e.message); }
+    }
   }
   return {
     transcripts: parts,
+    chunks: rawChunks,
     stt: summarizeStt(chunks, chunkResults),
     words: anyWords ? words : null,
   };
@@ -567,15 +587,39 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     // 2. Decode Opus → 48 kHz mono PCM.
     const pcm48k = opusFramesToPcm(opusBuffers);
 
+    // Speaker label + a STABLE startMs for this utterance's live entry, computed
+    // up front so the streaming partials and the final entry share one identity
+    // (the client upserts by startMs).
+    const session = sessions.get(sessionId);
+    const liveLabel = session
+      ? speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId))
+      : (metadata.userDisplayName || String(userId));
+    const entryStartMs = metadata.startTsMs ?? Date.now();
+
     // 3. STT — split at silence boundaries, transcribe each chunk independently.
+    //    Stream a display-only partial after each chunk so the utterance grows
+    //    live on the transcript page (not persisted to JSONL / LLM buffer).
     let transcripts;
     let stt;
     let words;
+    let rawChunks;
     try {
-      const result = await transcribeChunked(pcm48k);
+      const onProgress = (session && liveContextEnabled())
+        ? ({ segments, chunks }) => publishEntry(sessionId, {
+            label: liveLabel,
+            text: segments.join(' '),
+            segments,
+            chunks,
+            startMs: entryStartMs,
+            kind: 'user',
+            partial: true,
+          })
+        : undefined;
+      const result = await transcribeChunked(pcm48k, { onProgress });
       transcripts = result.transcripts;
       stt = result.stt;
       words = result.words;
+      rawChunks = result.chunks;
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;
@@ -584,6 +628,8 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
     // Log the full utterance (all chunks joined) to disk.
     // `words` (ms relative to utterance start) enables word-level interrupt
     // splitting at finalize; absent → merge falls back to utterance-level.
+    // `segments` (natural-silence groups) + `rawChunks` ({text,split}) let the
+    // reload/snapshot render identically to the live stream.
     const fullTranscript = transcripts.join(' ');
     logTranscriptEvent(sessionId, 'user_transcript', {
       userId,
@@ -593,6 +639,8 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       durationMs: metadata.durationMs ?? null,
       text: fullTranscript,
       chunks: transcripts,
+      segments: transcripts,
+      rawChunks,
       words: words ?? null,
       stt,
     });
@@ -604,20 +652,21 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     // Keep EVERY utterance in the live-transcript buffer (not just wake-word
     // queries) so the LLM sees the whole table conversation as context.
-    const session = sessions.get(sessionId);
     // startMs of the live entry for this utterance — reused below to annotate it
     // (wake/stop) once detection has run. null when no entry was stored.
     let liveEntryStartMs = null;
     if (session) {
-      const label = speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId));
       const stored = appendLive(session, {
-        label,
+        label: liveLabel,
         text: fullTranscript,
-        startMs: metadata.startTsMs ?? Date.now(),
+        startMs: entryStartMs,
         kind: 'user',
       });
       if (stored) {
         liveEntryStartMs = stored.startMs;
+        // Final entry carries the structured render data (replaces the partials).
+        stored.segments = transcripts;
+        stored.chunks = rawChunks;
         publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
       }
       maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));

@@ -112,6 +112,29 @@
     return best;
   }
 
+  // Small tag shown before each raw chunk in debug mode. natural-silence chunks
+  // end a sentence-ish group (may break); forced ones were joined seamlessly.
+  function chunkSplitTag(split) {
+    if (!split) return '';
+    const s = String(split);
+    const cls = s.indexOf('natural') === 0 ? 'chunk--natural'
+      : s.indexOf('forced') === 0 ? 'chunk--forced' : 'chunk--other';
+    return `<span class="chunk-split ${cls}">${escapeHtml(s)}</span>`;
+  }
+
+  // Debug: one line per raw whisper chunk, verbatim, tagged with its split type.
+  function renderChunks(chunks) {
+    return chunks.map((c) => `<p class="chunk">${chunkSplitTag(c.split)}${inlineMd(escapeHtml(c.text || ''))}</p>`).join('');
+  }
+
+  // Non-debug: one <p> per natural-silence group (forced boundaries already
+  // merged server-side). A single continuous utterance → one block; genuine
+  // pauses → paragraph breaks. No mid-word breaks, overlap de-duplicated.
+  function renderSegments(segments) {
+    const parts = segments.map((s) => String(s || '')).filter((s) => s.trim());
+    return parts.map((s) => `<p>${inlineMd(escapeHtml(s))}</p>`).join('');
+  }
+
   // Body HTML for an entry: full markdown, except stop lines render the matched
   // stop token in a <mark> (rest as plain escaped text — stop commands are tiny).
   function renderBody(entry) {
@@ -124,6 +147,9 @@
           + `${escapeHtml(t.slice(tok.index + tok.length))}`;
       }
     }
+    // Debug → raw per-chunk view; otherwise the merged natural-silence blocks.
+    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return renderChunks(entry.chunks);
+    if (Array.isArray(entry.segments) && entry.segments.length) return renderSegments(entry.segments);
     return renderMarkdown(entry.text || '');
   }
 
@@ -254,9 +280,20 @@
     }
   }
 
-  function appendEntry(entry) {
-    if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // already shown
-    if (state.rendered.has(entry.startMs)) return; // exact dup
+  // Insert a new entry, or update an existing one in place (same startMs). Live
+  // streaming publishes an utterance repeatedly as chunks arrive — each update
+  // replaces the rendered element so the text grows without duplicating the line.
+  function upsertEntry(entry) {
+    const rec = state.rendered.get(entry.startMs);
+    if (rec) {
+      rec.data = entry;
+      const fresh = entryEl(entry);
+      rec.el.replaceWith(fresh);
+      rec.el = fresh;
+      if (state.atBottom) scrollToBottom();
+      return;
+    }
+    if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // out of order, older
     pushEntry(entry, { scroll: true });
   }
 
@@ -392,7 +429,7 @@
       setStatus('live', 'SSE');
       try { renderSnapshot(JSON.parse(ev.data)); } catch {}
     });
-    es.addEventListener('entry', (ev) => { try { appendEntry(JSON.parse(ev.data)); } catch {} });
+    es.addEventListener('entry', (ev) => { try { upsertEntry(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('presence', (ev) => { try { renderVoice(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('annotation', (ev) => { try { applyAnnotation(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('error', (ev) => {

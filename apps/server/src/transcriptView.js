@@ -97,6 +97,21 @@ function buildSttMap(events) {
   return map;
 }
 
+// userId:startTsMs → structured render data (segments = natural-silence groups,
+// rawChunks = per-whisper-chunk {text,split}) so the reloaded snapshot renders
+// identically to the live stream. Keyed like buildSttMap.
+function buildSegmentsMap(events) {
+  const map = new Map();
+  for (const e of events) {
+    if (e?.type !== 'user_transcript' || e.userId == null) continue;
+    map.set(`${e.userId}:${e.startTsMs ?? e.tsMs}`, {
+      segments: Array.isArray(e.segments) ? e.segments : null,
+      chunks: Array.isArray(e.rawChunks) ? e.rawChunks : null,
+    });
+  }
+  return map;
+}
+
 // turnId → TTS lifecycle / model / interruptions, for the assistant debug view.
 // playback_paused/resumed and tts_cancel carry the TTS `id`, not the turnId,
 // so they are correlated via the tts_start id→turnId map.
@@ -166,7 +181,7 @@ function buildNameMap(events) {
 
 // Map a finalize span to the UI entry shape, attaching wake/stop flags (always)
 // and the debug bundle (STT for users, TTS/turn for assistants).
-function spanToEntry(span, sttMap, turnMap) {
+function spanToEntry(span, sttMap, turnMap, segMap) {
   const kind = span.type === 'assistant' ? 'assistant' : 'user';
   const entry = { label: span.label, text: span.text, startMs: span.startMs, kind };
 
@@ -177,6 +192,11 @@ function spanToEntry(span, sttMap, turnMap) {
   if (kind === 'user' && span.userId != null) {
     const stt = sttMap.get(`${span.userId}:${span.startMs}`);
     if (stt) entry.stt = stt;
+    const seg = segMap && segMap.get(`${span.userId}:${span.startMs}`);
+    if (seg) {
+      if (seg.segments) entry.segments = seg.segments;
+      if (seg.chunks) entry.chunks = seg.chunks;
+    }
   } else if (kind === 'assistant') {
     if (span.interrupted) entry.interrupted = true;
     const turn = span.turnId ? turnMap.get(span.turnId) : null;
@@ -199,6 +219,7 @@ export function buildSnapshot(sessionId) {
   const model = buildModelFromEvents(events, { speakerMap });
 
   const sttMap = buildSttMap(events);
+  const segMap = buildSegmentsMap(events);
   const nameMap = buildNameMap(events);
   const labelFor = (uid) => speakerLabel(uid, nameMap.get(String(uid)) ?? null, speakerMap);
   const turnMap = buildTurnMap(events, labelFor);
@@ -206,7 +227,7 @@ export function buildSnapshot(sessionId) {
   const entries = (model.spans || [])
     .slice()
     .sort((a, b) => a.startMs - b.startMs)
-    .map((s) => spanToEntry(s, sttMap, turnMap));
+    .map((s) => spanToEntry(s, sttMap, turnMap, segMap));
 
   const sessionMeta = events.find((e) => e?.type === 'session_meta') ?? null;
   const clockSyncs = events.filter((e) => e?.type === 'clock_sync');

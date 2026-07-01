@@ -33,6 +33,11 @@ function resolveSessionId(raw) {
 // attached when present (debug-only fields like noSpeechProb).
 function toClientEntry(entry, meta) {
   const out = { label: entry.label, text: entry.text, startMs: entry.startMs, kind: entry.kind };
+  // Structured render data: segments = natural-silence groups (non-debug block),
+  // chunks = per-whisper-chunk {text,split} (debug view). partial = live, not final.
+  if (Array.isArray(entry.segments)) out.segments = entry.segments;
+  if (Array.isArray(entry.chunks)) out.chunks = entry.chunks;
+  if (entry.partial) out.partial = true;
   if (entry.meta) out.meta = entry.meta;
   if (meta) out.meta = { ...(out.meta || {}), ...meta };
   return out;

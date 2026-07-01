@@ -1,5 +1,23 @@
 import { log, debug, warn } from './logger.js';
 
+// whisper.cpp puts newlines into the `text` field at its internal segment/token
+// boundaries. With word-level timestamps requested it splits down to token level
+// (like -ml 1) and, without split-on-word, some breaks land INSIDE a word
+// (tokens are sub-word pieces) — e.g. "Entwicklung befind\nliche". Naively
+// turning every \n into a space would leave "befind liche".
+//
+// Heuristic: whisper prefixes a leading space before a NEW word but not before a
+// mid-word token continuation. So a newline directly followed by a lowercase
+// letter (no space) is a mid-word split → join with no space; every other
+// newline is a real word/segment boundary → single space.
+export function cleanWhisperText(s) {
+  return String(s || '')
+    .replace(/(\p{L})\n(\p{Ll})/gu, '$1$2') // letter \n lowercase (no space) → join word
+    .replace(/\s*\n\s*/g, ' ')              // remaining newlines → single space
+    .replace(/[ \t]{2,}/g, ' ')             // collapse runs of spaces
+    .trim();
+}
+
 // Normalize Whisper word/token timestamps from whatever shape the server
 // returned into a flat [{ w, t0, t1 }] array, times in SECONDS relative to the
 // submitted audio. Handles:
@@ -61,7 +79,7 @@ export async function transcribe(wavBuffer) {
   }
 
   const data = await res.json();
-  const text = (data.text ?? data.transcription ?? '').trim();
+  const text = cleanWhisperText(data.text ?? data.transcription ?? '');
 
   // Keep likely-noise transcripts. Store diagnostics for later filtering.
   const segments = Array.isArray(data.segments) ? data.segments : [];

@@ -74,7 +74,8 @@
 
   function renderLegend() {
     const modes = data.applyModes || {};
-    const parts = ['<div class="legend-block"><b>Wirkung (wann greift eine Änderung):</b><ul>'];
+    const parts = ['<details class="legend-details"><summary>Legende & Erklärungen (Wirkung · Persistenz · Scopes)</summary><div class="legend-grid">'];
+    parts.push('<div class="legend-block"><b>Wirkung (wann greift eine Änderung):</b><ul>');
     for (const [k, m] of Object.entries(modes)) {
       parts.push(`<li><span class="apply ${APPLY_CLASS[k] || ''}">${esc(m.label)}</span> ${esc(m.desc)}</li>`);
     }
@@ -92,6 +93,7 @@
     parts.push('</ul></div>');
     parts.push(`<p class="legend-file">Override-Datei (Server): <code>${esc(data.overridesFile)}</code> · `
       + 'Bot-Overrides liegen im DATA_DIR des jeweiligen Bots.</p>');
+    parts.push('</div></details>');
     legendEl.innerHTML = parts.join('');
   }
 
@@ -179,6 +181,7 @@
     dirtyChip.hidden = n === 0;
     dirtyChip.textContent = `${n} Änderung${n === 1 ? '' : 'en'}`;
     saveBtn.disabled = n === 0;
+    updateOpenBadge();
   }
 
   // Findet den Original-Wert einer Variable aus dem letzten GET (für Dirty-Vergleich).
@@ -238,8 +241,11 @@
     }
     saveBtn.textContent = 'Änderungen anwenden';
     showResult(out.ok, out.errors || [], out.warnings || [], out.applied || []);
-    // Neu laden, um Status-Badges (persistiert/temporär) zu aktualisieren.
+    // Neu laden, um Status-Badges (persistiert/temporär) zu aktualisieren —
+    // dabei die Scrollposition beibehalten (sonst springt es nach ganz oben).
+    const scrollTop = body.scrollTop;
     await load();
+    body.scrollTop = scrollTop;
   }
 
   function showResult(ok, errors, warnings, applied) {
@@ -269,17 +275,38 @@
   function open() {
     overlay.hidden = false;
     document.body.classList.add('settings-open');
-    load();
+    // Nur beim ersten Öffnen laden. Danach bleiben nicht angewendete Änderungen
+    // erhalten (Slide-in), bis sie angewendet oder verworfen werden.
+    if (!data) load();
+    updateOpenBadge();
   }
   function close() {
     overlay.hidden = true;
     document.body.classList.remove('settings-open');
+    updateOpenBadge(); // roter Badge weist im geschlossenen Zustand auf offene Änderungen hin
+  }
+  function toggle() { overlay.hidden ? open() : close(); }
+
+  // Roter Badge am Zahnrad-Button: Anzahl nicht angewendeter Änderungen, nur
+  // solange das Panel geschlossen ist.
+  function updateOpenBadge() {
+    const btn = $('open-settings');
+    if (!btn) return;
+    let dot = btn.querySelector('.open-badge');
+    const n = pending.size;
+    const show = n > 0 && overlay.hidden;
+    if (show) {
+      if (!dot) { dot = document.createElement('span'); dot.className = 'open-badge'; btn.appendChild(dot); }
+      dot.textContent = String(n);
+    } else if (dot) {
+      dot.remove();
+    }
   }
 
   // --- Events ---
-  $('open-settings')?.addEventListener('click', open);
+  $('open-settings')?.addEventListener('click', toggle);
   $('settings-close')?.addEventListener('click', close);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  $('settings-reload')?.addEventListener('click', () => load());
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) close(); });
   filterEl.addEventListener('input', applyFilter);
   saveBtn.addEventListener('click', save);

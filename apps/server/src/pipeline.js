@@ -331,6 +331,106 @@ export async function transcribeChunked(pcm48k, { onProgress } = {}) {
   };
 }
 
+// ── Streaming STT (live preview) ─────────────────────────────────────────────
+// While a speaker is still talking, transcribe the completed (silence-bounded)
+// chunks from the growing buffer and publish DISPLAY-ONLY partials, so the
+// transcript page fills in chunk-by-chunk instead of only at utterance_end.
+// The utterance_end pipeline stays authoritative (wake-word / LLM / JSONL); by
+// sharing the same startMs its final entry replaces these partials.
+//
+// The buffer is NOT drained here — utterance_end still owns the frames. Each
+// tick re-decodes the whole buffer (one fresh Opus decoder; cheap at this
+// scale) and processes only the not-yet-consumed tail.
+function streamingEnabled() {
+  return (process.env.STT_STREAMING ?? 'true') !== 'false' && liveContextEnabled();
+}
+
+// Pure planner (unit-tested): given the not-yet-consumed PCM, decide which
+// silence-bounded chunks are COMPLETE (safe to transcribe now) and by how many
+// samples to advance the consumed cursor. The last chunk is always the still-
+// growing tail and is left for a later tick / utterance_end. Returns null when
+// nothing new is complete yet.
+export function planStreamChunks(pendingPcm) {
+  const chunks = splitAtSilence(pendingPcm);
+  if (chunks.length < 2) return null;
+  const advance = chunks[chunks.length - 1].startSample; // start of the in-progress tail
+  if (!(advance > 0)) return null;
+  return { complete: chunks.slice(0, -1), advance };
+}
+
+async function streamingTick(sessionId, session, userId, sp) {
+  if (!sp.opusBuffer || sp.opusBuffer.length === 0) return;
+  if (sp.stream?.busy) return;
+  if (!sp.stream) {
+    sp.stream = {
+      startMs: Date.now(),
+      consumedSamples: 0,       // samples already transcribed+displayed
+      parts: [],                // natural-silence groups so far (deduped)
+      rawChunks: [],            // [{text, split}] so far
+      label: speakerLabel(userId, null, loadSpeakerMap(session.guildId)),
+      busy: false,
+    };
+  }
+  const stream = sp.stream;
+  const pcm = opusFramesToPcm(sp.opusBuffer);
+  const pending = pcm.subarray(stream.consumedSamples * 2); // 16-bit samples → *2 bytes
+  const plan = planStreamChunks(pending);
+  if (!plan) return;                             // only the in-progress tail so far
+  const { complete, advance } = plan;
+
+  stream.busy = true;
+  try {
+    for (const ch of complete) {
+      const { text: rawText } = await transcribe(pcmToWav(ch.pcm));
+      if (sp.stream !== stream) return;           // utterance ended mid-transcribe → drop
+      const text = normalizeText(rawText);
+      if (text) {
+        if (ch.hasOverlap && stream.parts.length > 0) {
+          stream.parts[stream.parts.length - 1] = stitchOverlap(stream.parts[stream.parts.length - 1], text);
+        } else {
+          stream.parts.push(text);
+        }
+        stream.rawChunks.push({ text, split: ch.split ?? null });
+      }
+    }
+    stream.consumedSamples += advance;
+    if (sp.stream === stream && stream.parts.length) {
+      publishEntry(sessionId, {
+        label: stream.label,
+        text: stream.parts.join(' '),
+        segments: stream.parts.slice(),
+        chunks: stream.rawChunks.slice(),
+        startMs: stream.startMs,
+        kind: 'user',
+        partial: true,
+      });
+    }
+  } catch (e) {
+    debug('streamingTick error:', e.message);
+  } finally {
+    stream.busy = false;
+  }
+}
+
+let streamTimer = null;
+function startStreamingLoop() {
+  if (streamTimer) return;
+  const interval = numberEnv('STT_STREAM_INTERVAL_MS', 1000, 200);
+  streamTimer = setInterval(() => {
+    if (!streamingEnabled()) return;
+    for (const [sessionId, session] of sessions) {
+      if (!session?.speakers) continue;
+      for (const [uid, sp] of session.speakers) {
+        if (sp.opusBuffer && sp.opusBuffer.length > 0 && !sp.stream?.busy) {
+          streamingTick(sessionId, session, uid, sp).catch(() => {});
+        }
+      }
+    }
+  }, interval);
+  streamTimer.unref?.();
+}
+startStreamingLoop();
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 // Active pipeline per session key → AbortController for its TTS stream.
@@ -600,12 +700,17 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     // Speaker label + a STABLE startMs for this utterance's live entry, computed
     // up front so the streaming partials and the final entry share one identity
-    // (the client upserts by startMs).
+    // (the client upserts by startMs). If the live streamer already ran for this
+    // utterance, reuse ITS startMs so the final replaces the streamed preview,
+    // then clear the streamer state (this utterance is finished).
     const session = sessions.get(sessionId);
+    const sp = session?.speakers?.get(BigInt(userId));
+    const streamStartMs = sp?.stream?.startMs;
+    if (sp) sp.stream = null;
     const liveLabel = session
       ? speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId))
       : (metadata.userDisplayName || String(userId));
-    const entryStartMs = metadata.startTsMs ?? Date.now();
+    const entryStartMs = streamStartMs ?? metadata.startTsMs ?? Date.now();
 
     // 3. STT — split at silence boundaries, transcribe each chunk independently.
     //    Stream a display-only partial after each chunk so the utterance grows

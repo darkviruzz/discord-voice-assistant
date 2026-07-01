@@ -224,6 +224,23 @@ export const CATALOG = [
       + 'nicht kann. Wird pro STT-Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAMING',
+    label: 'Live-Transkription während des Sprechens', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
+    desc: 'true = fertige (an einer Stille abgeschlossene) Chunks werden schon während '
+      + 'des Sprechens transkribiert und erscheinen live im Transkript, statt erst nach '
+      + 'dem Ende der ganzen Äußerung. Das finale Ergebnis (Weckwort/LLM) entsteht '
+      + 'weiterhin am Äußerungsende und ersetzt die Vorschau. Wird pro Tick gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_INTERVAL_MS',
+    label: 'Prüfintervall Live-Transkription (ms)', type: 'number', def: '1000',
+    applyMode: 'restart',
+    desc: 'Wie oft geprüft wird, ob ein neuer Chunk fertig ist und live transkribiert '
+      + 'werden kann. Kleiner = reaktiver, aber mehr Last. Wird beim Start des '
+      + 'Streaming-Loops einmalig gelesen (Neustart nötig).',
+  },
+  {
     scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_SILENCE_THRESH',
     label: 'RMS-Schwellwert Stille-Erkennung', type: 'number', def: '300', applyMode: 'live',
     desc: 'RMS-Amplituden-Schwelle für die Stille-Erkennung beim Aufteilen langer '

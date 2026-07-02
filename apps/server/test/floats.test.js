@@ -26,16 +26,26 @@ test('attachFloats: interrupter floats into the running monolog at the word anch
   assert.equal(bystander.floatInto, undefined);
 });
 
-test('attachFloats: two interruptions of the same monolog, floats never nest', () => {
+test('attachFloats: nested interruption anchors to the INNERMOST talker', () => {
   const host = userSpan(0, 60000, 'lang', Array.from({ length: 60 }, (_, i) => w(`w${i}`, i * 1000, i * 1000 + 900)), '1');
-  const first = userSpan(10500, 8000, 'erste unterbrechung', null, '2');
-  const second = userSpan(12000, 2000, 'zweite', null, '3'); // starts inside `first` too
+  const first = userSpan(10500, 8000, 'längere nebenrede läuft hier', null, '2');
+  const second = userSpan(12000, 2000, 'kurzer einwurf', null, '3'); // inside `first`
   attachFloats([host, first, second]);
 
   assert.equal(first.floatInto.hostStartMs, 0);
-  // `first` is itself a float → `second` must anchor to the monolog, not nest.
+  // `second` interrupts the side conversation, not the monolog — the chain is
+  // resolved client-side (escalates when `first` renders as a small bubble).
+  assert.equal(second.floatInto.hostStartMs, 10500);
+});
+
+test('attachFloats: separate later interruption still anchors to the monolog', () => {
+  const host = userSpan(0, 60000, 'lang', Array.from({ length: 60 }, (_, i) => w(`w${i}`, i * 1000, i * 1000 + 900)), '1');
+  const first = userSpan(10500, 3000, 'erste', null, '2');
+  const second = userSpan(30000, 2000, 'zweite viel später', null, '3'); // outside `first`
+  attachFloats([host, first, second]);
+  assert.equal(first.floatInto.hostStartMs, 0);
   assert.equal(second.floatInto.hostStartMs, 0);
-  assert.ok(second.floatInto.atWordIndex >= first.floatInto.atWordIndex);
+  assert.ok(second.floatInto.atWordIndex > first.floatInto.atWordIndex);
 });
 
 test('attachFloats: assistant host uses its playback interruption anchor', () => {

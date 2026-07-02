@@ -205,6 +205,29 @@
     return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
   }
 
+  // Levenshtein distance — same tolerance as the server's fuzzy wake-word
+  // detection, so "E-Rabenauge"/"Rabenauge," light up like exact hits.
+  function editDistance(a, b) {
+    const m = a.length, n = b.length;
+    let prev = Array.from({ length: n + 1 }, (_, j) => j);
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[n];
+  }
+
+  function isWakeWordish(norm, wakeNorm) {
+    if (!norm || !wakeNorm) return false;
+    if (norm === wakeNorm) return true;
+    if (wakeNorm.length < 4) return false; // fuzzy only for substantial words
+    if (Math.abs(norm.length - wakeNorm.length) > 2) return false;
+    return editDistance(norm, wakeNorm) <= 2;
+  }
+
   // Word indices (flat across all segments) to mark for a detected wake word /
   // stop phrase. WHOLE normalized words only — "Stopp" never half-matches the
   // phrase "stop"; multi-word phrases match consecutive words; longest first.
@@ -225,7 +248,14 @@
     if (entry.stopDetected) {
       for (const p of [...state.stopPhrases].sort((a, b) => b.length - a.length)) mark(p, 'stop');
     }
-    if (entry.wakeDetected && state.wakeWord) mark(state.wakeWord, 'wake');
+    if (entry.wakeDetected && state.wakeWord) {
+      // Fuzzy per-word match (the server detected fuzzily too — the transcript
+      // may say "E-Rabenauge" or a near-miss rather than the exact word).
+      const wakeNorm = normKw(state.wakeWord);
+      for (let i = 0; i < norms.length; i++) {
+        if (!marks.has(i) && isWakeWordish(norms[i], wakeNorm)) marks.set(i, 'wake');
+      }
+    }
     return marks;
   }
 
@@ -336,7 +366,31 @@
   // at the word where the interruption happened. The host text keeps flowing
   // around it (CSS float), nothing is split, everything stays on record.
 
-  let floatZ = 5; // later interruptions stack above earlier ones
+  let floatZ = 1; // later interruptions stack above earlier ones (local to .transcript)
+
+  // A side conversation longer than this renders as a full feed entry instead
+  // of a bubble — a wall of text in the margin is unreadable (and unfair to
+  // the actual speaker).
+  const PROMOTE_WORDS = 45;
+
+  function entryWordCount(entry) {
+    const segs = Array.isArray(entry.segments) && entry.segments.length
+      ? entry.segments : [entry.text || ''];
+    return segs.join(' ').trim().split(/\s+/).filter(Boolean).length;
+  }
+
+  // Resolve the feed entry that hosts a float chain: a bubble may itself be
+  // anchored inside another bubble's utterance (short interjection into a long
+  // side conversation) — escalate until we hit a real feed entry (which a
+  // PROMOTED side conversation is).
+  function resolveHostRec(hostStartMs) {
+    let rec = state.rendered.get(hostStartMs);
+    for (let hops = 0; rec && rec.isFloat && hops < 4; hops++) {
+      const up = rec.data.floatInto?.hostStartMs;
+      rec = up != null ? state.rendered.get(up) : null;
+    }
+    return rec && !rec.isFloat ? rec : null;
+  }
 
   // Flat list of the host body's own words (bubbles excluded), across paragraphs.
   function hostWords(bodyEl) {
@@ -374,8 +428,8 @@
   // Returns false when the host is not rendered (caller falls back to a
   // normal feed line — nothing gets lost).
   function upsertFloat(entry, { animate = true } = {}) {
-    const hostRec = state.rendered.get(entry.floatInto.hostStartMs);
-    if (!hostRec || hostRec.isFloat) return false;
+    const hostRec = resolveHostRec(entry.floatInto.hostStartMs);
+    if (!hostRec) return false;
     const hostBody = hostRec.el.querySelector('.entry-body');
     if (!hostBody) return false;
 
@@ -391,12 +445,29 @@
     }
 
     const bubble = document.createElement('span');
-    bubble.className = 'int-bubble' + (animate ? ' int-enter' : '');
+    // Alternate sides per host so parallel talkers weave left/right instead of
+    // stacking into one column.
+    const side = hostBody.querySelectorAll('.int-bubble').length % 2 === 0 ? 'right' : 'left';
+    bubble.className = 'int-bubble' + (side === 'left' ? ' int-bubble--left' : '')
+      + (animate ? ' int-enter' : '');
     bubble.style.zIndex = String(floatZ++);
+
     const label = document.createElement('span');
     label.className = 'int-label';
-    label.textContent = entry.label || '?';
-    label.style.color = speakerColor(entry.label || '?');
+    label.title = `${fmtTime(entry.startMs)} · ${entry.label || '?'}`;
+    const name = document.createElement('span');
+    name.className = 'int-name';
+    name.textContent = entry.label || '?';
+    name.style.color = speakerColor(entry.label || '?');
+    label.appendChild(name);
+    // Inline timestamp when the bubble has room; tiny interjections keep it
+    // in the tooltip only.
+    if (String(entry.text || '').length >= 15) {
+      const t = document.createElement('span');
+      t.className = 'int-time';
+      t.textContent = fmtTime(entry.startMs);
+      label.appendChild(t);
+    }
     const body = document.createElement('span');
     body.className = 'int-body';
     bubble.append(label, body);
@@ -548,9 +619,12 @@
   }
 
   function pushEntry(entry, { scroll, animate = false }) {
-    // Interruptions float into their host bubble instead of a feed line
-    // (debug mode keeps flat chronological lines for inspection).
-    if (entry.floatInto && !state.debug && upsertFloat(entry, { animate })) {
+    // Interruptions float into their host bubble instead of a feed line —
+    // unless they outgrew a bubble (PROMOTE_WORDS): a long side conversation
+    // is a full entry at its chronological slot. Debug mode keeps flat
+    // chronological lines for inspection.
+    if (entry.floatInto && !state.debug && entryWordCount(entry) <= PROMOTE_WORDS
+        && upsertFloat(entry, { animate })) {
       if (scroll && state.atBottom) scrollToBottom();
       return;
     }
@@ -583,6 +657,22 @@
       // Already docked as a side bubble — keep updating it there (a final
       // without its own floatInto inherits the placement).
       entry.floatInto = entry.floatInto ?? rec.data.floatInto;
+      if (entryWordCount(entry) > PROMOTE_WORDS) {
+        // Outgrew the bubble → promote to a full feed entry: the bubble blurs
+        // away, the entry materializes at its chronological slot and keeps
+        // streaming there.
+        const bubble = rec.el;
+        const hostEntry = bubble.closest('.entry');
+        bubble.classList.add('w-exit');
+        setTimeout(() => {
+          if (hostEntry) withHeightTransition(hostEntry, () => bubble.remove());
+          else bubble.remove();
+        }, EXIT_MS);
+        state.rendered.delete(entry.startMs);
+        pushEntry(entry, { scroll: true, animate: true });
+        if (state.atBottom) scrollToBottom();
+        return;
+      }
       if (entry.floatInto && upsertFloat(entry, { animate: true })) {
         if (state.atBottom) scrollToBottom();
         return;

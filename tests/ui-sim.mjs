@@ -42,6 +42,8 @@ process.env.LIVE_CONTEXT_ENABLED ??= 'true';
 process.env.DEBUG ??= '';
 process.env.TRANSCRIPT_DIR = path.join(cacheDir, 'transcripts');
 process.env.CONFIG_OVERRIDES_FILE = path.join(cacheDir, 'overrides.json');
+// Echte Speaker-Map des Servers (die Sim läuft im Repo-Root, nicht in apps/server).
+process.env.SPEAKER_MAP_FILE ??= path.join(repoRoot, 'apps/server/data/speaker-map.json');
 fs.writeFileSync(process.env.CONFIG_OVERRIDES_FILE, '{}');
 
 await import(`${serverSrc}/index.js`);

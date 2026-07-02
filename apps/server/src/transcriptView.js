@@ -56,10 +56,12 @@ export function buildVoice(sessionId) {
   }
 
   // Cold/ended session: reconstruct from the log; bot is not connected now.
-  // The guild id (for the speaker map) comes from session_meta — the RAM
-  // session is gone, so labels would otherwise fall back to Discord names.
+  // The guild id / users mapping (for the speaker labels) comes from
+  // session_meta — the RAM session is gone, so labels would otherwise fall
+  // back to Discord names.
   const { events } = readSessionEvents(sid);
-  const speakerMap = loadSpeakerMap(events.find((e) => e?.type === 'session_meta')?.guildId ?? null);
+  const meta = events.find((e) => e?.type === 'session_meta') ?? null;
+  const speakerMap = { ...(meta?.users || {}), ...loadSpeakerMap(meta?.guildId ?? null) };
   const label = (userId, name) => speakerLabel(userId, name, speakerMap);
   const members = new Map();
   let state = null;
@@ -205,15 +207,17 @@ function anchorWordIndex(host, atMs) {
 }
 
 // Mark every user span that begins strictly inside another span's window as a
-// float: { hostStartMs, atWordIndex }. The innermost (latest-starting)
-// non-float host wins; floats never nest into other floats.
+// float: { hostStartMs, atWordIndex }. The innermost (latest-starting) host
+// wins — hosts may themselves be floats (a short interjection into a long side
+// conversation); the client resolves the chain and escalates when the direct
+// host renders as a small bubble.
 function attachFloats(spans) {
   const sorted = spans.slice().sort((a, b) => a.startMs - b.startMs);
   for (const s of sorted) {
     if (s.type !== 'user') continue;
     let host = null;
     for (const h of sorted) {
-      if (h === s || h.floatInto) continue;
+      if (h === s) continue;
       if (!(h.startMs < s.startMs && s.startMs < h.endMs)) continue;
       if (!host || h.startMs > host.startMs) host = h;
     }
@@ -270,9 +274,14 @@ export function buildSnapshot(sessionId) {
   const { events } = readSessionEvents(sid);
 
   // Speaker map: RAM session first, session_meta fallback for ended sessions —
-  // keeps live and past labels identical (campaign names either way).
+  // keeps live and past labels identical (campaign names either way). Like
+  // finalize, the users mapping snapshotted into session_meta backs up the
+  // persistent per-guild map (which may be absent on another working dir).
   const sessionMeta = events.find((e) => e?.type === 'session_meta') ?? null;
-  const speakerMap = loadSpeakerMap(session?.guildId ?? sessionMeta?.guildId ?? null);
+  const speakerMap = {
+    ...(sessionMeta?.users || {}),
+    ...loadSpeakerMap(session?.guildId ?? sessionMeta?.guildId ?? null),
+  };
   // weave:false — assistant turns stay whole; interrupters get floated into
   // their host bubble instead of splitting anything (see attachFloats).
   const model = buildModelFromEvents(events, { speakerMap, weave: false });

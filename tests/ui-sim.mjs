@@ -55,47 +55,81 @@ const opus = createRequire(`${serverSrc}/`)('@discordjs/opus');
 const SR = 48000;
 const FRAME = 960; // 20 ms
 const SID = 1780000000001n;
-const UID = 424242424242n;
 
 const pcm = readWavPcm(wav);
-const totalFrames = Math.floor(pcm.length / 2 / FRAME);
+const totalSec = pcm.length / 2 / SR;
+
+// Zwei Sprecher: Markus liest den ganzen Absatz (ein langer Monolog), Nogard
+// unterbricht zweimal mit kurzen Passagen aus demselben Audio — das erzeugt
+// die Unterbrecher-Blasen (floatInto) live im Web-UI. Jeder Clip ist eine
+// eigene Utterance (utterance_end 1,2 s nach Clip-Ende, wie der Bot es täte).
+const speakers = [
+  { uid: 424242424242n, name: 'Markus', clips: [{ atSec: 0, fromSec: 0, toSec: totalSec }] },
+  { uid: 555555555555n, name: 'Nogard', clips: [
+    { atSec: 20, fromSec: 5, toSec: 12 },
+    { atSec: 48, fromSec: 30, toSec: 36 },
+  ] },
+];
 
 const session = ensureSession(SID);
 session.guildName = 'Testgilde';
 session.channelName = 'stt-streaming-test';
 session.voice.state = 'occupied';
-session.voice.members.set(String(UID), 'Markus');
+for (const s of speakers) session.voice.members.set(String(s.uid), s.name);
 session.voice.updatedAt = Date.now();
 publishPresence(SID);
 
-const sp = ensureSpeaker(SID, UID);
-sp.codec = 'opus';
-sp.opusBuffer = [];
+const enc = new Map(); // one encoder per speaker (stateful codec)
+for (const s of speakers) {
+  const sp = ensureSpeaker(SID, s.uid);
+  sp.codec = 'opus';
+  sp.opusBuffer = [];
+  s.sp = sp;
+  enc.set(s.uid, new opus.OpusEncoder(SR, 1));
+  for (const c of s.clips) {
+    c.frames = Math.floor((c.toSec - c.fromSec) * SR / FRAME);
+    c.fed = 0;
+    c.startedAt = null;
+  }
+}
 
-const enc = new opus.OpusEncoder(SR, 1);
-console.log(`[sim] ${totalFrames} Frames (${(totalFrames * 0.02).toFixed(1)}s) — Echtzeit-Einspeisung startet`);
+console.log(`[sim] ${totalSec.toFixed(1)}s Audio, ${speakers.length} Sprecher — Echtzeit-Einspeisung startet`);
 console.log(`[sim] UI: http://127.0.0.1:${process.env.PORT}/transcript/?sessionId=${SID}`);
 
-const startTsMs = Date.now();
-let fed = 0;
+const simStart = Date.now();
+const pending = [];
 await new Promise((resolve) => {
   const timer = setInterval(() => {
-    for (let k = 0; k < 5 && fed < totalFrames; k++, fed++) {
-      const slice = pcm.subarray(fed * FRAME * 2, (fed + 1) * FRAME * 2);
-      try { sp.opusBuffer.push(enc.encode(slice)); } catch (e) { console.error('[sim] encode:', e.message); }
+    const simSec = (Date.now() - simStart) / 1000;
+    let anyLeft = false;
+    for (const s of speakers) {
+      for (const c of s.clips) {
+        if (c.fed >= c.frames) continue;
+        anyLeft = true;
+        if (simSec < c.atSec) continue;
+        if (c.startedAt === null) {
+          c.startedAt = Date.now();
+          console.log(`[sim] ${s.name} beginnt bei ${simSec.toFixed(0)}s (${(c.toSec - c.fromSec).toFixed(0)}s Clip)`);
+        }
+        for (let k = 0; k < 5 && c.fed < c.frames; k++, c.fed++) {
+          const sample = Math.floor(c.fromSec * SR) + c.fed * FRAME;
+          const slice = pcm.subarray(sample * 2, (sample + FRAME) * 2);
+          try { s.sp.opusBuffer.push(enc.get(s.uid).encode(slice)); }
+          catch (e) { console.error('[sim] encode:', e.message); }
+        }
+        if (c.fed >= c.frames) {
+          // Clip fertig → utterance_end nach 1,2 s (Bot-Stille-Erkennung)
+          const meta = { userDisplayName: s.name, startTsMs: c.startedAt, endTsMs: Date.now(), durationMs: Date.now() - c.startedAt };
+          pending.push(new Promise((r) => setTimeout(() => {
+            console.log(`[sim] utterance_end ${s.name} (${(c.toSec - c.fromSec).toFixed(0)}s)`);
+            runPipeline(SID, s.uid, meta).catch((e) => console.error('[sim] pipeline:', e.message)).finally(r);
+          }, 1200)));
+        }
+      }
     }
-    if (fed % 1000 === 0) console.log(`[sim] ${(fed * 0.02).toFixed(0)}s eingespeist`);
-    if (fed >= totalFrames) { clearInterval(timer); resolve(); }
+    if (!anyLeft) { clearInterval(timer); resolve(); }
   }, 100);
 });
 
-console.log('[sim] Audio komplett — utterance_end in 1.2s');
-await new Promise((r) => setTimeout(r, 1200));
-const endTsMs = Date.now();
-await runPipeline(SID, UID, {
-  userDisplayName: 'Markus',
-  startTsMs,
-  endTsMs,
-  durationMs: endTsMs - startTsMs,
-});
-console.log('[sim] runPipeline fertig — Server bleibt für UI-Inspektion offen (Strg+C beendet)');
+await Promise.all(pending);
+console.log('[sim] alle Utterances finalisiert — Server bleibt für UI-Inspektion offen (Strg+C beendet)');

@@ -296,11 +296,14 @@ export async function transcribeChunked(pcm48k, { onProgress } = {}) {
     if (Array.isArray(chunkWords)) {
       anyWords = true;
       const offsetSec = (startSample ?? 0) / SAMPLE_RATE;
-      for (const w of chunkWords) {
+      // Assemble whisper's sub-word tokens into display words first —
+      // finalize's interrupt-splitting joins `words` with spaces, so raw
+      // token pieces would render as "Quant eng ra vit ation".
+      for (const w of mergeTokensToWords(chunkWords)) {
         // Drop words inside the duplicated overlap region of a stitched chunk.
         if (hasOverlap && w.t0 < overlapSec) continue;
         words.push({
-          w: w.w,
+          w: w.text,
           t0: Math.round((w.t0 + offsetSec) * 1000),
           t1: Math.round((w.t1 + offsetSec) * 1000),
         });
@@ -348,6 +351,34 @@ function streamingEnabled() {
   return (process.env.STT_STREAMING ?? 'true') !== 'false' && liveContextEnabled();
 }
 
+// Detect whether a NEW utterance interrupts something currently on screen:
+//   1) another speaker is mid-utterance with visible text → float into that;
+//   2) the assistant reply was just paused by THIS user (pendingInterrupt from
+//      the bot's playback_paused) → float into the reply at the spoken position.
+// Returns { hostStartMs, atWordIndex? } or null. Display-only — JSONL,
+// wake-word and LLM paths are untouched.
+function detectFloatInto(session, userId) {
+  let float = null;
+  for (const [uid, other] of session.speakers) {
+    if (uid === BigInt(userId) || !other.stream || !other.stream.hasContent()) continue;
+    if (!float || other.stream.startMs > float.hostStartMs) {
+      float = { hostStartMs: other.stream.startMs };
+    }
+  }
+  const pi = session.pendingInterrupt;
+  if (!float && pi && pi.byUserId === String(userId) && (Date.now() - pi.at) < 15000) {
+    // ~360 ms per spoken word (same heuristic as finalize's estimateSpeechMs);
+    // the snapshot rebuild later re-anchors precisely via the TTS duration.
+    const wordCount = String(pi.hostText || '').trim().split(/\s+/).filter(Boolean).length;
+    float = {
+      hostStartMs: pi.hostStartMs,
+      atWordIndex: Math.max(0, Math.min(wordCount, Math.round((pi.msPlayed || 0) / 360))),
+    };
+    session.pendingInterrupt = null;
+  }
+  return float;
+}
+
 async function streamingTick(sessionId, session, userId, sp) {
   if (!sp.opusBuffer || sp.opusBuffer.length === 0) return;
   if (sp.stream?.busy) return;
@@ -356,6 +387,8 @@ async function streamingTick(sessionId, session, userId, sp) {
       startMs: Date.now(),
       label: speakerLabel(userId, null, loadSpeakerMap(session.guildId)),
     });
+    const float = detectFloatInto(session, userId);
+    if (float) sp.stream.floatInto = float;
   }
   const stream = sp.stream;
   const pcm = opusFramesToPcm(sp.opusBuffer);
@@ -371,6 +404,7 @@ async function streamingTick(sessionId, session, userId, sp) {
     kind: 'user',
     partial: true,
     stableWords: res.stableWords,
+    ...(stream.floatInto ? { floatInto: stream.floatInto } : {}),
   });
 }
 
@@ -774,6 +808,8 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         // Final entry carries the structured render data (replaces the partials).
         stored.segments = transcripts;
         stored.chunks = rawChunks;
+        // Keep the interruption placement across the partial→final swap.
+        if (stream?.floatInto) stored.floatInto = stream.floatInto;
         publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
       }
       maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));

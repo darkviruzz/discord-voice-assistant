@@ -143,7 +143,8 @@ export function createSttStream({
     hasTimes: true,        // false once a hypothesis came back without timestamps
     lastMeta: null,
     lastTickSamples: 0,    // skip ticks when no new audio arrived
-    lastText: '',          // last snapshot text handed to the caller
+    lastText: '',          // change-detection key of the last published tick
+    lastSegments: [],      // display segments of the last published tick
     ticks: 0,
     busy: false,
     detached: false,
@@ -256,6 +257,16 @@ export function createSttStream({
       return st.lockedGroups.length > 0 || st.committed.length > 0 || st.ticks > 0;
     },
 
+    // Current display state for snapshot rebuilds (page load / SSE reconnect
+    // mid-utterance): what the last published partial showed.
+    snapshot() {
+      return {
+        segments: st.lastSegments.slice(),
+        text: st.lastSegments.join(' '),
+        stableWords: st.lockedWordCount + st.committed.length,
+      };
+    },
+
     windowSeconds(pcm48k) {
       return Math.max(0, pcm48k.length / 2 - st.windowStartSample) / SAMPLE_RATE;
     },
@@ -351,6 +362,7 @@ export function createSttStream({
         const snapKey = `${stableWords}:${snapText}`;
         if (snapKey === st.lastText) return { changed: false };
         st.lastText = snapKey;
+        st.lastSegments = segments;
         return {
           changed: true,
           text: snapText,

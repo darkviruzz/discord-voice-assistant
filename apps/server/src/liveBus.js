@@ -49,8 +49,9 @@ export function subscribePresence(handler) {
 
 // A live entry was retro-classified after it was first published — e.g. a
 // wake-word/stop was detected in it (detection runs AFTER the utterance is
-// appended). The annotation references the entry by startMs so the client can
-// patch the already-rendered line. { startMs, wakeDetected?, stopDetected? }.
+// appended), or it turned out to be an interruption of another entry
+// ({ startMs, floatInto: { hostStartMs, atWordIndex? } }). The annotation
+// references the entry by startMs so the client can patch the rendered line.
 export function publishAnnotation(sessionId, annotation) {
   if (sessionId == null || !annotation) return;
   bus.emit('annotation', { sessionId: String(sessionId), annotation });
@@ -59,4 +60,16 @@ export function publishAnnotation(sessionId, annotation) {
 export function subscribeAnnotation(handler) {
   bus.on('annotation', handler);
   return () => bus.off('annotation', handler);
+}
+
+// The session was finalized (transcript written, RAM state dropped) — the UI
+// flips it from "active" to "past" without needing a reload.
+export function publishSessionEnded(sessionId) {
+  if (sessionId == null) return;
+  bus.emit('session_ended', { sessionId: String(sessionId) });
+}
+
+export function subscribeSessionEnded(handler) {
+  bus.on('session_ended', handler);
+  return () => bus.off('session_ended', handler);
 }

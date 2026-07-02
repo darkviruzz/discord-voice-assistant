@@ -42,10 +42,10 @@ function transcriptDir() {
 export function buildVoice(sessionId) {
   const sid = String(sessionId);
   const session = sessions.get(toBig(sid));
-  const speakerMap = loadSpeakerMap(session?.guildId ?? null);
-  const label = (userId, name) => speakerLabel(userId, name, speakerMap);
 
   if (session?.voice) {
+    const speakerMap = loadSpeakerMap(session.guildId ?? null);
+    const label = (userId, name) => speakerLabel(userId, name, speakerMap);
     const v = session.voice;
     return {
       state: v.state,
@@ -56,7 +56,11 @@ export function buildVoice(sessionId) {
   }
 
   // Cold/ended session: reconstruct from the log; bot is not connected now.
+  // The guild id (for the speaker map) comes from session_meta — the RAM
+  // session is gone, so labels would otherwise fall back to Discord names.
   const { events } = readSessionEvents(sid);
+  const speakerMap = loadSpeakerMap(events.find((e) => e?.type === 'session_meta')?.guildId ?? null);
+  const label = (userId, name) => speakerLabel(userId, name, speakerMap);
   const members = new Map();
   let state = null;
   for (const e of events) {
@@ -179,6 +183,55 @@ function buildNameMap(events) {
   return names;
 }
 
+// ── interruption floats ───────────────────────────────────────────────────────
+
+// Word index inside `host` that corresponds to absolute time `atMs` — the
+// anchor where the UI docks an interrupter bubble. User hosts use their word
+// timestamps; assistant hosts (no per-word TTS timing) interpolate over the
+// spoken duration.
+function anchorWordIndex(host, atMs) {
+  if (host.type === 'user' && Array.isArray(host.words) && host.words.length > 0) {
+    let n = 0;
+    for (const w of host.words) {
+      if (host.startMs + w.t0 <= atMs) n++;
+      else break;
+    }
+    return n;
+  }
+  const wordCount = String(host.text || '').trim().split(/\s+/).filter(Boolean).length;
+  const dur = Math.max(1, host.endMs - host.startMs);
+  const ratio = Math.max(0, Math.min(1, (atMs - host.startMs) / dur));
+  return Math.round(wordCount * ratio);
+}
+
+// Mark every user span that begins strictly inside another span's window as a
+// float: { hostStartMs, atWordIndex }. The innermost (latest-starting)
+// non-float host wins; floats never nest into other floats.
+function attachFloats(spans) {
+  const sorted = spans.slice().sort((a, b) => a.startMs - b.startMs);
+  for (const s of sorted) {
+    if (s.type !== 'user') continue;
+    let host = null;
+    for (const h of sorted) {
+      if (h === s || h.floatInto) continue;
+      if (!(h.startMs < s.startMs && s.startMs < h.endMs)) continue;
+      if (!host || h.startMs > host.startMs) host = h;
+    }
+    if (!host) continue;
+    // Assistant hosts know their interruption anchors from playback_paused —
+    // more precise than wall-clock interpolation when one matches this user.
+    let atMs = s.startMs;
+    if (host.type === 'assistant' && Array.isArray(host.interruptions)) {
+      const match = host.interruptions.find((i) => i.byUserId === String(s.userId)
+        && i.atMs != null && Math.abs(i.atMs - s.startMs) < 8000);
+      if (match) atMs = host.startMs + match.atRatio * (host.endMs - host.startMs);
+    }
+    s.floatInto = { hostStartMs: host.startMs, atWordIndex: anchorWordIndex(host, atMs) };
+  }
+}
+
+export const _internal = { attachFloats, anchorWordIndex };
+
 // Map a finalize span to the UI entry shape, attaching wake/stop flags (always)
 // and the debug bundle (STT for users, TTS/turn for assistants).
 function spanToEntry(span, sttMap, turnMap, segMap) {
@@ -188,6 +241,7 @@ function spanToEntry(span, sttMap, turnMap, segMap) {
   if (span.wakeDetected) entry.wakeDetected = true;
   if (span.stopDetected) entry.stopDetected = true;
   if (span.forceMarker) entry.marker = span.forceMarker; // 'unterbricht' | 'weiter'
+  if (span.floatInto) entry.floatInto = span.floatInto;  // render as side bubble
 
   if (kind === 'user' && span.userId != null) {
     const stt = sttMap.get(`${span.userId}:${span.startMs}`);
@@ -215,8 +269,14 @@ export function buildSnapshot(sessionId) {
   const session = sessions.get(toBig(sid));
   const { events } = readSessionEvents(sid);
 
-  const speakerMap = loadSpeakerMap(session?.guildId ?? null);
-  const model = buildModelFromEvents(events, { speakerMap });
+  // Speaker map: RAM session first, session_meta fallback for ended sessions —
+  // keeps live and past labels identical (campaign names either way).
+  const sessionMeta = events.find((e) => e?.type === 'session_meta') ?? null;
+  const speakerMap = loadSpeakerMap(session?.guildId ?? sessionMeta?.guildId ?? null);
+  // weave:false — assistant turns stay whole; interrupters get floated into
+  // their host bubble instead of splitting anything (see attachFloats).
+  const model = buildModelFromEvents(events, { speakerMap, weave: false });
+  attachFloats(model.spans || []);
 
   const sttMap = buildSttMap(events);
   const segMap = buildSegmentsMap(events);
@@ -229,7 +289,45 @@ export function buildSnapshot(sessionId) {
     .sort((a, b) => a.startMs - b.startMs)
     .map((s) => spanToEntry(s, sttMap, turnMap, segMap));
 
-  const sessionMeta = events.find((e) => e?.type === 'session_meta') ?? null;
+  // Utterances still being spoken exist only as live streams (not yet in the
+  // JSONL) — mix their current partial state in, so a page load / SSE
+  // reconnect mid-monolog shows it immediately instead of only after the
+  // next tick.
+  if (session?.speakers) {
+    const liveHosts = [];
+    for (const [uid, sp] of session.speakers) {
+      const stream = sp.stream;
+      if (!stream || !stream.hasContent()) continue;
+      const snap = stream.snapshot();
+      if (!snap.text) continue;
+      entries.push({
+        label: stream.label ?? String(uid),
+        text: snap.text,
+        segments: snap.segments,
+        startMs: stream.startMs,
+        kind: 'user',
+        partial: true,
+        stableWords: snap.stableWords,
+        ...(stream.floatInto ? { floatInto: stream.floatInto } : {}),
+      });
+      if (!stream.floatInto) liveHosts.push(stream.startMs);
+    }
+    // Finalized interrupters of a STILL-RUNNING utterance: attachFloats could
+    // not anchor them (their host is not in the JSONL yet) — dock them to the
+    // live stream now. Without atWordIndex the client anchors at the host's
+    // current text position; the exact word anchor comes from the JSONL once
+    // the host utterance finishes.
+    for (const e of entries) {
+      if (e.partial || e.floatInto || e.kind !== 'user') continue;
+      let host = null;
+      for (const h of liveHosts) {
+        if (h < e.startMs && (host === null || h > host)) host = h;
+      }
+      if (host !== null) e.floatInto = { hostStartMs: host };
+    }
+    entries.sort((a, b) => a.startMs - b.startMs);
+  }
+
   const clockSyncs = events.filter((e) => e?.type === 'clock_sync');
   const lastSync = clockSyncs[clockSyncs.length - 1];
 

@@ -15,7 +15,7 @@ import express from 'express';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { debug } from './logger.js';
-import { subscribeEntries, subscribePresence, subscribeAnnotation } from './liveBus.js';
+import { subscribeEntries, subscribePresence, subscribeAnnotation, subscribeSessionEnded } from './liveBus.js';
 import { buildSnapshot, buildVoice, newestActiveSessionId, listSessions, listSessionsOnDisk } from './transcriptView.js';
 import { makeTranscriptAuth } from './transcriptAuth.js';
 
@@ -38,6 +38,8 @@ function toClientEntry(entry, meta) {
   if (Array.isArray(entry.segments)) out.segments = entry.segments;
   if (Array.isArray(entry.chunks)) out.chunks = entry.chunks;
   if (entry.partial) out.partial = true;
+  if (entry.stableWords != null) out.stableWords = entry.stableWords;
+  if (entry.floatInto) out.floatInto = entry.floatInto; // interruption side bubble
   if (entry.meta) out.meta = entry.meta;
   if (meta) out.meta = { ...(out.meta || {}), ...meta };
   return out;
@@ -101,6 +103,11 @@ function handleLive(req, res) {
     if (msg.sessionId !== sid) return;
     send('annotation', msg.annotation);
   });
+  // Finalize ran: the client flips this session from active to past.
+  const unsubEnded = subscribeSessionEnded((msg) => {
+    if (msg.sessionId !== sid) return;
+    send('session_ended', { sessionId: sid });
+  });
 
   try {
     const snap = buildSnapshot(sid);
@@ -122,7 +129,7 @@ function handleLive(req, res) {
   const hb = setInterval(() => { try { res.write(':hb\n\n'); } catch {} }, SSE_HEARTBEAT_MS);
   hb.unref?.();
 
-  req.on('close', () => { clearInterval(hb); unsubEntries(); unsubPresence(); unsubAnnotation(); });
+  req.on('close', () => { clearInterval(hb); unsubEntries(); unsubPresence(); unsubAnnotation(); unsubEnded(); });
 }
 
 // Register all /transcript routes on the given Express app. Optional Basic auth

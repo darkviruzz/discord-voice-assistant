@@ -8,7 +8,7 @@ import { loadSpeakerMap, setSpeakerMapping } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
 import { ensureSession, dropSession, sessions } from './state.js';
-import { publishPresence, publishEntry } from './liveBus.js';
+import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
@@ -195,6 +195,10 @@ async function handleFinalize(ws, msg) {
       audioOk: result.audio?.ok ?? false,
       audioCount: result.audio?.files?.length ?? 0,
     });
+    // The session is done: drop the RAM state (snapshots rebuild from the
+    // JSONL) and tell the transcript UI to flip it from active to past.
+    dropSession(sessionId);
+    publishSessionEnded(sessionId);
   } catch (e) {
     warn('finalize: failed for', String(sessionId), '-', e.message);
     autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
@@ -493,6 +497,25 @@ export function initControlWSS({ bearer } = {}) {
             const eventType = msg.eventType === 'playback_resumed' ? 'playback_resumed' : 'playback_paused';
             const { type, cmdId, eventType: _eventType, ...fields } = msg;
             logTranscriptEvent(msg.sessionId, eventType, fields);
+            // Remember who interrupted the playing reply and where, so the
+            // interrupter's upcoming live entry can be floated into the
+            // assistant bubble at the right text position (consumed by the
+            // streaming tick in pipeline.js when that user's stream starts).
+            if (eventType === 'playback_paused' && msg.interruptedByUserId != null) {
+              const session = sessions.get(BigInt(msg.sessionId));
+              const lastAsst = session
+                ? [...(session.liveContext?.buffer ?? [])].reverse().find((e) => e.kind === 'assistant')
+                : null;
+              if (session && lastAsst) {
+                session.pendingInterrupt = {
+                  byUserId: String(msg.interruptedByUserId),
+                  hostStartMs: lastAsst.startMs,
+                  hostText: lastAsst.text,
+                  msPlayed: Number(msg.msPlayed) || 0,
+                  at: Date.now(),
+                };
+              }
+            }
             send(ws, { type: 'ack', cmdId, ok: true, op: eventType });
             return;
           }

@@ -165,20 +165,12 @@ function charCutter(full, durationMs) {
   };
 }
 
-// Reconstruct assistant (LLM/TTS) turns, split at playback interruptions.
-// We have no per-word TTS timing, so character positions are interpolated from
-// playback_paused.msPlayed / tts_done.durationMs and snapped to word boundaries;
-// playback_resumed.rewoundMs is honored so the replayed overlap after each
-// interruption is not dropped. Ordering within a turn follows the playback
-// event sequence (robust against clock-sync jitter), with the interrupting user
-// utterance (interruptedByUserId) woven in between segments.
-// Returns { spans, consumed } where `consumed` are user spans pulled into the
-// woven sequence (so callers drop them from the standalone span list).
-export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName = DEFAULT_ASSISTANT_NAME, userSpans = [] } = {}) {
-  const norm = (ms) => (Number.isFinite(ms) ? ms - clockOffsetMs : null);
+// Group the assistant/TTS lifecycle events into per-turn records, ordered by
+// playback start. playback_paused/resumed carry the TTS `id`, not the turnId —
+// mapped via tts_start. assistant_response without a turnId (text replies)
+// becomes a standalone synthetic turn.
+function collectAssistantTurns(events) {
   const TYPES = ['assistant_response', 'tts_start', 'tts_done', 'assistant_response_played', 'playback_paused', 'playback_resumed'];
-  // playback_paused/resumed carry the TTS `id`, not the turnId — map id→turnId
-  // via tts_start so they can be correlated to their turn.
   const idToTurn = new Map();
   for (const e of events) {
     if (e && e.type === 'tts_start' && e.id && e.turnId) idToTurn.set(e.id, e.turnId);
@@ -190,10 +182,8 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
     if (!e || !TYPES.includes(e.type)) continue;
     let key = e.turnId || (e.id ? idToTurn.get(e.id) : null);
     if (!key) {
-      // assistant_response without a turnId (e.g. text replies) → standalone turn;
-      // other event types can't be correlated, so skip them.
       if (e.type === 'assistant_response') key = `__solo_${solo++}`;
-      else continue;
+      else continue; // uncorrelatable lifecycle event
     }
     const rec = turns.get(key) || { pauses: [], resumes: [], turnId: key };
     if (e.type === 'playback_paused') rec.pauses.push(e);
@@ -202,11 +192,62 @@ export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName =
     turns.set(key, rec);
   }
 
+  return [...turns.values()].filter((r) => r.assistant_response)
+    .sort((a, b) => (a.tts_start?.tsMs ?? a.assistant_response.tsMs ?? 0) - (b.tts_start?.tsMs ?? b.assistant_response.tsMs ?? 0));
+}
+
+// One span per assistant turn, NOT split at interruptions — the transcript web
+// UI embeds interrupters as floating side bubbles inside the full reply
+// instead. Interruption anchors are exposed as `interruptions`
+// [{ byUserId, atMs, atRatio }] (atRatio = fraction of the spoken audio when
+// the pause hit; there is no per-word TTS timing).
+export function buildAssistantSpans(events, { clockOffsetMs = 0, assistantName = DEFAULT_ASSISTANT_NAME } = {}) {
+  const norm = (ms) => (Number.isFinite(ms) ? ms - clockOffsetMs : null);
+  const out = [];
+  for (const rec of collectAssistantTurns(events)) {
+    const full = String(rec.assistant_response.text || '').trim();
+    if (!full) continue;
+    const played = rec.assistant_response_played;
+    const truncated = !!(played && played.truncated);
+    const text = (truncated && played.text) ? String(played.text).trim() : full;
+    const turnId = (rec.turnId && !String(rec.turnId).startsWith('__solo_')) ? rec.turnId : null;
+    const startMs = norm(rec.tts_start?.tsMs ?? rec.assistant_response.tsMs) ?? 0;
+    const durationMs = rec.tts_done?.durationMs || estimateSpeechMs(text);
+    out.push({
+      type: 'assistant',
+      label: assistantName,
+      startMs,
+      endMs: startMs + durationMs,
+      text,
+      words: null,
+      turnId,
+      interrupted: truncated,
+      interruptions: rec.pauses
+        .slice().sort((a, b) => a.tsMs - b.tsMs)
+        .map((p) => ({
+          byUserId: p.interruptedByUserId != null ? String(p.interruptedByUserId) : null,
+          atMs: norm(p.tsMs),
+          atRatio: Math.max(0, Math.min(1, (Number(p.msPlayed) || 0) / Math.max(1, durationMs))),
+        })),
+    });
+  }
+  return out;
+}
+
+// Reconstruct assistant (LLM/TTS) turns, split at playback interruptions.
+// We have no per-word TTS timing, so character positions are interpolated from
+// playback_paused.msPlayed / tts_done.durationMs and snapped to word boundaries;
+// playback_resumed.rewoundMs is honored so the replayed overlap after each
+// interruption is not dropped. Ordering within a turn follows the playback
+// event sequence (robust against clock-sync jitter), with the interrupting user
+// utterance (interruptedByUserId) woven in between segments.
+// Returns { spans, consumed } where `consumed` are user spans pulled into the
+// woven sequence (so callers drop them from the standalone span list).
+export function weaveAssistantTurns(events, { clockOffsetMs = 0, assistantName = DEFAULT_ASSISTANT_NAME, userSpans = [] } = {}) {
+  const norm = (ms) => (Number.isFinite(ms) ? ms - clockOffsetMs : null);
+  const ordered = collectAssistantTurns(events);
   const out = [];
   const consumed = new Set();
-  // Process turns in playback-start order.
-  const ordered = [...turns.values()].filter((r) => r.assistant_response)
-    .sort((a, b) => (a.tts_start?.tsMs ?? a.assistant_response.tsMs ?? 0) - (b.tts_start?.tsMs ?? b.assistant_response.tsMs ?? 0));
 
   for (const rec of ordered) {
     const full = String(rec.assistant_response.text || '').trim();
@@ -334,10 +375,19 @@ export function buildModelFromEvents(events, opts = {}) {
     }
   }
 
-  const { spans: assistantSpans, consumed } = weaveAssistantTurns(list, {
-    clockOffsetMs, assistantName, userSpans: spans,
-  });
-  const finalSpans = spans.filter((s) => !consumed.has(s)).concat(assistantSpans);
+  // weave:true (default, Markdown transcript): assistant turns split at
+  // interruptions with the interrupter woven in between the segments.
+  // weave:false (web-UI snapshot): one full span per assistant turn carrying
+  // its interruption anchors — the UI floats interrupters as side bubbles.
+  let finalSpans;
+  if (opts.weave === false) {
+    finalSpans = spans.concat(buildAssistantSpans(list, { clockOffsetMs, assistantName }));
+  } else {
+    const { spans: assistantSpans, consumed } = weaveAssistantTurns(list, {
+      clockOffsetMs, assistantName, userSpans: spans,
+    });
+    finalSpans = spans.filter((s) => !consumed.has(s)).concat(assistantSpans);
+  }
 
   markDetections(finalSpans, list, clockOffsetMs);
   const participants = computeParticipants(finalSpans, list, clockOffsetMs, speakerMap);

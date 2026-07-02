@@ -45,6 +45,14 @@
   --maxw: 920px;
   --gap: 14px;
   --radius: 10px;
+
+  /* Word-level streaming animations (see renderWordSegments in app.js).
+     --w-morph/--w-exit have JS twins (MORPH_HALF_MS ≈ --w-morph, EXIT_MS = --w-exit). */
+  --w-enter-dur: 2.4s;      /* new word: blur → sharp */
+  --w-morph: .45s;          /* corrected word: blur out, swap, sharpen */
+  --w-exit: .4s;            /* retracted hypothesis word: blur away */
+  --w-tent-opacity: .55;    /* unconfirmed (tentative) words */
+  --bubble-resize: .35s;    /* speech-bubble growth */
 }
 
 [data-theme="light"] {
@@ -324,6 +332,32 @@ body.debug .entry { outline: 1px dashed var(--border); }
 @keyframes para-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 .entry-body > .para-enter { animation: para-enter .28s ease-out; }
 @media (prefers-reduced-motion: reduce) { .entry-body > .para-enter { animation: none; } }
+
+/* ── word-level streaming (blur → sharpen) ────────────────────────────────────
+   Each spoken word is a .w span. New words materialize from a blur; corrected
+   words blur out, swap text and sharpen again (.w-blur set/removed by JS);
+   words the server has not confirmed yet (.w-tent) stay dimmed and slightly
+   soft until the agreement promotes them. The enter keyframes only define
+   `from` — they animate towards the element's CURRENT style, so a word can
+   enter straight into its tentative look without a fight between rules. */
+.w {
+  transition: opacity var(--w-morph) ease, filter var(--w-morph) ease;
+}
+.w-tent {
+  opacity: var(--w-tent-opacity);
+  filter: blur(.6px);
+}
+@keyframes w-enter { from { opacity: 0; filter: blur(9px); } }
+.w-enter { animation: w-enter var(--w-enter-dur) ease-out; }
+.w-blur, .w-exit { opacity: .08; filter: blur(8px); }
+
+/* speech bubbles grow/shrink smoothly (height animated across DOM patches) */
+.entry.h-anim { transition: height var(--bubble-resize) ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .w, .entry.h-anim { transition: none; }
+  .w-enter { animation: none; }
+}
 
 /* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */
 .entry-body p.chunk { position: relative; padding-left: 2px; margin: 0 0 .35em; }

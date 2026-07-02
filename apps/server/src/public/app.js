@@ -171,6 +171,126 @@
     return el;
   }
 
+  // ── word-level live rendering (streaming STT) ──────────────────────────────
+  // User utterances stream word by word: new words blur→sharpen in slowly
+  // (flowtoken-style), corrected words morph (blur out, swap text at the
+  // midpoint, sharpen back), words beyond entry.stableWords are dimmed until
+  // the server's agreement confirms them. Paragraphs follow entry.segments.
+  // Timings live in CSS (--w-enter-dur etc.); the two JS constants below must
+  // stay in sync with --w-morph / --w-exit.
+
+  const MORPH_HALF_MS = 450;
+  const EXIT_MS = 400;
+
+  function wordsOfSegment(s) { return String(s || '').trim().split(/\s+/).filter(Boolean); }
+
+  // The word renderer applies to user speech (assistant replies are markdown,
+  // stop lines keep their <mark>, debug mode keeps the per-chunk view).
+  function useWordRender(entry) {
+    if (entry.kind !== 'user') return false;
+    if (entry.stopDetected && state.stopPhrases.length) return false;
+    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return false;
+    return Boolean((Array.isArray(entry.segments) && entry.segments.length) || entry.text);
+  }
+
+  function makeWordEl(text, { animate, tentative }) {
+    const el = document.createElement('span');
+    el.className = 'w' + (animate ? ' w-enter' : '') + (tentative ? ' w-tent' : '');
+    el.textContent = text;
+    return el;
+  }
+
+  // Blur out, swap the text at the midpoint, sharpen back. Re-targets an
+  // in-flight morph instead of stacking timers.
+  function morphWord(el, text) {
+    el._pendingText = text;
+    if (el._morphing) return;
+    el._morphing = true;
+    el.classList.add('w-blur');
+    setTimeout(() => {
+      el.textContent = el._pendingText;
+      delete el._pendingText;
+      el._morphing = false;
+      el.classList.remove('w-blur');
+    }, MORPH_HALF_MS);
+  }
+
+  function removeWordEl(el) {
+    const prev = el.previousSibling; // swallow the separating space text node
+    if (prev && prev.nodeType === 3 && !prev.textContent.trim()) prev.remove();
+    el.remove();
+  }
+
+  function exitWord(el) {
+    if (el._exiting) return;
+    el._exiting = true;
+    el.classList.add('w-exit');
+    setTimeout(() => removeWordEl(el), EXIT_MS);
+  }
+
+  // Patch `bodyEl` to match entry.segments word by word (append/morph/exit).
+  // `stableWords` counts words across ALL segments; anything beyond is still a
+  // moving hypothesis and rendered dimmed. Finals (no stableWords) undim all.
+  function renderWordSegments(bodyEl, entry, { animate = true } = {}) {
+    const segs = (Array.isArray(entry.segments) && entry.segments.length
+      ? entry.segments : [entry.text || ''])
+      .map(wordsOfSegment).filter((w) => w.length);
+    const stable = entry.partial && Number.isFinite(entry.stableWords)
+      ? entry.stableWords : Infinity;
+    const paras = Array.from(bodyEl.children).filter((el) => el.classList.contains('w-para'));
+
+    let wordIndex = 0;
+    for (let si = 0; si < segs.length; si++) {
+      let p = paras[si];
+      if (!p) {
+        p = document.createElement('p');
+        p.className = 'w-para';
+        bodyEl.appendChild(p);
+      }
+      const words = segs[si];
+      const existing = Array.from(p.querySelectorAll('.w')).filter((el) => !el._exiting);
+      for (let i = 0; i < words.length; i++) {
+        const tentative = (wordIndex + i) >= stable;
+        const cur = existing[i];
+        if (!cur) {
+          if (p.lastChild) p.appendChild(document.createTextNode(' '));
+          p.appendChild(makeWordEl(words[i], { animate, tentative }));
+          continue;
+        }
+        const target = cur._morphing ? cur._pendingText : cur.textContent;
+        if (target !== words[i]) morphWord(cur, words[i]);
+        cur.classList.toggle('w-tent', tentative);
+      }
+      for (let i = words.length; i < existing.length; i++) exitWord(existing[i]);
+      wordIndex += words.length;
+    }
+    for (let si = segs.length; si < paras.length; si++) {
+      const p = paras[si];
+      Array.from(p.querySelectorAll('.w')).forEach(exitWord);
+      setTimeout(() => p.remove(), EXIT_MS + 60);
+    }
+  }
+
+  // Animate the bubble's height across a DOM mutation (smooth growth instead
+  // of jumps); keeps the view pinned to the bottom afterwards when it was.
+  function withHeightTransition(el, mutate) {
+    const h0 = el.offsetHeight;
+    mutate();
+    const h1 = el.offsetHeight;
+    if (h0 === h1) return;
+    el.style.height = `${h0}px`;
+    el.style.overflow = 'hidden';
+    void el.offsetHeight; // reflow so the transition has a start value
+    el.classList.add('h-anim');
+    el.style.height = `${h1}px`;
+    setTimeout(() => {
+      el.classList.remove('h-anim');
+      el.style.height = '';
+      el.style.overflow = '';
+      if (state.atBottom) scrollToBottom();
+    }, 380);
+  }
+
   // ── colors / time formatting ────────────────────────────────────────────────
   function hueFor(label) {
     let h = 0;
@@ -197,7 +317,7 @@
   }
 
   // ── entry rendering ───────────────────────────────────────────────────────
-  function entryEl(entry) {
+  function entryEl(entry, { animateWords = false } = {}) {
     const wrap = document.createElement('article');
     wrap.className = 'entry'
       + (entry.kind === 'assistant' ? ' entry--assistant' : '')
@@ -231,7 +351,8 @@
 
     const body = document.createElement('div');
     body.className = 'entry-body';
-    body.innerHTML = renderBody(entry);
+    if (useWordRender(entry)) renderWordSegments(body, entry, { animate: animateWords });
+    else body.innerHTML = renderBody(entry);
 
     wrap.appendChild(meta);
     wrap.appendChild(body);
@@ -286,9 +407,9 @@
     state.rendered.clear();
   }
 
-  function pushEntry(entry, { scroll }) {
+  function pushEntry(entry, { scroll, animate = false }) {
     if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
-    const el = entryEl(entry);
+    const el = entryEl(entry, { animateWords: animate });
     els.transcript.appendChild(el);
     state.rendered.set(entry.startMs, { data: entry, el });
     state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
@@ -298,19 +419,26 @@
     }
   }
 
-  // Insert a new entry, or update an existing one in place (same startMs). Live
-  // streaming publishes an utterance repeatedly as chunks arrive.
+  // Insert a new entry, or update an existing one in place (same startMs). The
+  // streaming STT publishes an utterance many times as words commit/appear.
   function upsertEntry(entry) {
     const rec = state.rendered.get(entry.startMs);
     if (rec) {
-      const parts = entry.kind === 'user' ? userParts(entry) : null;
-      if (parts) patchEntry(rec, entry, parts);       // smooth, append-only
-      else { rec.data = entry; const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; }
+      const bodyEl = rec.el.querySelector('.entry-body');
+      if (useWordRender(entry) && bodyEl && (bodyEl.querySelector('.w-para') || bodyEl.children.length === 0)) {
+        rec.data = entry;
+        withHeightTransition(rec.el, () => renderWordSegments(bodyEl, entry, { animate: true }));
+        if (!entry.partial) syncDebugFooter(rec, entry);
+      } else {
+        const parts = entry.kind === 'user' ? userParts(entry) : null;
+        if (parts) patchEntry(rec, entry, parts);       // smooth, append-only
+        else { rec.data = entry; const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; }
+      }
       if (state.atBottom) scrollToBottom();
       return;
     }
     if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // out of order, older
-    pushEntry(entry, { scroll: true });
+    pushEntry(entry, { scroll: true, animate: true });
   }
 
   // Append-only paragraph patch: keep already-rendered paragraphs stable, update
@@ -337,12 +465,16 @@
       // Final: drop any surplus paragraphs (normally none — updates are monotonic)
       // and sync the debug footer.
       for (let i = bodyEl.children.length - 1; i >= parts.length; i--) bodyEl.children[i].remove();
-      const dbg = state.debug ? debugDetail(entry) : null;
-      const oldDbg = rec.el.querySelector('.entry-debug');
-      if (oldDbg && dbg) oldDbg.replaceWith(dbg);
-      else if (oldDbg && !dbg) oldDbg.remove();
-      else if (dbg) rec.el.appendChild(dbg);
+      syncDebugFooter(rec, entry);
     }
+  }
+
+  function syncDebugFooter(rec, entry) {
+    const dbg = state.debug ? debugDetail(entry) : null;
+    const oldDbg = rec.el.querySelector('.entry-debug');
+    if (oldDbg && dbg) oldDbg.replaceWith(dbg);
+    else if (oldDbg && !dbg) oldDbg.remove();
+    else if (dbg) rec.el.appendChild(dbg);
   }
 
   // Retro-mark a line by startMs (wake/stop detected after it was sent).

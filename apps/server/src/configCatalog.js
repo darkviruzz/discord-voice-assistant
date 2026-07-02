@@ -225,20 +225,46 @@ export const CATALOG = [
   },
   {
     scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAMING',
-    label: 'Live-Transkription während des Sprechens', type: 'boolean',
+    label: 'Streaming-Transkription während des Sprechens', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
-    desc: 'true = fertige (an einer Stille abgeschlossene) Chunks werden schon während '
-      + 'des Sprechens transkribiert und erscheinen live im Transkript, statt erst nach '
-      + 'dem Ende der ganzen Äußerung. Das finale Ergebnis (Weckwort/LLM) entsteht '
-      + 'weiterhin am Äußerungsende und ersetzt die Vorschau. Wird pro Tick gelesen.',
+    desc: 'true = echtes Wort-Streaming: das wachsende Audio-Fenster wird laufend als '
+      + 'Ganzes transkribiert (LocalAgreement) — stabile Wörter erscheinen sofort im '
+      + 'Transkript, der Satzrest als noch korrigierbare Vorschau. Keine Chunk-Grenzen '
+      + 'im Live-Pfad. Das finale Ergebnis (Weckwort/LLM) entsteht weiterhin am '
+      + 'Äußerungsende und ersetzt die Vorschau. Wird pro Tick gelesen.',
   },
   {
     scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_INTERVAL_MS',
-    label: 'Prüfintervall Live-Transkription (ms)', type: 'number', def: '1000',
+    label: 'Streaming-Tick-Intervall (ms)', type: 'number', def: '1000',
     applyMode: 'restart',
-    desc: 'Wie oft geprüft wird, ob ein neuer Chunk fertig ist und live transkribiert '
-      + 'werden kann. Kleiner = reaktiver, aber mehr Last. Wird beim Start des '
+    desc: 'Wie oft das aktive Fenster eines Sprechers neu transkribiert wird. Kleiner = '
+      + 'reaktiveres Live-Transkript, aber mehr GPU-Last (jede Transkription kostet je '
+      + 'nach Fensterlänge ~0,5–2 s auf der RX 6800 XT). Wird beim Start des '
       + 'Streaming-Loops einmalig gelesen (Neustart nötig).',
+  },
+  {
+    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_MIN_WINDOW_MS',
+    label: 'Streaming: Mindest-Audio vor erstem Tick (ms)', type: 'number', def: '1000',
+    applyMode: 'live',
+    desc: 'So viel Audio muss vorliegen, bevor der Streamer das Fenster zum ersten Mal '
+      + 'transkribiert. Sehr kleine Fenster liefern unbrauchbare Hypothesen. Wird pro '
+      + 'Tick gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_TRIM_SECONDS',
+    label: 'Streaming: Fenster-Trim ab (s)', type: 'number', def: '15', applyMode: 'live',
+    desc: 'Sobald die bestätigten Wörter so viele Sekunden Audio abdecken, wird das '
+      + 'Fenster an der letzten bestätigten Satzgrenze abgeschnitten und der Text '
+      + 'fixiert. Hält die pro Tick transkribierte Fensterlänge (und damit die '
+      + 'GPU-Last) unabhängig von der Länge des Monologs. Wird pro Tick gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_PROMPT',
+    label: 'Streaming: fixierten Text als Kontext mitgeben', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
+    desc: 'true = bereits fixierter Text wird Whisper als Decoder-Prompt mitgegeben, '
+      + 'damit die Erkennung über die Fenstergrenze hinweg konsistent bleibt '
+      + '(Satzanfang bekannt). Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_SILENCE_THRESH',

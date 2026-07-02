@@ -30,9 +30,12 @@ function parseWords(data) {
   const push = (w) => {
     const t0 = Number(w.start ?? w.t0 ?? w.from);
     const t1 = Number(w.end ?? w.t1 ?? w.to);
-    const word = (w.word ?? w.text ?? w.w ?? '').trim();
+    const raw = String(w.word ?? w.text ?? w.w ?? '');
+    const word = raw.trim();
     if (!word || !Number.isFinite(t0)) return;
-    out.push({ w: word, t0, t1: Number.isFinite(t1) ? t1 : t0 });
+    // `raw` keeps whisper's leading-space convention (space = new word, none =
+    // sub-word continuation) so sttStreaming can rebuild words from tokens.
+    out.push({ w: word, t0, t1: Number.isFinite(t1) ? t1 : t0, raw });
   };
   if (Array.isArray(data.words)) data.words.forEach(push);
   if (out.length === 0 && Array.isArray(data.segments)) {
@@ -51,7 +54,7 @@ function parseWords(data) {
 //   - Requests `verbose_json` so segment-level `no_speech_prob` is available.
 //   - Does not filter by no_speech_prob in live mode. The values are persisted
 //     into JSONL so Finalize/offline tooling can decide what to discard later.
-export async function transcribe(wavBuffer) {
+export async function transcribe(wavBuffer, { prompt } = {}) {
   const base        = (process.env.WHISPER_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
   const language    = process.env.WHISPER_LANGUAGE ?? 'auto';
   const temperature = Number(process.env.WHISPER_TEMPERATURE ?? 0.2);
@@ -61,6 +64,9 @@ export async function transcribe(wavBuffer) {
   if (language !== 'auto') form.append('language', language);
   form.append('response_format', 'verbose_json');
   form.append('temperature', String(temperature));
+  // Decoder context from already-locked streaming text — keeps wording stable
+  // across the window boundary (the model "knows" how the sentence began).
+  if (prompt) form.append('prompt', String(prompt).slice(-500));
   // Ask for word-level timestamps. Harmless if the server ignores it (older
   // whisper.cpp builds); parseWords() falls back to utterance-level timing.
   if ((process.env.WHISPER_WORD_TIMESTAMPS ?? 'true') !== 'false') {

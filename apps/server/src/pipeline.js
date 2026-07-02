@@ -14,9 +14,10 @@ import { maybeFold } from './rollingSummary.js';
 import { getCampaignContext } from './campaignContext.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { speakerLabel, normalizeText } from './finalize/merge.js';
-import opus from '@discordjs/opus';
-
-const { OpusEncoder } = opus;
+import {
+  createSttStream, mergeTokensToWords, normWord,
+  opusFramesToPcm, pcmToWav,
+} from './sttStreaming.js';
 
 // ── Stop-command detection ───────────────────────────────────────────────────
 
@@ -54,28 +55,6 @@ function stopRegex() {
 
 function isStopCommand(text) {
   return stopRegex().test(text);
-}
-
-// ── Audio helpers ────────────────────────────────────────────────────────────
-
-function opusFramesToPcm(opusBuffers) {
-  const dec = new OpusEncoder(48000, 1);
-  return Buffer.concat(opusBuffers.map(b => dec.decode(b)));
-}
-
-// Build a minimal 44-byte WAV header around a PCM buffer.
-function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
-  const byteRate   = sampleRate * channels * (bitDepth / 8);
-  const blockAlign = channels * (bitDepth / 8);
-  const hdr = Buffer.alloc(44);
-  hdr.write('RIFF', 0);        hdr.writeUInt32LE(36 + pcm.length, 4);
-  hdr.write('WAVE', 8);        hdr.write('fmt ', 12);
-  hdr.writeUInt32LE(16, 16);   hdr.writeUInt16LE(1,          20); // PCM
-  hdr.writeUInt16LE(channels, 22); hdr.writeUInt32LE(sampleRate, 24);
-  hdr.writeUInt32LE(byteRate, 28); hdr.writeUInt16LE(blockAlign, 32);
-  hdr.writeUInt16LE(bitDepth, 34);
-  hdr.write('data', 36);       hdr.writeUInt32LE(pcm.length, 40);
-  return Buffer.concat([hdr, pcm]);
 }
 
 // ── Long-audio transcription helpers ────────────────────────────────────────
@@ -210,7 +189,26 @@ function logSilenceSplitDebug(pcm48k, chunks) {
   debug(`pipeline: silence split debug duration=${totalSec.toFixed(1)}s maxChunk=${maxSec}s threshold=${thresh} chunks=${chunks.length} ${details}`);
 }
 
-// Soft word-boundary deduplication for the 2 s overlap fallback.
+// Time-based overlap dedup for forced-overlap chunks: drop the words that lie
+// inside the duplicated 2 s overlap region (word t0 < overlapSec) and append
+// only the genuinely new tail. Whisper may transcribe the same audio passage
+// DIFFERENTLY in the two chunks ("= 7 ergibt" vs "3,7 ergibt"), so the
+// text-matching fallback below cannot find the seam — timestamps can.
+// A 1-word exact seam dedup catches boundary words whisper placed twice.
+export function stitchByTime(prevText, tokens, overlapSec) {
+  const words = mergeTokensToWords(tokens);
+  const kept = words.filter((w) => w.t0 >= overlapSec);
+  if (kept.length > 0) {
+    const prevWords = String(prevText || '').trim().split(/\s+/);
+    const lastNorm = normWord(prevWords[prevWords.length - 1] ?? '');
+    if (lastNorm && lastNorm === kept[0].norm) kept.shift();
+  }
+  const tail = kept.map((w) => w.text).join(' ');
+  return tail ? `${String(prevText || '').trim()} ${tail}` : String(prevText || '').trim();
+}
+
+// Soft word-boundary deduplication for the 2 s overlap fallback — used only
+// when the whisper server returned no word timestamps.
 // Tries 3→1 word matches at the end of t1 / start of t2.
 // On match: removes duplicated words from start of t2.
 // On no match: keeps all words (avoids creating artifacts).
@@ -311,7 +309,11 @@ export async function transcribeChunked(pcm48k, { onProgress } = {}) {
 
     if (!text) continue;
     if (hasOverlap && parts.length > 0) {
-      parts[parts.length - 1] = stitchOverlap(parts[parts.length - 1], text);
+      // Prefer the time-based cut (word timestamps); text matching is the
+      // fallback for servers without word-level data.
+      parts[parts.length - 1] = Array.isArray(chunkWords) && chunkWords.length > 0
+        ? stitchByTime(parts[parts.length - 1], chunkWords, overlapSec)
+        : stitchOverlap(parts[parts.length - 1], text);
     } else {
       parts.push(text);
     }
@@ -331,85 +333,45 @@ export async function transcribeChunked(pcm48k, { onProgress } = {}) {
   };
 }
 
-// ── Streaming STT (live preview) ─────────────────────────────────────────────
-// While a speaker is still talking, transcribe the completed (silence-bounded)
-// chunks from the growing buffer and publish DISPLAY-ONLY partials, so the
-// transcript page fills in chunk-by-chunk instead of only at utterance_end.
-// The utterance_end pipeline stays authoritative (wake-word / LLM / JSONL); by
-// sharing the same startMs its final entry replaces these partials.
+// ── Streaming STT (LocalAgreement) ───────────────────────────────────────────
+// True word-level streaming while a speaker is still talking: every tick the
+// speaker's active window is re-transcribed as ONE piece (full context, no
+// chunk boundaries), stable words are committed, the moving hypothesis tail is
+// displayed alongside — see sttStreaming.js. Partials are DISPLAY-ONLY; the
+// utterance_end pipeline stays authoritative (wake-word / LLM / JSONL) and, by
+// sharing the same startMs, its final entry replaces the streamed preview.
 //
 // The buffer is NOT drained here — utterance_end still owns the frames. Each
 // tick re-decodes the whole buffer (one fresh Opus decoder; cheap at this
-// scale) and processes only the not-yet-consumed tail.
+// scale); the streamer itself only re-transcribes its bounded active window.
 function streamingEnabled() {
   return (process.env.STT_STREAMING ?? 'true') !== 'false' && liveContextEnabled();
-}
-
-// Pure planner (unit-tested): given the not-yet-consumed PCM, decide which
-// silence-bounded chunks are COMPLETE (safe to transcribe now) and by how many
-// samples to advance the consumed cursor. The last chunk is always the still-
-// growing tail and is left for a later tick / utterance_end. Returns null when
-// nothing new is complete yet.
-export function planStreamChunks(pendingPcm) {
-  const chunks = splitAtSilence(pendingPcm);
-  if (chunks.length < 2) return null;
-  const advance = chunks[chunks.length - 1].startSample; // start of the in-progress tail
-  if (!(advance > 0)) return null;
-  return { complete: chunks.slice(0, -1), advance };
 }
 
 async function streamingTick(sessionId, session, userId, sp) {
   if (!sp.opusBuffer || sp.opusBuffer.length === 0) return;
   if (sp.stream?.busy) return;
   if (!sp.stream) {
-    sp.stream = {
+    sp.stream = createSttStream({
       startMs: Date.now(),
-      consumedSamples: 0,       // samples already transcribed+displayed
-      parts: [],                // natural-silence groups so far (deduped)
-      rawChunks: [],            // [{text, split}] so far
       label: speakerLabel(userId, null, loadSpeakerMap(session.guildId)),
-      busy: false,
-    };
+    });
   }
   const stream = sp.stream;
   const pcm = opusFramesToPcm(sp.opusBuffer);
-  const pending = pcm.subarray(stream.consumedSamples * 2); // 16-bit samples → *2 bytes
-  const plan = planStreamChunks(pending);
-  if (!plan) return;                             // only the in-progress tail so far
-  const { complete, advance } = plan;
-
-  stream.busy = true;
-  try {
-    for (const ch of complete) {
-      const { text: rawText } = await transcribe(pcmToWav(ch.pcm));
-      if (sp.stream !== stream) return;           // utterance ended mid-transcribe → drop
-      const text = normalizeText(rawText);
-      if (text) {
-        if (ch.hasOverlap && stream.parts.length > 0) {
-          stream.parts[stream.parts.length - 1] = stitchOverlap(stream.parts[stream.parts.length - 1], text);
-        } else {
-          stream.parts.push(text);
-        }
-        stream.rawChunks.push({ text, split: ch.split ?? null });
-      }
-    }
-    stream.consumedSamples += advance;
-    if (sp.stream === stream && stream.parts.length) {
-      publishEntry(sessionId, {
-        label: stream.label,
-        text: stream.parts.join(' '),
-        segments: stream.parts.slice(),
-        chunks: stream.rawChunks.slice(),
-        startMs: stream.startMs,
-        kind: 'user',
-        partial: true,
-      });
-    }
-  } catch (e) {
-    debug('streamingTick error:', e.message);
-  } finally {
-    stream.busy = false;
-  }
+  const res = await stream.tick(pcm);
+  // utterance ended mid-transcribe → the final entry owns the display now
+  if (!res?.changed || sp.stream !== stream) return;
+  publishEntry(sessionId, {
+    label: stream.label,
+    text: res.text,
+    segments: res.segments,
+    chunks: res.chunks,
+    startMs: stream.startMs,
+    kind: 'user',
+    partial: true,
+    stableWords: res.stableWords,
+  });
 }
 
 let streamTimer = null;
@@ -700,47 +662,71 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     // Speaker label + a STABLE startMs for this utterance's live entry, computed
     // up front so the streaming partials and the final entry share one identity
-    // (the client upserts by startMs). If the live streamer already ran for this
-    // utterance, reuse ITS startMs so the final replaces the streamed preview,
-    // then clear the streamer state (this utterance is finished).
+    // (the client upserts by startMs). If the live streamer ran for this
+    // utterance, DETACH it: its locked/committed words become the base of the
+    // final transcript and a mid-flight tick discards its result on resume.
     const session = sessions.get(sessionId);
     const sp = session?.speakers?.get(BigInt(userId));
-    const streamStartMs = sp?.stream?.startMs;
+    const stream = sp?.stream ?? null;
     if (sp) sp.stream = null;
+    if (stream) stream.detach();
     const liveLabel = session
       ? speakerLabel(userId, metadata.userDisplayName, loadSpeakerMap(session.guildId))
       : (metadata.userDisplayName || String(userId));
-    const entryStartMs = streamStartMs ?? metadata.startTsMs ?? Date.now();
+    const entryStartMs = stream?.startMs ?? metadata.startTsMs ?? Date.now();
 
-    // 3. STT — split at silence boundaries, transcribe each chunk independently.
-    //    Stream a display-only partial after each chunk so the utterance grows
-    //    live on the transcript page (not persisted to JSONL / LLM buffer).
+    // 3. STT.
+    //    Streaming path: only the streamer's remaining active window is
+    //    transcribed once more (complete audio, full context); everything the
+    //    streamer already locked is reused verbatim — no chunk splitting, no
+    //    overlap dedup, bounded final latency regardless of utterance length.
+    //    Fallback path (streamer never ran / disabled): silence-split chunking
+    //    with display-only progress partials, as before.
     let transcripts;
     let stt;
     let words;
     let rawChunks;
     try {
-      // Only stream growing partials here when the live streamer did NOT already
-      // handle this utterance. Otherwise the re-transcription would restart the
-      // preview from chunk 1 and make the on-screen bubble shrink then regrow
-      // (finalized text must stay stable — append-only). When the streamer ran,
-      // the single final publish below reconciles the entry in one step.
-      const onProgress = (session && liveContextEnabled() && !streamStartMs)
-        ? ({ segments, chunks }) => publishEntry(sessionId, {
-            label: liveLabel,
-            text: segments.join(' '),
-            segments,
-            chunks,
-            startMs: entryStartMs,
-            kind: 'user',
-            partial: true,
-          })
-        : undefined;
-      const result = await transcribeChunked(pcm48k, { onProgress });
-      transcripts = result.transcripts;
-      stt = result.stt;
-      words = result.words;
-      rawChunks = result.chunks;
+      if (stream?.hasContent() && stream.windowSeconds(pcm48k) <= 29) {
+        const fin = await stream.finalize(pcm48k);
+        transcripts = fin.segments;
+        stt = fin.stt;
+        words = fin.words;
+        rawChunks = fin.rawChunks;
+      } else if (stream?.hasContent()) {
+        // Streaming loop stalled and the remaining window outgrew whisper's
+        // 30 s limit — chunk just that window and prepend the locked groups.
+        const st = stream.state;
+        const winPcm = pcm48k.subarray(st.windowStartSample * 2);
+        const chunked = await transcribeChunked(winPcm);
+        const baseMs = Math.round(st.windowStartSample / (48000 / 1000));
+        transcripts = [...st.lockedGroups, ...chunked.transcripts];
+        rawChunks = [
+          ...st.lockedGroups.map((t) => ({ text: t, split: 'stream-locked' })),
+          ...chunked.chunks,
+        ];
+        words = chunked.words
+          ? [...st.lockedWordsMs, ...chunked.words.map((w) => ({ w: w.w, t0: w.t0 + baseMs, t1: w.t1 + baseMs }))]
+          : (st.lockedWordsMs.length > 0 ? st.lockedWordsMs : null);
+        stt = { ...chunked.stt, mode: 'stream+chunked' };
+      } else {
+        const onProgress = (session && liveContextEnabled())
+          ? ({ segments, chunks }) => publishEntry(sessionId, {
+              label: liveLabel,
+              text: segments.join(' '),
+              segments,
+              chunks,
+              startMs: entryStartMs,
+              kind: 'user',
+              partial: true,
+            })
+          : undefined;
+        const result = await transcribeChunked(pcm48k, { onProgress });
+        transcripts = result.transcripts;
+        stt = result.stt;
+        words = result.words;
+        rawChunks = result.chunks;
+      }
     } catch (e) {
       warn('pipeline: stt error:', e.message);
       return;

@@ -71,6 +71,7 @@ Aufruf im Browser: `http://<server>:7440/transcript/`
 * **Voice-Status & Teilnehmer**: ein Pill im Header zeigt, ob der Bot im Voice-Channel ist (verbunden / allein / nicht verbunden) — unabhängig von der Datenverbindung (SSE/Polling). Ein Member-Popover im Header listet die aktuell anwesenden Sprecher (live über `presence`-Events).
 * **Wake-Word-/Stop-Markierung**: Zeilen, die Rabenauge ausgelöst haben, werden komplett hervorgehoben (gesamter an das LLM gesendeter Text + „→ Rabenauge"-Badge). Stop-Kommandos markieren nur das Stop-Token. Live nachgereicht über `annotation`-Events (Erkennung läuft erst nach dem Append).
 * **Darstellung**: sinnvolle Markdown-Defaults (Fett/Kursiv/Code/Listen/Überschriften), farbige Sprechernamen (deterministischer Farbton pro Name, Rabenauge in der Akzentfarbe), Roboto-Schrift. Alle Stil-Variablen liegen als CSS-Custom-Properties in `style.css` und lassen sich offline feintunen.
+* **Wort-für-Wort-Live-Rendering**: Beim Streaming-STT blenden neue Wörter langsam von unscharf nach scharf ein (Blur→Sharpen, `--w-enter-dur`); noch unbestätigte Hypothesen-Wörter sind gedimmt und werden beim Bestätigen „fest". Korrigiert die Erkennung ein Wort nachträglich, verschwimmt es kurz und wird mit dem neuen Text wieder scharf (`--w-morph`); zurückgezogene Wörter verschwimmen ganz. Sprechblasen wachsen mit sanfter Höhen-Animation (`--bubble-resize`, < 1 s). Alle Zeiten als CSS-Variablen in `style.css`; `prefers-reduced-motion` schaltet die Animationen ab.
 * **Debug-Modus** (`?debug=1` oder Checkbox): Timestamps + Event-Art je Zeile; pro Utterance STT-Diagnostik (`no_speech_prob`, Dauer, Wortzahl, Chunks/Splits, Provider); pro Antwort TTS-Lifecycle (gesprochen/abgebrochen/Fehler + Dauer, Modell, Speaker-ID, Interrupts). Zusätzlich ein einklappbarer **Session-Header** aus `session_meta` (Channel, Start, Wake-Word, Stop-Phrases, LLM-/STT-/TTS-Modelle, Versionen, Clock-Offset). Alles aus dem JSONL → funktioniert live und für vergangene Sessions.
 
 Endpunkte (alle unter `/transcript`, hinter der Basic-Auth):
@@ -211,8 +212,24 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 | `WHISPER_LANGUAGE` | `auto` | Sprache für Whisper. `de` für Deutsch, `en` für Englisch, `auto` für automatische Erkennung. `auto` ist etwas langsamer. |
 | `WHISPER_TEMPERATURE` | `0.2` | Sampling-Temperature für Whisper. Lokale `.env.example` nutzt konservativ `0.1`; Werte >0 liefern brauchbarere `no_speech_prob`-Werte als deterministisches `0`. |
 | `WHISPER_NO_SPEECH_THRESHOLD` | — | Der Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`; die Werte werden im JSONL gespeichert. Ein Threshold ist nur als späterer Finalize-/Offline-Filter vorgesehen. |
-| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks. Längere Utterances werden an Stille geteilt; wenn keine passende Stille gefunden wird, wird mit `OVERLAP=2s` forced gesplittet. |
-| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks im **Fallback-/Finalize-Pfad** (der Live-Pfad streamt ohne Chunk-Grenzen, s. u.). Längere Utterances werden an Stille geteilt; ohne passende Stille wird mit `OVERLAP=2s` forced gesplittet — die Overlap-Dopplung wird zeitbasiert über Wort-Zeitstempel entfernt. |
+| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances (Fallback-/Finalize-Pfad). Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+
+#### Streaming-STT (Live-Transkription während des Sprechens)
+
+Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster eines Sprechers wird jede Sekunde als Ganzes an whisper.cpp geschickt (voller Kontext, nie mitten im Wort geschnitten). Wörter, in denen zwei aufeinanderfolgende Hypothesen übereinstimmen, werden **bestätigt** (LocalAgreement-2) und erscheinen sofort im Live-Transkript; der Satzrest wird als noch korrigierbare Vorschau gedimmt angezeigt. Sobald die bestätigten Wörter `STT_STREAM_TRIM_SECONDS` Audio abdecken, wird das Fenster an der letzten bestätigten Satzgrenze **fixiert** und abgeschnitten — die GPU-Last pro Tick bleibt dadurch unabhängig von der Monolog-Länge (Fenster ≤ ~25 s). Am Äußerungsende wird nur noch das Restfenster einmal final transkribiert (statt der kompletten Äußerung); bestätigte Wörter werden dabei nie zurückgenommen.
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `STT_STREAMING` | `true` | Streaming-Transkription ein/aus. Aus = altes Verhalten (Transkript erst am Äußerungsende, Chunk-Pfad). |
+| `STT_STREAM_INTERVAL_MS` | `1000` | Tick-Intervall des Streaming-Loops. Kleiner = reaktiver, mehr GPU-Last (Neustart nötig). |
+| `STT_STREAM_MIN_WINDOW_MS` | `1000` | Mindest-Audio, bevor der Streamer das erste Mal transkribiert (sehr kurze Fenster liefern unbrauchbare Hypothesen). |
+| `STT_STREAM_TRIM_SECONDS` | `15` | Ab so vielen Sekunden bestätigten Audios wird das Fenster an der letzten Satzgrenze fixiert. |
+| `STT_STREAM_PROMPT` | `true` | Fixierten Text als Whisper-Decoder-Prompt mitgeben (konsistente Erkennung über die Fenstergrenze). |
+
+> **GPU-Portabilität (AMD heute, NVIDIA/Cloud später):** Der Server spricht nur die whisper.cpp-HTTP-API (`WHISPER_URL`). whisper.cpp gibt es mit identischer API als **Vulkan**-Build (AMD, aktuelles Setup) und als **CUDA/cuBLAS**-Build (NVIDIA, z. B. Cloud-Instanz mit H100) — beim Umzug wechselt nur das Binary bzw. die URL, am Server-Code ändert sich nichts. Gemessen auf der RX 6800 XT (Vulkan, medium-q5_0, warm): 10 s Audio ≈ 0,6 s, 30 s ≈ 1,8 s (16–24× Echtzeit) — genug Headroom für den 1-s-Tick.
+
+**End-to-End-Test:** `node tests/ui-sim.mjs` startet den Server auf Port 7441 (Auth aus) und speist `tests/Quantengravitation.m4a` (86 s vorgelesener Wikipedia-Text, Ground-Truth in `tests/transcript.txt`) in Echtzeit als Fake-Sprecher ein — das Wort-für-Wort-Streaming lässt sich unter `http://127.0.0.1:7441/transcript/?sessionId=1780000000001` live ansehen. Voraussetzung: whisper.cpp-Server auf `:8080` läuft, `ffmpeg` im PATH.
 
 #### LLM
 

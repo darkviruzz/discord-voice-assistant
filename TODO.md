@@ -202,9 +202,18 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 - [ ] **Wort-Probabilitäts-Markierung** — unsichere Wörter mit `[unsicher]` im Log.
   - Nice-to-have für Audits, niedriger Impact
 
+- [x] **Streaming-STT (LocalAgreement) statt Chunk-Transkription** — umgesetzt in `feature/streaming-stt` (`apps/server/src/sttStreaming.js`).
+  - Live-Pfad ohne Chunk-Grenzen: wachsendes Fenster jede Sekunde als Ganzes transkribieren, Wörter nach doppelter Bestätigung committen (LocalAgreement-2), Fenster an bestätigten Satzgrenzen fixieren (`STT_STREAM_TRIM_SECONDS`), fixierten Text als Whisper-Prompt weiterreichen
+  - Fixt den Duplikations-Bug der Forced-Overlap-Chunks doppelt: Live-Pfad hat keine Chunks mehr; der verbleibende Fallback-/Finalize-Pfad schneidet den Overlap jetzt zeitbasiert über Wort-Zeitstempel (`stitchByTime`) statt per Textvergleich
+  - Utterance-Ende: nur noch Restfenster-Transkription (0,5 s statt 10 s bei 86 s Rede); bestätigte Wörter werden nie zurückgenommen
+  - Web-UI: Wort-für-Wort-Rendering mit Blur→Sharpen-Einblendung, Morph bei Korrekturen, gedimmte unbestätigte Wörter, sanfte Bubble-Höhenanimation
+  - Messung (tests/Quantengravitation.m4a, 86 s, RX 6800 XT Vulkan medium-q5_0): erstes Partial nach ~1 s, Ø-Tick 0,7 s, WER 2,6 % (Chunk-Pfad: 8,4 %), 0 Text-Dopplungen
+  - E2E-Simulation: `node tests/ui-sim.mjs` (Server auf :7441, speist das Testaudio in Echtzeit ein)
+
 - [ ] **Verbessertes Stitching innerhalb einer Utterance** — Whisper-Timestamps statt RMS für Silence-Splitting.
   - Match nächstes Audio-Snippet bei zuletzt erkanntem Satzzeichen (`.!?`)
   - Großer Aufwand (~3–4 h), MVP-irrelevant
+  - Teilweise durch Streaming-STT erledigt (Live-Pfad chunk-frei; `stitchByTime` nutzt Timestamps)
 
 - [x] **`session-rolling-summary`** — umgesetzt in `feature/live-transcript-llm-context` (`apps/server/src/rollingSummary.js`). Statt `conversationHistory` faltet der Live-Transkript-Puffer ältere Turns asynchron in eine rollende Zusammenfassung (Schwellen `LIVE_RAW_WINDOW_CHARS`/`LIVE_FOLD_CHARS`, Single-Flight, Remove-after-Success). Gegen Token-Blowup bei Mehrstunden-Sessions.
 
@@ -238,7 +247,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Verworfen
 
-- **WebSocket-basiertes Piper-Streaming** (`piper-streaming` / `paroli`) — evaluiert in `feature/piper-pipeline-rework`. HTTP-Chunked-Streaming liefert identische TTFA (first-byte innerhalb von 100–200 ms), kein messbarer Vorteil für unser 0.5–2s End-to-End-Ziel. Aufwand >> Nutzen.
+- **whisper-amd-windows (ChharithOeun) als STT-Backend** — evaluiert und lokal getestet (2026-07-02, vor `feature/streaming-stt`). Nicht kompatibel mit dem Streaming-Ziel und dem Setup: (1) explizit **kein** Streaming/Server/Mikrofon — nur dateibasierte Batch-Transkription; (2) das DirectML-Versprechen hält nicht — faster-whisper/CTranslate2 kennt kein DirectML, `transcribe.py` crasht mit `unsupported device directml` (die GPU-Erkennung prüft nur ONNX-Provider, die mit der Whisper-Inferenz nichts zu tun haben); (3) weitere Bugs: falscher kwarg `word_level_timestamps` (crasht jede Transkription), `verify_gpu.py` crasht an cp1252, requirements.txt installiert das CPU-`onnxruntime` über das DirectML-Paket; (4) gemessener CPU-Fallback: **0,4× Echtzeit** (small int8) vs. **16–24× Echtzeit** des bestehenden whisper.cpp-Vulkan-Servers (medium-q5_0, warm). Der Vulkan-Server bleibt; NVIDIA-Umzug später über den CUDA-Build von whisper.cpp (identische HTTP-API).
 - **Mehrere gleichzeitige Sessions** — Bot ist bewusst auf einen Voice-Channel beschränkt.
 - **`/redact`-Command** — würde LLM-Entscheidungen erfordern. Off-Topic-Filter passiert manuell oder in der externen Cowork-Pipeline.
 - **`/marker`-Command** — gleiches Argument; Anker im Transkript besser über Pause-Erkennung + Spielernotizen.

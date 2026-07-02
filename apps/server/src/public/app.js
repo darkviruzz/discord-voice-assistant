@@ -36,7 +36,7 @@
   const state = {
     sessionId: params.get('sessionId') || null,
     debug: params.get('debug') === '1',
-    showPast: false,
+    showPast: params.get('past') === '1',
     es: null,            // EventSource
     pollTimer: null,     // polling fallback interval
     sseFailures: 0,
@@ -98,16 +98,23 @@
     return html.join('');
   }
 
-  // Locate the first stop-phrase occurrence in `text` (case-insensitive). Stop
-  // commands are short, so a plain earliest-substring scan is enough.
+  // Locate the first stop-phrase occurrence in `text` as WHOLE words —
+  // "Stopp" must not half-match the shorter phrase "stop" (which left the
+  // trailing "p" unmarked). Longest phrase wins at the same position.
   function findStopToken(text, phrases) {
-    const hay = text.toLowerCase();
     let best = null;
     for (const p of phrases) {
-      const needle = String(p).toLowerCase().trim();
+      const needle = String(p).trim();
       if (!needle) continue;
-      const i = hay.indexOf(needle);
-      if (i >= 0 && (!best || i < best.index)) best = { index: i, length: needle.length };
+      const body = needle.split(/\s+/)
+        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+      let re;
+      try { re = new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, 'iu'); } catch { continue; }
+      const m = re.exec(text);
+      if (m && (!best || m.index < best.index
+        || (m.index === best.index && m[0].length > best.length))) {
+        best = { index: m.index, length: m[0].length };
+      }
     }
     return best;
   }
@@ -185,17 +192,47 @@
   function wordsOfSegment(s) { return String(s || '').trim().split(/\s+/).filter(Boolean); }
 
   // The word renderer applies to user speech (assistant replies are markdown,
-  // stop lines keep their <mark>, debug mode keeps the per-chunk view).
+  // debug mode keeps the per-chunk view). Wake-word/stop hits are marked on
+  // the matching word spans (see computeKeywordMarks).
   function useWordRender(entry) {
     if (entry.kind !== 'user') return false;
-    if (entry.stopDetected && state.stopPhrases.length) return false;
     if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return false;
     return Boolean((Array.isArray(entry.segments) && entry.segments.length) || entry.text);
   }
 
-  function makeWordEl(text, { animate, tentative }) {
+  // Match like the server's detection: case-insensitive, punctuation-free.
+  function normKw(text) {
+    return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  }
+
+  // Word indices (flat across all segments) to mark for a detected wake word /
+  // stop phrase. WHOLE normalized words only — "Stopp" never half-matches the
+  // phrase "stop"; multi-word phrases match consecutive words; longest first.
+  function computeKeywordMarks(flatWords, entry) {
+    const marks = new Map(); // index → 'wake' | 'stop'
+    const norms = flatWords.map(normKw);
+    const mark = (phrase, cls) => {
+      const seq = String(phrase || '').split(/\s+/).map(normKw).filter(Boolean);
+      if (!seq.length) return;
+      for (let i = 0; i + seq.length <= norms.length; i++) {
+        let hit = true;
+        for (let j = 0; j < seq.length; j++) {
+          if (norms[i + j] !== seq[j]) { hit = false; break; }
+        }
+        if (hit) for (let j = 0; j < seq.length; j++) if (!marks.has(i + j)) marks.set(i + j, cls);
+      }
+    };
+    if (entry.stopDetected) {
+      for (const p of [...state.stopPhrases].sort((a, b) => b.length - a.length)) mark(p, 'stop');
+    }
+    if (entry.wakeDetected && state.wakeWord) mark(state.wakeWord, 'wake');
+    return marks;
+  }
+
+  function makeWordEl(text, { animate, tentative, kw }) {
     const el = document.createElement('span');
-    el.className = 'w' + (animate ? ' w-enter' : '') + (tentative ? ' w-tent' : '');
+    el.className = 'w' + (animate ? ' w-enter' : '') + (tentative ? ' w-tent' : '')
+      + (kw ? ` w-kw-${kw}` : '');
     el.textContent = text;
     return el;
   }
@@ -228,15 +265,29 @@
     setTimeout(() => removeWordEl(el), EXIT_MS);
   }
 
+  // Direct words of one paragraph, excluding words that live inside embedded
+  // interruption bubbles (those belong to the bubble's own renderer).
+  function wordsOfPara(p) {
+    return Array.from(p.querySelectorAll('.w')).filter((el) => {
+      if (el._exiting) return false;
+      for (let n = el.parentElement; n && n !== p; n = n.parentElement) {
+        if (n.classList.contains('int-bubble')) return false;
+      }
+      return true;
+    });
+  }
+
   // Patch `bodyEl` to match entry.segments word by word (append/morph/exit).
   // `stableWords` counts words across ALL segments; anything beyond is still a
   // moving hypothesis and rendered dimmed. Finals (no stableWords) undim all.
+  // Detected wake/stop words get marker classes on their spans.
   function renderWordSegments(bodyEl, entry, { animate = true } = {}) {
     const segs = (Array.isArray(entry.segments) && entry.segments.length
       ? entry.segments : [entry.text || ''])
       .map(wordsOfSegment).filter((w) => w.length);
     const stable = entry.partial && Number.isFinite(entry.stableWords)
       ? entry.stableWords : Infinity;
+    const marks = computeKeywordMarks(segs.flat(), entry);
     const paras = Array.from(bodyEl.children).filter((el) => el.classList.contains('w-para'));
 
     let wordIndex = 0;
@@ -248,27 +299,115 @@
         bodyEl.appendChild(p);
       }
       const words = segs[si];
-      const existing = Array.from(p.querySelectorAll('.w')).filter((el) => !el._exiting);
+      const existing = wordsOfPara(p);
       for (let i = 0; i < words.length; i++) {
         const tentative = (wordIndex + i) >= stable;
+        const kw = marks.get(wordIndex + i) ?? null;
         const cur = existing[i];
         if (!cur) {
           if (p.lastChild) p.appendChild(document.createTextNode(' '));
-          p.appendChild(makeWordEl(words[i], { animate, tentative }));
+          p.appendChild(makeWordEl(words[i], { animate, tentative, kw }));
           continue;
         }
         const target = cur._morphing ? cur._pendingText : cur.textContent;
         if (target !== words[i]) morphWord(cur, words[i]);
         cur.classList.toggle('w-tent', tentative);
+        cur.classList.toggle('w-kw-wake', kw === 'wake');
+        cur.classList.toggle('w-kw-stop', kw === 'stop');
       }
       for (let i = words.length; i < existing.length; i++) exitWord(existing[i]);
       wordIndex += words.length;
     }
     for (let si = segs.length; si < paras.length; si++) {
       const p = paras[si];
+      // Rescue embedded bubbles before dropping the surplus paragraph.
+      const lastKept = bodyEl.children[Math.max(0, segs.length - 1)];
+      for (const b of p.querySelectorAll('.int-bubble')) {
+        if (lastKept && lastKept !== p) lastKept.appendChild(b);
+      }
       Array.from(p.querySelectorAll('.w')).forEach(exitWord);
       setTimeout(() => p.remove(), EXIT_MS + 60);
     }
+  }
+
+  // ── interruption side bubbles ────────────────────────────────────────────
+  // An utterance that starts while another one is still on screen renders as a
+  // small floating bubble at the right edge of the interrupted entry, anchored
+  // at the word where the interruption happened. The host text keeps flowing
+  // around it (CSS float), nothing is split, everything stays on record.
+
+  let floatZ = 5; // later interruptions stack above earlier ones
+
+  // Flat list of the host body's own words (bubbles excluded), across paragraphs.
+  function hostWords(bodyEl) {
+    const out = [];
+    for (const p of bodyEl.children) {
+      if (p.classList && p.classList.contains('w-para')) out.push(...wordsOfPara(p));
+    }
+    return out;
+  }
+
+  // Insert `bubble` into the host body before the word at flat index
+  // `atWordIndex`; append to the last paragraph when the index is missing/out
+  // of range (live case: "now" — the host is still growing past it).
+  function insertFloatAt(hostBody, bubble, atWordIndex) {
+    const words = hostWords(hostBody);
+    const anchor = Number.isFinite(atWordIndex) && atWordIndex < words.length
+      ? words[atWordIndex] : null;
+    if (anchor) {
+      anchor.parentNode.insertBefore(bubble, anchor);
+      return;
+    }
+    let lastPara = null;
+    for (const p of hostBody.children) {
+      if (p.classList && p.classList.contains('w-para')) lastPara = p;
+    }
+    if (!lastPara) {
+      lastPara = document.createElement('p');
+      lastPara.className = 'w-para';
+      hostBody.appendChild(lastPara);
+    }
+    lastPara.appendChild(bubble);
+  }
+
+  // Create or update the floating bubble for `entry` inside its host entry.
+  // Returns false when the host is not rendered (caller falls back to a
+  // normal feed line — nothing gets lost).
+  function upsertFloat(entry, { animate = true } = {}) {
+    const hostRec = state.rendered.get(entry.floatInto.hostStartMs);
+    if (!hostRec || hostRec.isFloat) return false;
+    const hostBody = hostRec.el.querySelector('.entry-body');
+    if (!hostBody) return false;
+
+    const rec = state.rendered.get(entry.startMs);
+    if (rec && rec.isFloat) {
+      rec.data = entry;
+      withHeightTransition(hostRec.el, () => renderWordSegments(rec.bodyEl, entry, { animate: true }));
+      return true;
+    }
+    if (rec) { // was a normal feed line (e.g. rendered before the host) → migrate
+      rec.el.remove();
+      state.rendered.delete(entry.startMs);
+    }
+
+    const bubble = document.createElement('span');
+    bubble.className = 'int-bubble' + (animate ? ' int-enter' : '');
+    bubble.style.zIndex = String(floatZ++);
+    const label = document.createElement('span');
+    label.className = 'int-label';
+    label.textContent = entry.label || '?';
+    label.style.color = speakerColor(entry.label || '?');
+    const body = document.createElement('span');
+    body.className = 'int-body';
+    bubble.append(label, body);
+
+    withHeightTransition(hostRec.el, () => {
+      insertFloatAt(hostBody, bubble, entry.floatInto.atWordIndex);
+      renderWordSegments(body, entry, { animate });
+    });
+    state.rendered.set(entry.startMs, { data: entry, el: bubble, bodyEl: body, isFloat: true });
+    state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
+    return true;
   }
 
   // Animate the bubble's height across a DOM mutation (smooth growth instead
@@ -323,6 +462,7 @@
       + (entry.kind === 'assistant' ? ' entry--assistant' : '')
       + (entry.wakeDetected ? ' entry--wake' : '')
       + (entry.stopDetected ? ' entry--stop' : '');
+    wrap.dataset.startMs = String(entry.startMs); // sorted insert + annotations
 
     const meta = document.createElement('div');
     meta.className = 'entry-meta';
@@ -408,9 +548,25 @@
   }
 
   function pushEntry(entry, { scroll, animate = false }) {
+    // Interruptions float into their host bubble instead of a feed line
+    // (debug mode keeps flat chronological lines for inspection).
+    if (entry.floatInto && !state.debug && upsertFloat(entry, { animate })) {
+      if (scroll && state.atBottom) scrollToBottom();
+      return;
+    }
     if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
     const el = entryEl(entry, { animateWords: animate });
-    els.transcript.appendChild(el);
+    // Insert in start-time order: after an SSE reconnect the snapshot only
+    // contains FINALIZED utterances, so a still-running monolog's partials
+    // arrive with an older startMs than lines already on screen.
+    let anchor = null;
+    const kids = els.transcript.querySelectorAll('.entry');
+    for (let i = kids.length - 1; i >= 0; i--) {
+      if (Number(kids[i].dataset.startMs || 0) <= entry.startMs) { anchor = kids[i]; break; }
+    }
+    if (anchor) anchor.after(el);
+    else if (kids.length) kids[0].before(el);
+    else els.transcript.appendChild(el);
     state.rendered.set(entry.startMs, { data: entry, el });
     state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
     if (scroll) {
@@ -423,6 +579,19 @@
   // streaming STT publishes an utterance many times as words commit/appear.
   function upsertEntry(entry) {
     const rec = state.rendered.get(entry.startMs);
+    if (rec?.isFloat && !state.debug) {
+      // Already docked as a side bubble — keep updating it there (a final
+      // without its own floatInto inherits the placement).
+      entry.floatInto = entry.floatInto ?? rec.data.floatInto;
+      if (entry.floatInto && upsertFloat(entry, { animate: true })) {
+        if (state.atBottom) scrollToBottom();
+        return;
+      }
+    }
+    if (!rec && entry.floatInto && !state.debug && upsertFloat(entry, { animate: true })) {
+      if (state.atBottom) scrollToBottom();
+      return;
+    }
     if (rec) {
       const bodyEl = rec.el.querySelector('.entry-body');
       if (useWordRender(entry) && bodyEl && (bodyEl.querySelector('.w-para') || bodyEl.children.length === 0)) {
@@ -437,7 +606,8 @@
       if (state.atBottom) scrollToBottom();
       return;
     }
-    if (entry.startMs < state.lastStartMs && state.lastStartMs !== -Infinity) return; // out of order, older
+    // No out-of-order guard: entries are identified by startMs and inserted
+    // sorted, so late partials of an older utterance render correctly.
     pushEntry(entry, { scroll: true, animate: true });
   }
 
@@ -484,6 +654,13 @@
     if (!rec) return;
     if (ann.wakeDetected) rec.data.wakeDetected = true;
     if (ann.stopDetected) rec.data.stopDetected = true;
+    if (rec.isFloat) {
+      // Side bubbles re-run the word renderer (keyword marks refresh in place).
+      renderWordSegments(rec.bodyEl, rec.data, { animate: false });
+      rec.el.classList.toggle('int-bubble--wake', !!rec.data.wakeDetected);
+      rec.el.classList.toggle('int-bubble--stop', !!rec.data.stopDetected);
+      return;
+    }
     const fresh = entryEl(rec.data);
     rec.el.replaceWith(fresh);
     rec.el = fresh;
@@ -612,6 +789,12 @@
     es.addEventListener('entry', (ev) => { try { upsertEntry(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('presence', (ev) => { try { renderVoice(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('annotation', (ev) => { try { applyAnnotation(JSON.parse(ev.data)); } catch {} });
+    es.addEventListener('session_ended', () => {
+      // Finalize ran: flip this session from active to past in the picker and
+      // say so in the status pill (the transcript itself stays on screen).
+      setStatus('ended', 'Session beendet');
+      loadSessions();
+    });
     es.addEventListener('error', (ev) => {
       if (ev && ev.data) { try { console.warn('transcript:', JSON.parse(ev.data)); } catch {} }
     });
@@ -685,7 +868,15 @@
         els.select.appendChild(g);
       }
       if (!state.sessionId && active.length) state.sessionId = active[0].sessionId; // newest active
-      if (state.sessionId) els.select.value = state.sessionId;
+      if (state.sessionId) {
+        els.select.value = state.sessionId;
+        // The viewed session may be in neither group (e.g. it just got
+        // finalized and "vergangene" is unchecked) — keep it selectable.
+        if (els.select.value !== state.sessionId) {
+          addOption(els.select, { sessionId: state.sessionId, startedAt: Number(state.sessionId) });
+          els.select.value = state.sessionId;
+        }
+      }
     } catch {
       /* picker stays empty; live endpoint still auto-detects newest */
     }
@@ -696,6 +887,7 @@
     const p = new URLSearchParams();
     if (state.sessionId) p.set('sessionId', state.sessionId);
     if (state.debug) p.set('debug', '1');
+    if (state.showPast) p.set('past', '1');
     const qs = p.toString();
     history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
   }
@@ -712,6 +904,7 @@
 
   els.past.addEventListener('change', async () => {
     state.showPast = els.past.checked;
+    syncUrl();
     await loadSessions();
   });
 
@@ -736,6 +929,7 @@
   }
 
   (async function init() {
+    els.past.checked = state.showPast;
     await loadSessions();
     syncUrl();
     if (typeof EventSource !== 'undefined') startSse();

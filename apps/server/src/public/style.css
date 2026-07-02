@@ -109,6 +109,7 @@ body {
 .status--live { color: var(--ok); }
 .status--polling { color: var(--accent); }
 .status--error { color: var(--err); }
+.status--ended { color: var(--text-dim); }
 
 /* voice-channel / bot presence — independent of the data connection above */
 .voice {
@@ -354,9 +355,54 @@ body.debug .entry { outline: 1px dashed var(--border); }
 /* speech bubbles grow/shrink smoothly (height animated across DOM patches) */
 .entry.h-anim { transition: height var(--bubble-resize) ease; }
 
+/* detected keywords, marked on the word spans (whole words only) */
+.w-kw-wake { color: var(--accent); font-weight: 700; }
+.w-kw-stop {
+  background: color-mix(in srgb, var(--err) 30%, transparent);
+  border-radius: 3px;
+  padding: 0 .22em;
+  font-weight: 700;
+}
+
+/* ── interruption side bubbles ────────────────────────────────────────────────
+   An interrupting utterance floats at the right edge of the interrupted entry,
+   anchored at the word where it happened; the host text flows around it and
+   rewraps as the bubble grows. Bubbles overhang the entry edge slightly and
+   stack by start time (z-index set inline). */
+.int-bubble {
+  float: right;
+  clear: right;
+  position: relative;
+  max-width: 46%;
+  margin: 2px -16px 8px 12px;
+  padding: 5px 10px 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .3);
+  font-size: .9em;
+  transform-origin: top right;
+}
+.int-label {
+  display: block;
+  font-weight: 700;
+  font-size: .78em;
+  margin-bottom: 1px;
+  /* color set inline per speaker (hue) from JS */
+}
+.int-bubble .w-para { margin: 0; display: inline; }
+.int-bubble--wake { box-shadow: inset 2px 0 0 var(--accent), 0 3px 12px rgba(0, 0, 0, .3); }
+.int-bubble--stop { box-shadow: inset 2px 0 0 var(--err), 0 3px 12px rgba(0, 0, 0, .3); }
+/* materialize from nothing: blurry, small, then grow to size (only `from`,
+   so it lands on the element's current styles) */
+@keyframes int-enter { from { opacity: 0; filter: blur(10px); transform: scale(.55); } }
+.int-enter { animation: int-enter .8s ease-out; }
+
+@media (max-width: 560px) { .int-bubble { max-width: 58%; margin-right: -8px; } }
+
 @media (prefers-reduced-motion: reduce) {
   .w, .entry.h-anim { transition: none; }
-  .w-enter { animation: none; }
+  .w-enter, .int-enter { animation: none; }
 }
 
 /* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */

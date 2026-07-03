@@ -423,13 +423,17 @@
     return w.getBoundingClientRect().top - 5; // bubble top edge ≈ that text line
   }
 
-  function layoutGroup(group) {
-    if (group.length === 1) {
-      const rec = group[0];
-      rec._share = 1;
-      rec.el.style.maxWidth = '';
-      rec.el.style.marginTop = '';
-      setSide(rec, 'left');
+  function layoutGroup(group, narrow) {
+    if (group.length === 1 || narrow) {
+      // Solo bubble — or a narrow viewport, where width sharing and anchor
+      // lifting would squeeze text into one-word columns: plain full-width
+      // chronological list.
+      for (const rec of group) {
+        rec._share = 1;
+        rec.el.style.maxWidth = '';
+        rec.el.style.marginTop = '';
+        setSide(rec, 'left');
+      }
       return;
     }
     // Widths + sides first — they change line wrapping and therefore heights.
@@ -437,12 +441,22 @@
     const weights = group.map((r) => Math.max(1, entryWordCount(r.data)));
     const total = weights.reduce((a, b) => a + b, 0);
     const avg = total / group.length;
+    const byStart = new Map(group.map((r) => [r.data.startMs, r]));
     let prevSide = 'right';
     group.forEach((rec, i) => {
       const wc = weights[i];
       rec._share = Math.min(.78, Math.max(.24, (wc / total) * 1.06));
-      let side = prevSide === 'left' ? 'right' : 'left';
-      if (i === 0 || (wc >= 25 && wc >= 1.3 * avg)) side = 'left'; // long talkers prefer left
+      // Side rule, in priority order: the first bubble sits left; an anchored
+      // interjection takes the OPPOSITE side of its host (stable across ticks
+      // — the alternating rule used to flip it onto the host and the collision
+      // resolver then bounced it around); long talkers prefer left; everything
+      // else alternates.
+      let side;
+      const host = rec.data.floatInto ? byStart.get(rec.data.floatInto.hostStartMs) : null;
+      if (i === 0) side = 'left';
+      else if (host && host !== rec) side = host._side === 'left' ? 'right' : 'left';
+      else if (wc >= 25 && wc >= 1.3 * avg) side = 'left';
+      else side = prevSide === 'left' ? 'right' : 'left';
       rec.el.style.maxWidth = `${Math.round(rec._share * 100)}%`;
       setSide(rec, side);
       prevSide = side;
@@ -450,9 +464,14 @@
     // Vertical pass, sequential with measurements (each margin shifts the
     // natural position of everything after it): anchored bubbles rise to the
     // text line of their anchor word; unanchored ones cascade below the flow.
-    // A bubble may kiss edges (≤14px into a neighbour) but never sit ON one —
-    // real overlaps push it down below the colliding bubble.
-    const EDGE = 14;
+    // Edges may overlap up to EDGE px (this must exceed the ~2% horizontal
+    // overlap the width shares produce, or the resolver fights the width rule
+    // and bubbles bounce between anchor and cascade every tick). Real overlaps
+    // push a bubble down below the colliding one. A small hysteresis keeps
+    // margins put when the target only wobbles by a few pixels (live growth
+    // shifts weights/heights slightly on every streaming tick).
+    const EDGE = 26;
+    const WOBBLE = 12;
     const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > EDGE
       && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > EDGE;
     group[0].el.style.marginTop = '';
@@ -462,6 +481,7 @@
     let flowBottom = firstRect.bottom;
     for (let i = 1; i < group.length; i++) {
       const rec = group[i];
+      const prevMargin = parseInt(rec.el.style.marginTop, 10) || 0;
       rec.el.style.marginTop = '';
       const natTop = rec.el.getBoundingClientRect().top;
       let targetTop = resolveAnchorTop(rec, group);
@@ -475,6 +495,14 @@
         if (!hit) break;
         delta += Math.round(hit.bottom - 8 - rect.top);
         rec.el.style.marginTop = `${delta}px`;
+        rect = rec.el.getBoundingClientRect();
+      }
+      if (Math.abs(delta - prevMargin) <= WOBBLE && delta !== prevMargin) {
+        // Close enough to last tick's position → keep it (no micro-jitter),
+        // unless that would re-introduce a collision.
+        rec.el.style.marginTop = `${prevMargin}px`;
+        const kept = rec.el.getBoundingClientRect();
+        if (placed.some((p) => overlaps(p, kept))) rec.el.style.marginTop = `${delta}px`;
         rect = rec.el.getBoundingClientRect();
       }
       placed.push(rect);
@@ -491,8 +519,9 @@
     if (recs.length === 0) return;
     const before = new Map();
     for (const r of recs) before.set(r, r.el.getBoundingClientRect());
+    const narrow = els.transcript.clientWidth < 560;
     els.transcript.classList.add('layouting');
-    for (const group of computeGroups(recs)) layoutGroup(group);
+    for (const group of computeGroups(recs)) layoutGroup(group, narrow);
     void els.transcript.offsetHeight;
     els.transcript.classList.remove('layouting');
     for (const r of recs) {

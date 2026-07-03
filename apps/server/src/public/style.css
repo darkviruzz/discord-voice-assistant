@@ -356,7 +356,7 @@ body.debug .entry { outline: 1px dashed var(--border); }
 .w-blur, .w-exit { opacity: .08; filter: blur(8px); }
 
 /* speech bubbles grow/shrink smoothly (height animated across DOM patches) */
-.entry.h-anim { transition: height var(--bubble-resize) ease; }
+.entry.h-anim, .bubble.h-anim { transition: height var(--bubble-resize) ease; }
 
 /* detected keywords, marked on the word spans (whole words only) */
 .w-kw-wake { color: var(--accent); font-weight: 700; }

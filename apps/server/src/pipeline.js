@@ -585,7 +585,14 @@ async function answerQuestion({
   // then fold if the raw window overflowed. Fire-and-forget (single-flight).
   if (session) {
     const stored = appendLive(session, { label: wakeWordName(), text: responseText, startMs: Date.now(), kind: 'assistant' });
-    if (stored && sid) publishEntry(sid, stored);
+    if (stored) {
+      // Estimated spoken duration (~165 wpm) — closes the bubble's time window
+      // for the client's overlap grouping; the snapshot later carries the real
+      // TTS duration.
+      const words = responseText.trim().split(/\s+/).filter(Boolean).length;
+      stored.endMs = stored.startMs + Math.max(1500, words * 360);
+      if (sid) publishEntry(sid, stored);
+    }
     maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
   }
 
@@ -808,6 +815,9 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         // Final entry carries the structured render data (replaces the partials).
         stored.segments = transcripts;
         stored.chunks = rawChunks;
+        // The utterance is closed now — endMs lets the client group bubbles
+        // that ran in parallel (they share the row width).
+        stored.endMs = metadata.endTsMs ?? Date.now();
         // Keep the interruption placement across the partial→final swap.
         if (stream?.floatInto) stored.floatInto = stream.floatInto;
         publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });

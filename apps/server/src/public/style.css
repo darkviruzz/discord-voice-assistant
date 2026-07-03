@@ -367,65 +367,66 @@ body.debug .entry { outline: 1px dashed var(--border); }
   font-weight: 700;
 }
 
-/* ── interruption side bubbles ────────────────────────────────────────────────
-   An interrupting utterance floats inside the interrupted entry, anchored at
-   the word where it happened; the host text flows around it and rewraps as the
-   bubble grows. Same type treatment as the main bubbles (same font size and
-   card look — just tighter padding); sides alternate per host, bubbles
-   overhang the entry edge slightly and stack by start time (z-index inline,
-   local to .transcript). Side conversations longer than ~45 words render as a
-   full feed entry instead (promotion in app.js). */
-.int-bubble {
-  float: right;
-  clear: right;
+/* ── equal bubbles: flow layout ───────────────────────────────────────────────
+   Every utterance is one bubble: speaker + time on top, text below — the SAME
+   card for everyone (users and Rabenauge, long and short). Bubbles never nest;
+   parallel talkers share the row width (max-width set by app.js from the
+   group's word weights), sides alternate dynamically, and a bubble may sit
+   next to the previous one (negative top margin) with a slight edge overlap.
+   Transitions are quick and slightly springy ("plop"). */
+.bubble {
   position: relative;
-  max-width: 46%;
-  margin: 2px -16px 8px 12px;
-  padding: 6px 11px 7px;
-  background: var(--bg);
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 7px 12px 8px;
+  background: var(--bg-line);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, .3);
-  font-size: 1em; /* identical type size in every bubble */
-  transform-origin: top right;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .25);
+  transition:
+    max-width .28s cubic-bezier(.3, 1.4, .5, 1),
+    margin .28s cubic-bezier(.3, 1.4, .5, 1),
+    transform .28s cubic-bezier(.3, 1.4, .5, 1);
 }
-.int-bubble--left {
-  float: left;
-  clear: left;
-  margin: 2px 12px 8px -16px;
-  transform-origin: top left;
+.bubble--right { margin-left: auto; }
+.bubble--assistant { background: var(--accent-soft); }
+.bubble--wake {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent), 0 3px 10px rgba(0, 0, 0, .25);
 }
-.int-label {
-  display: block;
-  margin-bottom: 1px;
+.bubble--stop { box-shadow: inset 3px 0 0 var(--err), 0 3px 10px rgba(0, 0, 0, .25); }
+
+.b-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
 }
-.int-name {
-  font-weight: 700;
-  /* color set inline per speaker (hue) from JS */
-}
-.int-time {
-  margin-left: 8px;
+.b-name { font-weight: 700; /* speaker hue set inline from JS */ }
+.bubble--assistant .b-name { color: var(--accent); }
+.b-time {
   font-size: .72rem;
   font-family: var(--font-mono);
   color: var(--text-dim);
   white-space: nowrap;
 }
-.int-bubble .w-para { margin: 0; display: inline; }
-.int-bubble--wake { box-shadow: inset 2px 0 0 var(--accent), 0 3px 12px rgba(0, 0, 0, .3); }
-.int-bubble--stop { box-shadow: inset 2px 0 0 var(--err), 0 3px 12px rgba(0, 0, 0, .3); }
-/* materialize from nothing: blurry, small, then grow to size (only `from`,
-   so it lands on the element's current styles) */
-@keyframes int-enter { from { opacity: 0; filter: blur(10px); transform: scale(.55); } }
-.int-enter { animation: int-enter .8s ease-out; }
+.b-body { min-width: 0; overflow-wrap: anywhere; }
+.b-body > :first-child { margin-top: 0; }
+.b-body > :last-child { margin-bottom: 0; }
+.b-body p { margin: 0 0 .35em; }
 
-@media (max-width: 560px) {
-  .int-bubble { max-width: 58%; margin-right: -8px; }
-  .int-bubble--left { margin-left: -8px; }
-}
+/* plop in: small and blurry → full size (only `from`, lands on current styles) */
+@keyframes bubble-enter { from { opacity: 0; filter: blur(8px); transform: scale(.6); } }
+.bubble--enter { animation: bubble-enter .3s cubic-bezier(.3, 1.4, .5, 1); }
+
+/* during a layout pass measurements must not read mid-animation values */
+.transcript.layouting .bubble { transition: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .w, .entry.h-anim { transition: none; }
-  .w-enter, .int-enter { animation: none; }
+  .w, .entry.h-anim, .bubble { transition: none; }
+  .w-enter, .bubble--enter { animation: none; }
 }
 
 /* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */

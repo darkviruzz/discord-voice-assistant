@@ -295,16 +295,8 @@
     setTimeout(() => removeWordEl(el), EXIT_MS);
   }
 
-  // Direct words of one paragraph, excluding words that live inside embedded
-  // interruption bubbles (those belong to the bubble's own renderer).
   function wordsOfPara(p) {
-    return Array.from(p.querySelectorAll('.w')).filter((el) => {
-      if (el._exiting) return false;
-      for (let n = el.parentElement; n && n !== p; n = n.parentElement) {
-        if (n.classList.contains('int-bubble')) return false;
-      }
-      return true;
-    });
+    return Array.from(p.querySelectorAll('.w')).filter((el) => !el._exiting);
   }
 
   // Patch `bodyEl` to match entry.segments word by word (append/morph/exit).
@@ -350,28 +342,23 @@
     }
     for (let si = segs.length; si < paras.length; si++) {
       const p = paras[si];
-      // Rescue embedded bubbles before dropping the surplus paragraph.
-      const lastKept = bodyEl.children[Math.max(0, segs.length - 1)];
-      for (const b of p.querySelectorAll('.int-bubble')) {
-        if (lastKept && lastKept !== p) lastKept.appendChild(b);
-      }
       Array.from(p.querySelectorAll('.w')).forEach(exitWord);
       setTimeout(() => p.remove(), EXIT_MS + 60);
     }
   }
 
-  // ── interruption side bubbles ────────────────────────────────────────────
-  // An utterance that starts while another one is still on screen renders as a
-  // small floating bubble at the right edge of the interrupted entry, anchored
-  // at the word where the interruption happened. The host text keeps flowing
-  // around it (CSS float), nothing is split, everything stays on record.
+  // ── equal-bubble flow layout ────────────────────────────────────────────────
+  // Every utterance is ONE bubble (name + time on top, text below) — bubbles
+  // never contain other bubbles. Utterances that ran in parallel (time
+  // overlap via startMs/endMs) form a GROUP and share the width dynamically:
+  // width follows the content (fit-content) capped by a word-count share
+  // (22–78%), long talkers prefer the left side, short interjections stay
+  // small on the free side. A bubble lifts up NEXT to the previous one when
+  // both fit in the row; otherwise it cascades with a slight edge overlap
+  // (z-order by start time). Everything re-flows on every update with quick,
+  // slightly springy transitions; side changes slide over (FLIP).
 
-  let floatZ = 1; // later interruptions stack above earlier ones (local to .transcript)
-
-  // A side conversation longer than this renders as a full feed entry instead
-  // of a bubble — a wall of text in the margin is unreadable (and unfair to
-  // the actual speaker).
-  const PROMOTE_WORDS = 45;
+  let bubbleZ = 1;
 
   function entryWordCount(entry) {
     const segs = Array.isArray(entry.segments) && entry.segments.length
@@ -379,106 +366,150 @@
     return segs.join(' ').trim().split(/\s+/).filter(Boolean).length;
   }
 
-  // Resolve the feed entry that hosts a float chain: a bubble may itself be
-  // anchored inside another bubble's utterance (short interjection into a long
-  // side conversation) — escalate until we hit a real feed entry (which a
-  // PROMOTED side conversation is).
-  function resolveHostRec(hostStartMs) {
-    let rec = state.rendered.get(hostStartMs);
-    for (let hops = 0; rec && rec.isFloat && hops < 4; hops++) {
-      const up = rec.data.floatInto?.hostStartMs;
-      rec = up != null ? state.rendered.get(up) : null;
-    }
-    return rec && !rec.isFloat ? rec : null;
+  // End of an utterance's time window for grouping. Partials are still open;
+  // entries without a wire endMs (older logs) estimate ~165 wpm.
+  function entryEndMs(entry) {
+    if (entry.partial) return Infinity;
+    if (Number.isFinite(entry.endMs)) return entry.endMs;
+    return entry.startMs + Math.max(1500, entryWordCount(entry) * 360);
   }
 
-  // Flat list of the host body's own words (bubbles excluded), across paragraphs.
-  function hostWords(bodyEl) {
+  // Rendered bubbles in DOM (= start time) order.
+  function bubbleRecs() {
     const out = [];
-    for (const p of bodyEl.children) {
-      if (p.classList && p.classList.contains('w-para')) out.push(...wordsOfPara(p));
+    for (const el of els.transcript.children) {
+      if (!el.classList || !el.classList.contains('bubble')) continue;
+      const rec = state.rendered.get(Number(el.dataset.startMs));
+      if (rec) out.push(rec);
     }
     return out;
   }
 
-  // Insert `bubble` into the host body before the word at flat index
-  // `atWordIndex`; append to the last paragraph when the index is missing/out
-  // of range (live case: "now" — the host is still growing past it).
-  function insertFloatAt(hostBody, bubble, atWordIndex) {
-    const words = hostWords(hostBody);
-    const anchor = Number.isFinite(atWordIndex) && atWordIndex < words.length
-      ? words[atWordIndex] : null;
-    if (anchor) {
-      anchor.parentNode.insertBefore(bubble, anchor);
-      return;
+  // Partition into overlap groups: a bubble joins the current group when it
+  // starts before the group's latest end.
+  function computeGroups(recs) {
+    const groups = [];
+    let cur = null;
+    let curEnd = -Infinity;
+    for (const rec of recs) {
+      if (!cur || rec.data.startMs >= curEnd) { cur = []; groups.push(cur); curEnd = -Infinity; }
+      cur.push(rec);
+      curEnd = Math.max(curEnd, entryEndMs(rec.data));
     }
-    let lastPara = null;
-    for (const p of hostBody.children) {
-      if (p.classList && p.classList.contains('w-para')) lastPara = p;
-    }
-    if (!lastPara) {
-      lastPara = document.createElement('p');
-      lastPara.className = 'w-para';
-      hostBody.appendChild(lastPara);
-    }
-    lastPara.appendChild(bubble);
+    return groups;
   }
 
-  // Create or update the floating bubble for `entry` inside its host entry.
-  // Returns false when the host is not rendered (caller falls back to a
-  // normal feed line — nothing gets lost).
-  function upsertFloat(entry, { animate = true } = {}) {
-    const hostRec = resolveHostRec(entry.floatInto.hostStartMs);
-    if (!hostRec) return false;
-    const hostBody = hostRec.el.querySelector('.entry-body');
-    if (!hostBody) return false;
+  function setSide(rec, side) {
+    rec._side = side;
+    rec.el.classList.toggle('bubble--right', side === 'right');
+  }
 
-    const rec = state.rendered.get(entry.startMs);
-    if (rec && rec.isFloat) {
-      rec.data = entry;
-      withHeightTransition(hostRec.el, () => renderWordSegments(rec.bodyEl, entry, { animate: true }));
-      return true;
+  // Viewport-top of the word LINE this bubble is anchored to (where the
+  // interruption happened inside its host), or null when unanchored. The
+  // anchor word index comes from the server (floatInto.atWordIndex, word
+  // timestamps); live partials without one anchor at the host's current last
+  // word — remembered once so the bubble stays put while the host grows.
+  function resolveAnchorTop(rec, group) {
+    const fi = rec.data.floatInto;
+    if (!fi) return null;
+    const host = group.find((r) => r.data.startMs === fi.hostStartMs);
+    if (!host || host === rec) return null;
+    const words = [];
+    for (const p of host.el.querySelectorAll('.w-para')) words.push(...wordsOfPara(p));
+    if (words.length === 0) return host.el.getBoundingClientRect().top;
+    if (Number.isFinite(fi.atWordIndex)) rec._anchorIdx = fi.atWordIndex;
+    else if (!Number.isFinite(rec._anchorIdx)) rec._anchorIdx = words.length - 1;
+    const w = words[Math.max(0, Math.min(words.length - 1, rec._anchorIdx))];
+    return w.getBoundingClientRect().top - 5; // bubble top edge ≈ that text line
+  }
+
+  function layoutGroup(group) {
+    if (group.length === 1) {
+      const rec = group[0];
+      rec._share = 1;
+      rec.el.style.maxWidth = '';
+      rec.el.style.marginTop = '';
+      setSide(rec, 'left');
+      return;
     }
-    if (rec) { // was a normal feed line (e.g. rendered before the host) → migrate
-      rec.el.remove();
-      state.rendered.delete(entry.startMs);
-    }
-
-    const bubble = document.createElement('span');
-    // Alternate sides per host so parallel talkers weave left/right instead of
-    // stacking into one column.
-    const side = hostBody.querySelectorAll('.int-bubble').length % 2 === 0 ? 'right' : 'left';
-    bubble.className = 'int-bubble' + (side === 'left' ? ' int-bubble--left' : '')
-      + (animate ? ' int-enter' : '');
-    bubble.style.zIndex = String(floatZ++);
-
-    const label = document.createElement('span');
-    label.className = 'int-label';
-    label.title = `${fmtTime(entry.startMs)} · ${entry.label || '?'}`;
-    const name = document.createElement('span');
-    name.className = 'int-name';
-    name.textContent = entry.label || '?';
-    name.style.color = speakerColor(entry.label || '?');
-    label.appendChild(name);
-    // Inline timestamp when the bubble has room; tiny interjections keep it
-    // in the tooltip only.
-    if (String(entry.text || '').length >= 15) {
-      const t = document.createElement('span');
-      t.className = 'int-time';
-      t.textContent = fmtTime(entry.startMs);
-      label.appendChild(t);
-    }
-    const body = document.createElement('span');
-    body.className = 'int-body';
-    bubble.append(label, body);
-
-    withHeightTransition(hostRec.el, () => {
-      insertFloatAt(hostBody, bubble, entry.floatInto.atWordIndex);
-      renderWordSegments(body, entry, { animate });
+    // Widths + sides first — they change line wrapping and therefore heights.
+    // Shares may sum slightly above 100% (edges are allowed to overlap a bit).
+    const weights = group.map((r) => Math.max(1, entryWordCount(r.data)));
+    const total = weights.reduce((a, b) => a + b, 0);
+    const avg = total / group.length;
+    let prevSide = 'right';
+    group.forEach((rec, i) => {
+      const wc = weights[i];
+      rec._share = Math.min(.78, Math.max(.24, (wc / total) * 1.06));
+      let side = prevSide === 'left' ? 'right' : 'left';
+      if (i === 0 || (wc >= 25 && wc >= 1.3 * avg)) side = 'left'; // long talkers prefer left
+      rec.el.style.maxWidth = `${Math.round(rec._share * 100)}%`;
+      setSide(rec, side);
+      prevSide = side;
     });
-    state.rendered.set(entry.startMs, { data: entry, el: bubble, bodyEl: body, isFloat: true });
-    state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
-    return true;
+    // Vertical pass, sequential with measurements (each margin shifts the
+    // natural position of everything after it): anchored bubbles rise to the
+    // text line of their anchor word; unanchored ones cascade below the flow.
+    // A bubble may kiss edges (≤14px into a neighbour) but never sit ON one —
+    // real overlaps push it down below the colliding bubble.
+    const EDGE = 14;
+    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > EDGE
+      && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > EDGE;
+    group[0].el.style.marginTop = '';
+    const firstRect = group[0].el.getBoundingClientRect();
+    const groupTop = firstRect.top;
+    const placed = [firstRect];
+    let flowBottom = firstRect.bottom;
+    for (let i = 1; i < group.length; i++) {
+      const rec = group[i];
+      rec.el.style.marginTop = '';
+      const natTop = rec.el.getBoundingClientRect().top;
+      let targetTop = resolveAnchorTop(rec, group);
+      if (targetTop === null) targetTop = flowBottom + 2; // cascade, slight pull-up vs the 10px gap
+      targetTop = Math.max(targetTop, groupTop);
+      let delta = Math.round(targetTop - natTop);
+      rec.el.style.marginTop = `${delta}px`;
+      let rect = rec.el.getBoundingClientRect();
+      for (let guard = 0; guard < 6; guard++) {
+        const hit = placed.find((p) => overlaps(p, rect));
+        if (!hit) break;
+        delta += Math.round(hit.bottom - 8 - rect.top);
+        rec.el.style.marginTop = `${delta}px`;
+        rect = rec.el.getBoundingClientRect();
+      }
+      placed.push(rect);
+      flowBottom = Math.max(flowBottom, rect.bottom);
+    }
+  }
+
+  // Full flow pass with FLIP: measure old positions, lay out with transitions
+  // off (measurements must not read mid-animation values), then let every
+  // moved bubble spring from its old spot to the new one.
+  function layoutAll() {
+    if (state.debug) return; // debug keeps the flat chronological list
+    const recs = bubbleRecs();
+    if (recs.length === 0) return;
+    const before = new Map();
+    for (const r of recs) before.set(r, r.el.getBoundingClientRect());
+    els.transcript.classList.add('layouting');
+    for (const group of computeGroups(recs)) layoutGroup(group);
+    void els.transcript.offsetHeight;
+    els.transcript.classList.remove('layouting');
+    for (const r of recs) {
+      if (r.el.classList.contains('bubble--enter')) continue; // plop-in owns its transform
+      const b = before.get(r);
+      const a = r.el.getBoundingClientRect();
+      const dx = b.left - a.left;
+      const dy = b.top - a.top;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        r.el.style.transition = 'none';
+        r.el.style.transform = `translate(${dx}px, ${dy}px)`;
+        void r.el.offsetWidth;
+        r.el.style.transition = '';
+        r.el.style.transform = '';
+      }
+    }
+    if (state.atBottom) scrollToBottom();
   }
 
   // Animate the bubble's height across a DOM mutation (smooth growth instead
@@ -582,6 +613,60 @@
     return b;
   }
 
+  // One equal bubble for the flow layout (normal mode): speaker + time on top,
+  // text below. Same structure for users and Rabenauge — only accent colors
+  // differ. Debug mode uses entryEl() above instead.
+  function bubbleEl(entry, { animateWords = false, animateIn = false } = {}) {
+    const el = document.createElement('article');
+    el.className = 'bubble'
+      + (entry.kind === 'assistant' ? ' bubble--assistant' : '')
+      + (entry.wakeDetected ? ' bubble--wake' : '')
+      + (entry.stopDetected ? ' bubble--stop' : '')
+      + (animateIn ? ' bubble--enter' : '');
+    el.dataset.startMs = String(entry.startMs);
+    el.style.zIndex = String(bubbleZ++);
+    // Drop the enter class once the plop finished so later FLIP moves apply.
+    if (animateIn) el.addEventListener('animationend', () => el.classList.remove('bubble--enter'), { once: true });
+
+    const head = document.createElement('div');
+    head.className = 'b-head';
+    head.title = `${fmtTime(entry.startMs)} · ${entry.label || '?'}`;
+    const name = document.createElement('span');
+    name.className = 'b-name';
+    name.textContent = entry.label || '?';
+    if (entry.kind !== 'assistant') name.style.color = speakerColor(entry.label || '?');
+    head.appendChild(name);
+    // Inline time when the bubble has room; tiny interjections keep it in the
+    // tooltip only.
+    if (String(entry.text || '').length >= 15) {
+      const t = document.createElement('span');
+      t.className = 'b-time';
+      t.textContent = fmtTime(entry.startMs);
+      head.appendChild(t);
+    }
+    if (entry.wakeDetected) head.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
+    if (entry.stopDetected) head.appendChild(badge('Stop', 'badge-stop'));
+
+    const body = document.createElement('div');
+    body.className = 'b-body';
+    if (useWordRender(entry)) renderWordSegments(body, entry, { animate: animateWords });
+    else body.innerHTML = renderBody(entry);
+
+    el.append(head, body);
+    return el;
+  }
+
+  // Sync a bubble's flags/badges after a final or an annotation.
+  function syncBubbleFlags(rec) {
+    const e = rec.data;
+    rec.el.classList.toggle('bubble--wake', !!e.wakeDetected);
+    rec.el.classList.toggle('bubble--stop', !!e.stopDetected);
+    const head = rec.el.querySelector('.b-head');
+    if (!head) return;
+    if (e.wakeDetected && !head.querySelector('.badge-wake')) head.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
+    if (e.stopDetected && !head.querySelector('.badge-stop')) head.appendChild(badge('Stop', 'badge-stop'));
+  }
+
   // Debug footer for an entry: STT diagnostics (user) or TTS/turn info (assistant).
   function debugDetail(entry) {
     const bits = [];
@@ -618,23 +703,16 @@
     state.rendered.clear();
   }
 
-  function pushEntry(entry, { scroll, animate = false }) {
-    // Interruptions float into their host bubble instead of a feed line —
-    // unless they outgrew a bubble (PROMOTE_WORDS): a long side conversation
-    // is a full entry at its chronological slot. Debug mode keeps flat
-    // chronological lines for inspection.
-    if (entry.floatInto && !state.debug && entryWordCount(entry) <= PROMOTE_WORDS
-        && upsertFloat(entry, { animate })) {
-      if (scroll && state.atBottom) scrollToBottom();
-      return;
-    }
+  function pushEntry(entry, { scroll, animate = false, layout = true }) {
     if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
-    const el = entryEl(entry, { animateWords: animate });
+    const el = state.debug
+      ? entryEl(entry, { animateWords: animate })
+      : bubbleEl(entry, { animateWords: animate, animateIn: animate });
     // Insert in start-time order: after an SSE reconnect the snapshot only
     // contains FINALIZED utterances, so a still-running monolog's partials
     // arrive with an older startMs than lines already on screen.
     let anchor = null;
-    const kids = els.transcript.querySelectorAll('.entry');
+    const kids = els.transcript.querySelectorAll('.entry, .bubble');
     for (let i = kids.length - 1; i >= 0; i--) {
       if (Number(kids[i].dataset.startMs || 0) <= entry.startMs) { anchor = kids[i]; break; }
     }
@@ -643,6 +721,7 @@
     else els.transcript.appendChild(el);
     state.rendered.set(entry.startMs, { data: entry, el });
     state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
+    if (layout) layoutAll();
     if (scroll) {
       if (state.atBottom) scrollToBottom();
       else els.jump.hidden = false;
@@ -650,49 +729,27 @@
   }
 
   // Insert a new entry, or update an existing one in place (same startMs). The
-  // streaming STT publishes an utterance many times as words commit/appear.
+  // streaming STT publishes an utterance many times as words commit/appear;
+  // every update re-flows the overlap group (widths/sides shift dynamically).
   function upsertEntry(entry) {
     const rec = state.rendered.get(entry.startMs);
-    if (rec?.isFloat && !state.debug) {
-      // Already docked as a side bubble — keep updating it there (a final
-      // without its own floatInto inherits the placement).
-      entry.floatInto = entry.floatInto ?? rec.data.floatInto;
-      if (entryWordCount(entry) > PROMOTE_WORDS) {
-        // Outgrew the bubble → promote to a full feed entry: the bubble blurs
-        // away, the entry materializes at its chronological slot and keeps
-        // streaming there.
-        const bubble = rec.el;
-        const hostEntry = bubble.closest('.entry');
-        bubble.classList.add('w-exit');
-        setTimeout(() => {
-          if (hostEntry) withHeightTransition(hostEntry, () => bubble.remove());
-          else bubble.remove();
-        }, EXIT_MS);
-        state.rendered.delete(entry.startMs);
-        pushEntry(entry, { scroll: true, animate: true });
-        if (state.atBottom) scrollToBottom();
-        return;
-      }
-      if (entry.floatInto && upsertFloat(entry, { animate: true })) {
-        if (state.atBottom) scrollToBottom();
-        return;
-      }
-    }
-    if (!rec && entry.floatInto && !state.debug && upsertFloat(entry, { animate: true })) {
-      if (state.atBottom) scrollToBottom();
-      return;
-    }
     if (rec) {
-      const bodyEl = rec.el.querySelector('.entry-body');
+      const bodyEl = rec.el.querySelector(state.debug ? '.entry-body' : '.b-body');
       if (useWordRender(entry) && bodyEl && (bodyEl.querySelector('.w-para') || bodyEl.children.length === 0)) {
         rec.data = entry;
         withHeightTransition(rec.el, () => renderWordSegments(bodyEl, entry, { animate: true }));
-        if (!entry.partial) syncDebugFooter(rec, entry);
-      } else {
+        if (state.debug) { if (!entry.partial) syncDebugFooter(rec, entry); }
+        else syncBubbleFlags(rec);
+      } else if (state.debug) {
         const parts = entry.kind === 'user' ? userParts(entry) : null;
         if (parts) patchEntry(rec, entry, parts);       // smooth, append-only
         else { rec.data = entry; const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; }
+      } else if (bodyEl) {
+        rec.data = entry;
+        withHeightTransition(rec.el, () => { bodyEl.innerHTML = renderBody(entry); });
+        syncBubbleFlags(rec);
       }
+      layoutAll();
       if (state.atBottom) scrollToBottom();
       return;
     }
@@ -744,11 +801,12 @@
     if (!rec) return;
     if (ann.wakeDetected) rec.data.wakeDetected = true;
     if (ann.stopDetected) rec.data.stopDetected = true;
-    if (rec.isFloat) {
-      // Side bubbles re-run the word renderer (keyword marks refresh in place).
-      renderWordSegments(rec.bodyEl, rec.data, { animate: false });
-      rec.el.classList.toggle('int-bubble--wake', !!rec.data.wakeDetected);
-      rec.el.classList.toggle('int-bubble--stop', !!rec.data.stopDetected);
+    if (!state.debug && rec.el.classList.contains('bubble')) {
+      syncBubbleFlags(rec);
+      const body = rec.el.querySelector('.b-body');
+      // Re-run the renderer so the detected words light up in place.
+      if (body && useWordRender(rec.data)) renderWordSegments(body, rec.data, { animate: false });
+      else if (body) body.innerHTML = renderBody(rec.data);
       return;
     }
     const fresh = entryEl(rec.data);
@@ -777,7 +835,8 @@
       els.transcript.appendChild(p);
       return;
     }
-    for (const e of snap.entries) pushEntry(e, { scroll: false });
+    for (const e of snap.entries) pushEntry(e, { scroll: false, layout: false });
+    layoutAll(); // one flow pass over the whole history
     scrollToBottom();
   }
 

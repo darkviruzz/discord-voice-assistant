@@ -241,6 +241,9 @@ export const _internal = { attachFloats, anchorWordIndex };
 function spanToEntry(span, sttMap, turnMap, segMap) {
   const kind = span.type === 'assistant' ? 'assistant' : 'user';
   const entry = { label: span.label, text: span.text, startMs: span.startMs, kind };
+  // endMs drives the client's overlap grouping (bubbles that ran in parallel
+  // share the width); missing endMs means "still open".
+  if (Number.isFinite(span.endMs)) entry.endMs = span.endMs;
 
   if (span.wakeDetected) entry.wakeDetected = true;
   if (span.stopDetected) entry.stopDetected = true;

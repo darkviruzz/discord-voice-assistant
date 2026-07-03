@@ -37,6 +37,7 @@ function toClientEntry(entry, meta) {
   // chunks = per-whisper-chunk {text,split} (debug view). partial = live, not final.
   if (Array.isArray(entry.segments)) out.segments = entry.segments;
   if (Array.isArray(entry.chunks)) out.chunks = entry.chunks;
+  if (Number.isFinite(entry.endMs)) out.endMs = entry.endMs;
   if (entry.partial) out.partial = true;
   if (entry.stableWords != null) out.stableWords = entry.stableWords;
   if (entry.floatInto) out.floatInto = entry.floatInto; // interruption side bubble

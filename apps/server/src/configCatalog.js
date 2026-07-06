@@ -20,7 +20,34 @@
 //
 // Das Panel rendert ausschließlich aus diesem Katalog; neue Variablen hier
 // eintragen, dann erscheinen sie automatisch mit Doku + Validierung im UI.
+//
+// CONTRACT für neue Funktionen: Jede neue konfigurierbare Variable (Server wie
+// Bot) wird GENAU SO implementiert — Katalog-Eintrag hier (mit label/desc/type/
+// applyMode), gelesen wird sie im Code über process.env. Es gibt keinen zweiten
+// Weg, Settings ins UI zu bringen; bot-scope-Keys zusätzlich in die
+// BOT_KEYS-Whitelist des Bots (apps/bot/src/configOverrides.js) aufnehmen.
 // ============================================================================
+
+// --- Secret-Blacklist ---------------------------------------------------------
+// Keys, deren Name auf ein Geheimnis hindeutet, werden IMMER wie `secret: true`
+// behandelt — unabhängig davon, ob der Katalog-Eintrag das Flag setzt (oder ein
+// künftiger Eintrag es vergisst). Werte solcher Keys verlassen den Prozess nie:
+// die API liefert nur „gesetzt/nicht gesetzt", Schreiben über das Panel ist
+// gesperrt, und der Bot schickt sie nicht im config_state-Report mit.
+export const SECRET_KEY_PATTERNS = [
+  /TOKEN/i, /SECRET/i, /BEARER/i, /PASSWORD/i, /(^|_)PASS(_|$)/i,
+  /API_?KEY/i, /PRIVATE_?KEY/i, /CREDENTIAL/i,
+];
+
+export function isSecretKey(key) {
+  const k = String(key || '');
+  return SECRET_KEY_PATTERNS.some((re) => re.test(k));
+}
+
+// Effektiver Secret-Status eines Katalog-Eintrags (Flag ODER Blacklist).
+export function isSecretEntry(entry) {
+  return !!(entry && (entry.secret || isSecretKey(entry.key)));
+}
 
 // Wie/wann eine gespeicherte Änderung tatsächlich wirksam wird. Der Wert wird
 // bei einem persistenten Speichern IMMER sofort in den Override-Layer

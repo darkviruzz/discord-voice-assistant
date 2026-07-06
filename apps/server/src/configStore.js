@@ -20,7 +20,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { catalogEntry } from './configCatalog.js';
+import { catalogEntry, isSecretEntry, isSecretKey } from './configCatalog.js';
 
 // Kein Import von logger.js: dieses Modul läuft im Boot-Pfad, BEVOR logger.js
 // (und dessen DEBUG-Konstante) importiert wird. Ein eigener, abhängigkeitsfreier
@@ -76,6 +76,28 @@ export function applyServerOverrides() {
 
 export function getOverrides() { return readFile(); }
 export function getBotOverrides() { return readFile().bot; }
+
+// ── Bot-Ist-Zustand (config_state-Report) ───────────────────────────────────
+// Der Bot meldet nach dem Connect (und nach jedem angewendeten config_update)
+// seine tatsächlichen Werte der bot-scope-Keys. Secrets kommen NIE als Wert,
+// nur als „gesetzt?"-Boolean — der Bot filtert mit derselben Namens-Blacklist,
+// der Server filtert hier defensiv ein zweites Mal.
+let _botReported = null; // { values: {K: string}, secretsSet: {K: bool}, at: ms }
+
+export function setBotReported(report) {
+  const values = {};
+  const secretsSet = {};
+  for (const [k, v] of Object.entries(report?.values ?? {})) {
+    if (isSecretKey(k)) { secretsSet[k] = String(v).length > 0; continue; }
+    values[k] = String(v);
+  }
+  for (const [k, v] of Object.entries(report?.secretsSet ?? {})) secretsSet[k] = !!v;
+  _botReported = { values, secretsSet, at: Date.now() };
+  debug('configStore: bot reported', Object.keys(values).length, 'value(s),',
+    Object.keys(secretsSet).length, 'secret flag(s)');
+}
+
+export function getBotReported() { return _botReported; }
 
 // Effektiver aktueller Wert einer Variable (nach allen Schichten).
 export function currentValue(key) {
@@ -161,8 +183,11 @@ export function resetValue(scope, key) {
 export function coerce(scope, key, rawValue) {
   const entry = catalogEntry(scope, key);
   if (!entry) throw new Error(`unbekannte Variable ${scope}:${key}`);
+  // Flag ODER Namens-Blacklist — Secrets sind über das Panel grundsätzlich
+  // nicht schreibbar (nur .env + Neustart). Vor der editable-Prüfung, damit
+  // die Ablehnung den präziseren Grund nennt.
+  if (isSecretEntry(entry)) throw new Error(`${key} ist ein Secret und kann hier nicht gesetzt werden`);
   if (entry.editable === false) throw new Error(`${key} ist nicht editierbar`);
-  if (entry.secret) throw new Error(`${key} ist ein Secret und kann hier nicht gesetzt werden`);
 
   const t = entry.type;
   if (t === 'boolean') {

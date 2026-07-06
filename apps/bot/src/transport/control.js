@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { log, warn, debug } from '../logger.js';
 import { getVersion } from '../version.js';
 import { State } from './state.js';
-import { applyConfigUpdate } from '../configOverrides.js';
+import { applyConfigUpdate, reportableConfig } from '../configOverrides.js';
 
 const PROTO_VERSION = 1;
 
@@ -292,6 +292,9 @@ export class ControlClient extends EventEmitter {
         this.fsm.set(State.READY);
         log('control: registered, params=', JSON.stringify(this.serverParams));
         this._startHeartbeats();
+        // Ist-Konfiguration melden (Settings-Panel zeigt echte Bot-Werte statt
+        // nur des server-seitigen Desired State). Secrets nur als „gesetzt?".
+        this._send({ type: 'config_state', ...reportableConfig(), t: Date.now() });
         if (this.pendingSession) {
           debug('control: re-emitting session_start after reconnect');
           this._send({ type: 'session_start', cmdId: randomUUID(), ...this.pendingSession });
@@ -338,6 +341,8 @@ export class ControlClient extends EventEmitter {
           log('control: config_update applied', r.applied.join(',') || '(leer)',
             'persist=', msg.persist !== false);
           this._send({ type: 'ack', op: 'config_update', cmdId: msg.cmdId, ok: true, applied: r.applied });
+          // Frischen Ist-Zustand nachmelden, damit das Panel die Wirkung sieht.
+          this._send({ type: 'config_state', ...reportableConfig(), t: Date.now() });
         } catch (e) {
           warn('control: config_update failed:', e.message);
           this._send({ type: 'ack', op: 'config_update', cmdId: msg.cmdId, ok: false, error: e.message });

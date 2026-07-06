@@ -16,7 +16,7 @@ import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
-import { getBotOverrides } from './configStore.js';
+import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
@@ -295,6 +295,15 @@ export function initControlWSS({ bearer } = {}) {
           }
           case 'ping': {
             send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
+            return;
+          }
+          case 'config_state': {
+            // Ist-Konfiguration des Bots (nach Registrierung und nach jedem
+            // config_update). Nur cachen — das Settings-Panel liest sie über
+            // GET /transcript/config. Secrets kommen bereits gefiltert an
+            // (nur „gesetzt?"-Flags); setBotReported filtert defensiv erneut.
+            if (!registered) return;
+            setBotReported({ values: msg.values, secretsSet: msg.secretsSet });
             return;
           }
           case 'voice_state': {

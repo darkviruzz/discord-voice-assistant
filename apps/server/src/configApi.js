@@ -12,16 +12,20 @@
 // (der Server sendet dann seinen Desired State, siehe control.js).
 
 import { debug, warn } from './logger.js';
-import { CATALOG, APPLY_MODES, SCOPES, catalogEntry } from './configCatalog.js';
+import { CATALOG, APPLY_MODES, SCOPES, catalogEntry, isSecretEntry } from './configCatalog.js';
 import {
   displayValue, statusOf, setServerValue, setBotValue, resetValue,
-  coerce, overridesFile, getBotOverrides,
+  coerce, overridesFile, getBotOverrides, getBotReported,
 } from './configStore.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
 
 // Baut die Item-Repräsentation einer Variable für das UI.
 function itemFor(entry) {
-  const editable = entry.editable !== false && !entry.secret;
+  // Secret = Katalog-Flag ODER Namens-Blacklist (isSecretEntry). Ein Key, der
+  // nur über die Blacklist als Secret erkannt wird, ist damit genauso
+  // read-only und wert-los im Draht wie ein explizit geflaggter.
+  const secret = isSecretEntry(entry);
+  const editable = entry.editable !== false && !secret;
   const raw = displayValue(entry.scope, entry.key);
   const out = {
     scope: entry.scope,
@@ -30,7 +34,7 @@ function itemFor(entry) {
     desc: entry.desc,
     type: entry.type,
     applyMode: entry.applyMode,
-    secret: !!entry.secret,
+    secret,
     editable,
     def: entry.def ?? '',
     note: entry.note ?? null,
@@ -38,13 +42,32 @@ function itemFor(entry) {
   };
   if (entry.enumValues) out.enumValues = entry.enumValues;
   if (entry.type === 'boolean') { out.onValue = entry.onValue ?? 'true'; out.offValue = entry.offValue ?? 'false'; }
-  if (entry.secret) {
-    // Secrets: Wert nie ausliefern, nur ob gesetzt. Bot-Secrets kennt der
-    // Server-Prozess nicht → Status unbekannt (null).
+
+  const reported = entry.scope === 'bot' ? getBotReported() : null;
+  if (secret) {
+    // Secrets: Wert nie ausliefern, nur ob gesetzt. Für Bot-Secrets kommt
+    // „gesetzt?" aus dem config_state-Report des Bots (null = kein Report).
     out.value = null;
-    out.isSet = entry.scope === 'server' ? (typeof raw === 'string' && raw.length > 0) : null;
+    if (entry.scope === 'server') {
+      out.isSet = typeof raw === 'string' && raw.length > 0;
+    } else {
+      const s = reported?.secretsSet;
+      out.isSet = s && Object.prototype.hasOwnProperty.call(s, entry.key) ? !!s[entry.key] : null;
+    }
+  } else if (entry.scope === 'bot' && reported?.values
+    && Object.prototype.hasOwnProperty.call(reported.values, entry.key)) {
+    // Ist-Wert, den der Bot zuletzt gemeldet hat — die Wahrheit für die Anzeige.
+    // Weicht der Desired State (Override-Datei/temporär) davon ab, zeigt das UI
+    // den Drift an (z. B. Änderung mit applyMode reconnect/restart noch nicht aktiv).
+    out.value = reported.values[entry.key];
+    out.botReported = true;
+    const desired = raw;
+    if (desired !== undefined && String(desired) !== String(reported.values[entry.key])) {
+      out.desired = String(desired);
+    }
   } else {
     out.value = raw ?? entry.def ?? '';
+    if (entry.scope === 'bot') out.botReported = false;
   }
   return out;
 }
@@ -62,12 +85,15 @@ function handleGet(_req, res) {
     scope: byGroup.get(name)[0].scope,
     items: byGroup.get(name),
   }));
+  const reported = getBotReported();
   res.json({
     scopes: SCOPES,
     applyModes: APPLY_MODES,
     overridesFile: overridesFile(),
     botConnected: botConnections.size,
     botDesiredState: getBotOverrides(),
+    // Letzter config_state-Report eines Bots (null = noch keiner empfangen).
+    botReportedAt: reported?.at ?? null,
     groups,
   });
 }

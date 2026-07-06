@@ -21,6 +21,11 @@ function debug(...args) { if (process.env.DEBUG === '1') console.log('[configOve
 // Nur diese Keys darf der Bot aus einem config_update übernehmen (Defense-in-Depth;
 // der Server validiert bereits gegen den Katalog). Spiegelt die bot-scope-Keys
 // aus apps/server/src/configCatalog.js.
+//
+// CONTRACT: Eine neue Bot-Konfigurationsvariable wird IMMER auf beiden Seiten
+// eingetragen — Katalog-Eintrag (scope 'bot') in apps/server/src/configCatalog.js
+// für Doku/Validierung/UI UND hier in BOT_KEYS. Fehlt sie hier, ignoriert der
+// Bot den Push; fehlt der Katalog-Eintrag, taucht sie nie im Settings-Panel auf.
 const BOT_KEYS = new Set([
   'GUILD_IDS', 'GUILD_ID', 'DEBUG',
   'SERVER_BASE_URL', 'CONTROL_WS_URL', 'SERVER_START_CMD',
@@ -28,6 +33,21 @@ const BOT_KEYS = new Set([
   'FINALIZE_UPLOAD_CMD', 'ARCHIVE_RETENTION',
   'GATE_MS', 'PLAYOUT_MAX_MS', 'INTERRUPT_MIN_MS', 'RESUME_GATE_MS', 'REWIND_MS',
 ]);
+
+// Keys, die zusätzlich zum Report gehören, obwohl sie nicht pushbar sind
+// (Secrets, per Blacklist erkannt): der Server zeigt für sie nur „gesetzt?" an.
+const REPORT_ONLY_KEYS = ['DISCORD_TOKEN', 'CONTROL_BEARER'];
+
+// Namens-Blacklist für Geheimnisse — Gegenstück zu SECRET_KEY_PATTERNS in
+// apps/server/src/configCatalog.js. Werte solcher Keys verlassen den Bot nie;
+// im config_state-Report steht nur, OB sie gesetzt sind.
+const SECRET_KEY_PATTERNS = [
+  /TOKEN/i, /SECRET/i, /BEARER/i, /PASSWORD/i, /(^|_)PASS(_|$)/i,
+  /API_?KEY/i, /PRIVATE_?KEY/i, /CREDENTIAL/i,
+];
+function isSecretKey(key) {
+  return SECRET_KEY_PATTERNS.some((re) => re.test(String(key || '')));
+}
 
 // Dateipfad einmal beim Boot fixieren — abgeleitet aus dem .env-DATA_DIR, damit
 // ein DATA_DIR-Override die Override-Datei nicht „verschiebt".
@@ -96,4 +116,22 @@ export function applyConfigUpdate({ set = {}, reset = [], persist = true } = {})
   debug('applied config_update: set/reset', applied.join(','), 'persist=', persist,
     ignored.length ? `(ignoriert: ${ignored.join(',')})` : '');
   return { applied, ignored, persisted: persist };
+}
+
+// Ist-Zustand für den config_state-Report an den Server: die tatsächlichen
+// process.env-Werte aller BOT_KEYS. Secrets (Blacklist) NIE als Wert — nur als
+// „gesetzt?"-Boolean unter secretsSet, ebenso die reinen Report-Keys.
+export function reportableConfig() {
+  const values = {};
+  const secretsSet = {};
+  for (const k of BOT_KEYS) {
+    const v = process.env[k];
+    if (isSecretKey(k)) { secretsSet[k] = typeof v === 'string' && v.length > 0; continue; }
+    if (v !== undefined) values[k] = String(v);
+  }
+  for (const k of REPORT_ONLY_KEYS) {
+    const v = process.env[k];
+    secretsSet[k] = typeof v === 'string' && v.length > 0;
+  }
+  return { values, secretsSet };
 }

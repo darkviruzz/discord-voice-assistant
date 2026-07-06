@@ -3,86 +3,93 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="dark light" />
+  <meta name="color-scheme" content="dark" />
   <title>Live-Transkript</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="settings.css" />
 </head>
 <body>
+  <!-- Kopfzeile: Live-Punkt + Titel links, Verbindungs-/Voice-Status + Controls rechts -->
   <header class="topbar">
     <div class="topbar-left">
-      <h1>Live-Transkript</h1>
-      <span id="voice" class="voice voice--unknown" title="Voice-Status">🎙 unbekannt</span>
-      <span id="status" class="status status--connecting" title="Datenverbindung (SSE/Polling)">●&nbsp;verbinde…</span>
+      <span id="live-dot" class="live-dot" title="Live-Status"></span>
+      <span class="app-title">LIVE&nbsp;TRANSKRIPT</span>
+      <span id="status" class="pill pill--connecting" title="Datenverbindung (SSE/Polling)">verbinde…</span>
+      <span id="voice" class="pill pill--unknown" title="Voice-Status">🎙 unbekannt</span>
     </div>
     <div class="topbar-right">
       <details id="members-pop" class="members-pop" hidden>
         <summary id="members-toggle" title="Im Voice-Channel">👥&nbsp;<span id="members-count">0</span></summary>
         <ul id="members-list" class="members-list"></ul>
       </details>
-      <label class="field">
-        <span>Session</span>
+      <label class="field" title="Angezeigte Session">
         <select id="session-select"></select>
       </label>
-      <label class="toggle" title="Auch beendete Sessions aus dem Log anzeigen">
-        <input type="checkbox" id="past-toggle" />
-        <span>vergangene</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="debug-toggle" />
-        <span>Debug</span>
-      </label>
-      <button id="open-settings" class="btn-icon" title="Einstellungen" aria-haspopup="dialog">⚙ Einstellungen</button>
+      <button id="past-toggle" class="btn" title="Auch beendete Sessions aus dem Log anzeigen">vergangene</button>
+      <button id="debug-toggle" class="btn" title="Debug-Detailansicht">Debug</button>
+      <button id="open-settings" class="btn" title="Einstellungen" aria-haspopup="dialog">⚙</button>
     </div>
   </header>
 
-  <!-- Settings-Panel (Overlay). Inhalt wird von settings.js gerendert. -->
-  <div id="settings-overlay" class="settings-overlay" hidden role="dialog" aria-labelledby="settings-title">
-    <div class="settings-panel">
-      <div id="settings-resize" class="settings-resize" title="Breite ziehen"></div>
-      <header class="settings-head">
-        <h2 id="settings-title">⚙ Einstellungen</h2>
-        <div class="settings-head-right">
-          <input type="search" id="settings-filter" class="settings-filter" placeholder="filtern (Name, Variable, Text)…" />
-          <button id="settings-reload" class="btn-icon" title="Neu laden (verwirft nicht angewendete Änderungen)">↻</button>
-          <button id="settings-close" class="btn-icon" title="Schließen (nicht angewendete Änderungen bleiben erhalten)">✕</button>
-        </div>
-      </header>
-
-      <div id="settings-legend" class="settings-legend"></div>
-
-      <div class="settings-persistbar">
-        <fieldset class="persist-mode">
-          <legend>Speichermodus</legend>
-          <label class="radio"><input type="radio" name="persist" value="persist" checked /> <b>Dauerhaft</b> — schreibt in den Override-Layer, übersteht Neustart</label>
-          <label class="radio"><input type="radio" name="persist" value="temp" /> <b>Nur temporär</b> — nur zur Laufzeit, geht bei Neustart verloren</label>
-        </fieldset>
-        <div class="settings-actions">
-          <span id="settings-dirty" class="chip chip--warn" hidden>0 Änderungen</span>
-          <button id="settings-save" class="btn-primary" disabled>Änderungen anwenden</button>
-        </div>
-      </div>
-
-      <div id="settings-result" class="settings-result" hidden></div>
-      <div id="settings-body" class="settings-body"><p class="empty">Lade Konfiguration…</p></div>
+  <!-- Legende: Sprecherfarben (dynamisch) + bestätigt/unbestätigt -->
+  <div id="legend" class="legend">
+    <div id="legend-speakers" class="legend-speakers"></div>
+    <div class="legend-divider"></div>
+    <div class="legend-states">
+      <span class="swatch swatch--tentative"></span> unbestätigt
+      <span class="swatch swatch--confirmed"></span> bestätigt
     </div>
   </div>
 
+  <!-- Debug: Session-Metadaten -->
   <details id="session-meta" class="session-meta" hidden>
     <summary>Session-Infos</summary>
     <dl id="session-meta-body" class="session-meta-body"></dl>
   </details>
 
+  <!-- Zusammenfassung gefalteter älterer Turns -->
   <details id="summary-box" class="summary" hidden>
     <summary>Zusammenfassung (gefaltete ältere Turns)</summary>
     <div id="summary-text" class="summary-text"></div>
   </details>
 
-  <main id="transcript" class="transcript" aria-live="polite">
-    <p class="empty" id="empty-hint">Warte auf Transkript…</p>
-  </main>
+  <!-- Feed: scrollt selbst (Autoscroll mit weichem Nachziehen) -->
+  <div class="feed-wrap">
+    <main id="feed" class="feed" aria-live="polite">
+      <p class="empty" id="empty-hint">Warte auf Transkript…</p>
+    </main>
+    <button id="jump-latest" class="jump-latest" hidden aria-label="Zum Ende springen">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+  </div>
 
-  <button id="jump-latest" class="jump-latest" hidden>↓ Neueste</button>
+  <!-- Settings-Panel (Slide-in). Inhalt rendert settings.js dynamisch aus /transcript/config -->
+  <div id="settings-overlay" class="settings-overlay" hidden role="dialog" aria-labelledby="settings-title">
+    <div class="settings-panel">
+      <header class="settings-head">
+        <h2 id="settings-title">⚙ Einstellungen</h2>
+        <div class="settings-head-right">
+          <input type="search" id="settings-filter" class="settings-filter" placeholder="filtern (Name, Variable, Text)…" />
+          <button id="settings-reload" class="btn" title="Neu laden (verwirft nicht angewendete Änderungen)">↻</button>
+          <button id="settings-close" class="btn" title="Schließen (nicht angewendete Änderungen bleiben erhalten)">✕</button>
+        </div>
+      </header>
+      <div id="settings-botline" class="settings-botline"></div>
+      <div class="settings-persistbar">
+        <fieldset class="persist-mode">
+          <legend>Speichermodus</legend>
+          <label class="radio"><input type="radio" name="persist" value="persist" checked /> <b>Dauerhaft</b> — Override-Layer, übersteht Neustart</label>
+          <label class="radio"><input type="radio" name="persist" value="temp" /> <b>Nur temporär</b> — zur Laufzeit, weg bei Neustart</label>
+        </fieldset>
+        <div class="settings-actions">
+          <span id="settings-dirty" class="chip chip--warn" hidden>0 Änderungen</span>
+          <button id="settings-save" class="btn btn--primary" disabled>Änderungen anwenden</button>
+        </div>
+      </div>
+      <div id="settings-result" class="settings-result" hidden></div>
+      <div id="settings-body" class="settings-body"><p class="empty">Lade Konfiguration…</p></div>
+    </div>
+  </div>
 
   <script src="app.js" defer></script>
   <script src="settings.js" defer></script>

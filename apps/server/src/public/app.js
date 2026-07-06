@@ -1,26 +1,45 @@
-/* Live-transcript web UI — vanilla JS, no build step, no dependencies.
+/* Live-Transkript Web-UI — Vanilla JS, kein Build-Step, keine Dependencies.
  *
- * Flow:
- *   1. Load the session list, fill the picker, pick the URL/?sessionId or newest.
- *   2. Open an EventSource to /transcript/live; render the `snapshot` (full
- *      history from the JSONL) then append each live `entry`. `presence` updates
- *      the voice pill/members; `annotation` retro-marks a line (wake/stop).
- *   3. If SSE is unavailable or keeps failing, fall back to JSON polling of
- *      /transcript/snapshot/:id.
+ * Architektur (bewusst strikt getrennt, damit Darstellungsfehler nicht wieder
+ * über verstreute Patch-Pfade entstehen):
  *
- * Read-only: no user input is ever sent back to the server.
+ *   1. TRANSPORT   SSE /transcript/live (snapshot → entry/presence/annotation/
+ *                  session_ended) mit Polling-Fallback. Schreibt NUR in den Store.
+ *   2. STORE       Entries per startMs (Server-Identität; Partials und ihr
+ *                  Final teilen denselben Key). Pure Ableitung: Überlapp-
+ *                  Gruppen aus startMs/endMs, Anker aus floatInto.
+ *   3. RENDERER    EIN idempotenter Reconcile-Pass (render()) baut den DOM auf
+ *                  den Store-Zustand ab — egal ob Live-Tick, Annotation oder
+ *                  kompletter Snapshot. Animationen (FLIP, SmoothHeight,
+ *                  Anker-Versatz, Wort-Blur-in) hängen ausschließlich an
+ *                  DOM-Differenzen dieses Passes.
+ *
+ * Visuals folgen dem Artefakt „transcriptanchored": Timing-Konstanten unten
+ * spiegeln die CSS-Variablen in style.css — Werte synchron halten!
  */
 (() => {
   'use strict';
 
+  // ── Timing/Easing (Spiegel von style.css :root) ────────────────────────────
+  const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
+  const EASE_SPRING = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
+  const T_FLIP = 950;      // horizontale Neuordnung (mit Ruberband)
+  const T_SHAPE = 1100;    // flex-grow-Wechsel
+  const T_HEIGHT = 950;    // Blockhöhe
+  const T_ANCHOR = 700;    // vertikaler Anker-Versatz
+  const SCROLL_TC = 620;   // Zeitkonstante Autoscroll (größer = langsamer)
+  const NARROW_PX = 640;   // ab hier stapeln statt nebeneinander (wie CSS)
+
   const $ = (sel) => document.querySelector(sel);
   const els = {
+    liveDot: $('#live-dot'),
     status: $('#status'),
     voice: $('#voice'),
     select: $('#session-select'),
-    debug: $('#debug-toggle'),
-    past: $('#past-toggle'),
-    transcript: $('#transcript'),
+    pastBtn: $('#past-toggle'),
+    debugBtn: $('#debug-toggle'),
+    legendSpeakers: $('#legend-speakers'),
+    feed: $('#feed'),
     emptyHint: $('#empty-hint'),
     summaryBox: $('#summary-box'),
     summaryText: $('#summary-text'),
@@ -37,25 +56,25 @@
     sessionId: params.get('sessionId') || null,
     debug: params.get('debug') === '1',
     showPast: params.get('past') === '1',
-    es: null,            // EventSource
-    pollTimer: null,     // polling fallback interval
+    es: null,
+    pollTimer: null,
     sseFailures: 0,
-    lastStartMs: -Infinity, // newest rendered entry time (dedupe across reconnect/poll)
-    atBottom: true,
-    rendered: new Map(), // startMs → { data, el } so annotations can patch a line
-    stopPhrases: [],     // from session_meta, for stop-token highlighting
+    live: false,             // SSE verbunden + Session aktiv → Live-Punkt
+    autoScroll: true,
+    stopPhrases: [],
     wakeWord: 'Rabenauge',
+    // Store: startMs → rec { data, confirmed, anchor, el-Refs … }
+    recs: new Map(),
+    order: [],               // startMs aufsteigend
+    blocks: new Map(),       // groupKey(startMs des ersten) → { outer, inner, row, settled }
   };
 
-  // ── tiny, XSS-safe markdown renderer ───────────────────────────────────────
+  // ── XSS-sichere Markdown-Miniatur (nur eigene Tags, Text vorab escaped) ────
   function escapeHtml(s) {
     return String(s).replace(/[&<>"]/g, (c) => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
     ));
   }
-
-  // Inline: code, bold, italic, autolinked http(s) URLs. Operates on already
-  // HTML-escaped text, and only ever emits our own tags → safe.
   function inlineMd(s) {
     let out = s.replace(/`([^`]+)`/g, (_m, c) => `<code>${c}</code>`);
     out = out.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_m, a, b) => `<strong>${a ?? b}</strong>`);
@@ -64,22 +83,17 @@
     out = out.replace(/\bhttps?:\/\/[^\s<]+[^\s<.,)]/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
     return out;
   }
-
-  // Block-level: headings, unordered/ordered lists, blockquotes, paragraphs.
   function renderMarkdown(text) {
     const lines = escapeHtml(text).split(/\r?\n/);
     const html = [];
-    let list = null; // 'ul' | 'ol' | null
+    let list = null;
     const closeList = () => { if (list) { html.push(`</${list}>`); list = null; } };
-
     for (const raw of lines) {
       const line = raw.trimEnd();
       if (!line.trim()) { closeList(); continue; }
-
       let m;
       if ((m = /^(#{1,3})\s+(.*)$/.exec(line))) {
-        closeList();
-        html.push(`<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`);
+        closeList(); html.push(`<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`);
       } else if ((m = /^\s*[-*]\s+(.*)$/.exec(line))) {
         if (list !== 'ul') { closeList(); html.push('<ul>'); list = 'ul'; }
         html.push(`<li>${inlineMd(m[1])}</li>`);
@@ -87,129 +101,75 @@
         if (list !== 'ol') { closeList(); html.push('<ol>'); list = 'ol'; }
         html.push(`<li>${inlineMd(m[1])}</li>`);
       } else if ((m = /^\s*>\s?(.*)$/.exec(line))) {
-        closeList();
-        html.push(`<blockquote>${inlineMd(m[1])}</blockquote>`);
+        closeList(); html.push(`<blockquote>${inlineMd(m[1])}</blockquote>`);
       } else {
-        closeList();
-        html.push(`<p>${inlineMd(line)}</p>`);
+        closeList(); html.push(`<p>${inlineMd(line)}</p>`);
       }
     }
     closeList();
     return html.join('');
   }
 
-  // Locate the first stop-phrase occurrence in `text` as WHOLE words —
-  // "Stopp" must not half-match the shorter phrase "stop" (which left the
-  // trailing "p" unmarked). Longest phrase wins at the same position.
-  function findStopToken(text, phrases) {
-    let best = null;
-    for (const p of phrases) {
-      const needle = String(p).trim();
-      if (!needle) continue;
-      const body = needle.split(/\s+/)
-        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
-      let re;
-      try { re = new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, 'iu'); } catch { continue; }
-      const m = re.exec(text);
-      if (m && (!best || m.index < best.index
-        || (m.index === best.index && m[0].length > best.length))) {
-        best = { index: m.index, length: m[0].length };
-      }
+  // ── Sprecher-Akzente: eine feste Farbe pro Label ──────────────────────────
+  // Assistant immer Teal; Nutzer bekommen Palette-Farben in Erst-Auftritts-
+  // Reihenfolge (stabil für die Session, da die Map nie schrumpft).
+  const ASSISTANT_ACCENT = '#4fd1c5';
+  const PALETTE = ['#f6ad55', '#b794f4', '#63b3ed', '#f687b3', '#68d391', '#fbd38d', '#76e4f7'];
+  const accents = new Map(); // label → { accent, assistant }
+  function accentFor(label, kind) {
+    const key = String(label || '?');
+    let a = accents.get(key);
+    if (!a) {
+      const used = [...accents.values()].filter((x) => !x.assistant).length;
+      a = kind === 'assistant'
+        ? { accent: ASSISTANT_ACCENT, assistant: true }
+        : { accent: PALETTE[used % PALETTE.length], assistant: false };
+      accents.set(key, a);
+      renderLegend();
     }
-    return best;
+    return a.accent;
   }
-
-  // Small tag shown before each raw chunk in debug mode. natural-silence chunks
-  // end a sentence-ish group (may break); forced ones were joined seamlessly.
-  function chunkSplitTag(split) {
-    if (!split) return '';
-    const s = String(split);
-    const cls = s.indexOf('natural') === 0 ? 'chunk--natural'
-      : s.indexOf('forced') === 0 ? 'chunk--forced' : 'chunk--other';
-    return `<span class="chunk-split ${cls}">${escapeHtml(s)}</span>`;
+  function initialsFor(label) {
+    const parts = String(label || '?').trim().split(/\s+/);
+    const s = parts.length >= 2 ? parts[0][0] + parts[1][0] : String(parts[0] || '?').slice(0, 2);
+    return s.toUpperCase();
   }
-
-  // One paragraph of HTML per raw whisper chunk (debug) or natural-silence group.
-  const chunkPart = (c) => `<p class="chunk">${chunkSplitTag(c.split)}${inlineMd(escapeHtml(c.text || ''))}</p>`;
-  const segmentPart = (s) => `<p>${inlineMd(escapeHtml(String(s)))}</p>`;
-
-  // Paragraph-HTML array for a streamed user entry, or null when this entry
-  // isn't the segment/chunk kind (assistant markdown, stop-line, plain text).
-  // Returning an array lets the live updater patch append-only (finalized
-  // paragraphs stay put; only new ones fade in) — cf. interim/final results in
-  // streaming ASR: finals are stable and never jump/disappear.
-  function userParts(entry) {
-    if (entry.stopDetected && state.stopPhrases.length) return null;
-    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return entry.chunks.map(chunkPart);
-    if (Array.isArray(entry.segments) && entry.segments.length) {
-      return entry.segments.map((s) => String(s || '')).filter((s) => s.trim()).map(segmentPart);
+  function renderLegend() {
+    els.legendSpeakers.innerHTML = '';
+    for (const [label, a] of accents) {
+      const d = document.createElement('div');
+      d.className = 'legend-speaker';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = a.accent;
+      d.appendChild(dot);
+      d.appendChild(document.createTextNode(label));
+      els.legendSpeakers.appendChild(d);
     }
-    return null;
   }
 
-  // Body HTML for an entry: full markdown, except stop lines render the matched
-  // stop token in a <mark> (rest as plain escaped text — stop commands are tiny).
-  function renderBody(entry) {
-    if (entry.stopDetected && state.stopPhrases.length) {
-      const tok = findStopToken(entry.text || '', state.stopPhrases);
-      if (tok) {
-        const t = entry.text;
-        return `${escapeHtml(t.slice(0, tok.index))}`
-          + `<mark class="stop-token">${escapeHtml(t.slice(tok.index, tok.index + tok.length))}</mark>`
-          + `${escapeHtml(t.slice(tok.index + tok.length))}`;
-      }
-    }
-    const parts = userParts(entry);
-    if (parts) return parts.join('');
-    return renderMarkdown(entry.text || '');
+  // ── Zeitformat ─────────────────────────────────────────────────────────────
+  function fmtClock(ms) {
+    const d = new Date(ms);
+    const p = (n, w = 2) => String(n).padStart(w, '0');
+    const base = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    return state.debug ? `${base}.${p(d.getMilliseconds(), 3)}` : base;
+  }
+  function fmtDateTime(ms) {
+    if (!Number.isFinite(Number(ms))) return String(ms ?? '');
+    return new Date(Number(ms)).toLocaleString('de-DE', {
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    });
   }
 
-  function htmlToEl(html) {
-    const t = document.createElement('template');
-    t.innerHTML = String(html).trim();
-    return t.content.firstChild;
+  // ── Keyword-Markierung (Wake/Stop) — ganze normalisierte Wörter ───────────
+  function normKw(w) {
+    return String(w || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
   }
-
-  // Build a paragraph element, tagging it with its source HTML so later diffs
-  // compare against the logical content (ignoring the transient para-enter class).
-  function makePart(html) {
-    const el = htmlToEl(html);
-    el._src = html;
-    return el;
-  }
-
-  // ── word-level live rendering (streaming STT) ──────────────────────────────
-  // User utterances stream word by word: new words blur→sharpen in slowly
-  // (flowtoken-style), corrected words morph (blur out, swap text at the
-  // midpoint, sharpen back), words beyond entry.stableWords are dimmed until
-  // the server's agreement confirms them. Paragraphs follow entry.segments.
-  // Timings live in CSS (--w-enter-dur etc.); the two JS constants below must
-  // stay in sync with --w-morph / --w-exit.
-
-  const MORPH_HALF_MS = 450;
-  const EXIT_MS = 400;
-
-  function wordsOfSegment(s) { return String(s || '').trim().split(/\s+/).filter(Boolean); }
-
-  // The word renderer applies to user speech (assistant replies are markdown,
-  // debug mode keeps the per-chunk view). Wake-word/stop hits are marked on
-  // the matching word spans (see computeKeywordMarks).
-  function useWordRender(entry) {
-    if (entry.kind !== 'user') return false;
-    if (state.debug && Array.isArray(entry.chunks) && entry.chunks.length) return false;
-    return Boolean((Array.isArray(entry.segments) && entry.segments.length) || entry.text);
-  }
-
-  // Match like the server's detection: case-insensitive, punctuation-free.
-  function normKw(text) {
-    return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-  }
-
-  // Levenshtein distance — same tolerance as the server's fuzzy wake-word
-  // detection, so "E-Rabenauge"/"Rabenauge," light up like exact hits.
   function editDistance(a, b) {
     const m = a.length, n = b.length;
-    let prev = Array.from({ length: n + 1 }, (_, j) => j);
+    if (!m) return n; if (!n) return m;
+    let prev = Array.from({ length: n + 1 }, (_v, i) => i);
     for (let i = 1; i <= m; i++) {
       const cur = [i];
       for (let j = 1; j <= n; j++) {
@@ -219,18 +179,13 @@
     }
     return prev[n];
   }
-
   function isWakeWordish(norm, wakeNorm) {
     if (!norm || !wakeNorm) return false;
     if (norm === wakeNorm) return true;
-    if (wakeNorm.length < 4) return false; // fuzzy only for substantial words
+    if (wakeNorm.length < 4) return false;
     if (Math.abs(norm.length - wakeNorm.length) > 2) return false;
     return editDistance(norm, wakeNorm) <= 2;
   }
-
-  // Word indices (flat across all segments) to mark for a detected wake word /
-  // stop phrase. WHOLE normalized words only — "Stopp" never half-matches the
-  // phrase "stop"; multi-word phrases match consecutive words; longest first.
   function computeKeywordMarks(flatWords, entry) {
     const marks = new Map(); // index → 'wake' | 'stop'
     const norms = flatWords.map(normKw);
@@ -239,9 +194,7 @@
       if (!seq.length) return;
       for (let i = 0; i + seq.length <= norms.length; i++) {
         let hit = true;
-        for (let j = 0; j < seq.length; j++) {
-          if (norms[i + j] !== seq[j]) { hit = false; break; }
-        }
+        for (let j = 0; j < seq.length; j++) if (norms[i + j] !== seq[j]) { hit = false; break; }
         if (hit) for (let j = 0; j < seq.length; j++) if (!marks.has(i + j)) marks.set(i + j, cls);
       }
     };
@@ -249,8 +202,6 @@
       for (const p of [...state.stopPhrases].sort((a, b) => b.length - a.length)) mark(p, 'stop');
     }
     if (entry.wakeDetected && state.wakeWord) {
-      // Fuzzy per-word match (the server detected fuzzily too — the transcript
-      // may say "E-Rabenauge" or a near-miss rather than the exact word).
       const wakeNorm = normKw(state.wakeWord);
       for (let i = 0; i < norms.length; i++) {
         if (!marks.has(i) && isWakeWordish(norms[i], wakeNorm)) marks.set(i, 'wake');
@@ -259,694 +210,561 @@
     return marks;
   }
 
-  function makeWordEl(text, { animate, tentative, kw }) {
-    const el = document.createElement('span');
-    el.className = 'w' + (animate ? ' w-enter' : '') + (tentative ? ' w-tent' : '')
-      + (kw ? ` w-kw-${kw}` : '');
-    el.textContent = text;
-    return el;
-  }
-
-  // Blur out, swap the text at the midpoint, sharpen back. Re-targets an
-  // in-flight morph instead of stacking timers.
-  function morphWord(el, text) {
-    el._pendingText = text;
-    if (el._morphing) return;
-    el._morphing = true;
-    el.classList.add('w-blur');
-    setTimeout(() => {
-      el.textContent = el._pendingText;
-      delete el._pendingText;
-      el._morphing = false;
-      el.classList.remove('w-blur');
-    }, MORPH_HALF_MS);
-  }
-
-  function removeWordEl(el) {
-    const prev = el.previousSibling; // swallow the separating space text node
-    if (prev && prev.nodeType === 3 && !prev.textContent.trim()) prev.remove();
-    el.remove();
-  }
-
-  function exitWord(el) {
-    if (el._exiting) return;
-    el._exiting = true;
-    el.classList.add('w-exit');
-    setTimeout(() => removeWordEl(el), EXIT_MS);
-  }
-
-  function wordsOfPara(p) {
-    return Array.from(p.querySelectorAll('.w')).filter((el) => !el._exiting);
-  }
-
-  // Patch `bodyEl` to match entry.segments word by word (append/morph/exit).
-  // `stableWords` counts words across ALL segments; anything beyond is still a
-  // moving hypothesis and rendered dimmed. Finals (no stableWords) undim all.
-  // Detected wake/stop words get marker classes on their spans.
-  function renderWordSegments(bodyEl, entry, { animate = true } = {}) {
-    const segs = (Array.isArray(entry.segments) && entry.segments.length
-      ? entry.segments : [entry.text || ''])
-      .map(wordsOfSegment).filter((w) => w.length);
-    const stable = entry.partial && Number.isFinite(entry.stableWords)
-      ? entry.stableWords : Infinity;
-    const marks = computeKeywordMarks(segs.flat(), entry);
-    const paras = Array.from(bodyEl.children).filter((el) => el.classList.contains('w-para'));
-
-    let wordIndex = 0;
-    for (let si = 0; si < segs.length; si++) {
-      let p = paras[si];
-      if (!p) {
-        p = document.createElement('p');
-        p.className = 'w-para';
-        bodyEl.appendChild(p);
-      }
-      const words = segs[si];
-      const existing = wordsOfPara(p);
-      for (let i = 0; i < words.length; i++) {
-        const tentative = (wordIndex + i) >= stable;
-        const kw = marks.get(wordIndex + i) ?? null;
-        const cur = existing[i];
-        if (!cur) {
-          if (p.lastChild) p.appendChild(document.createTextNode(' '));
-          p.appendChild(makeWordEl(words[i], { animate, tentative, kw }));
-          continue;
-        }
-        const target = cur._morphing ? cur._pendingText : cur.textContent;
-        if (target !== words[i]) morphWord(cur, words[i]);
-        cur.classList.toggle('w-tent', tentative);
-        cur.classList.toggle('w-kw-wake', kw === 'wake');
-        cur.classList.toggle('w-kw-stop', kw === 'stop');
-      }
-      for (let i = words.length; i < existing.length; i++) exitWord(existing[i]);
-      wordIndex += words.length;
-    }
-    for (let si = segs.length; si < paras.length; si++) {
-      const p = paras[si];
-      Array.from(p.querySelectorAll('.w')).forEach(exitWord);
-      setTimeout(() => p.remove(), EXIT_MS + 60);
-    }
-  }
-
-  // ── equal-bubble flow layout ────────────────────────────────────────────────
-  // Every utterance is ONE bubble (name + time on top, text below) — bubbles
-  // never contain other bubbles. Utterances that ran in parallel (time
-  // overlap via startMs/endMs) form a GROUP and share the width dynamically:
-  // width follows the content (fit-content) capped by a word-count share
-  // (22–78%), long talkers prefer the left side, short interjections stay
-  // small on the free side. A bubble lifts up NEXT to the previous one when
-  // both fit in the row; otherwise it cascades with a slight edge overlap
-  // (z-order by start time). Everything re-flows on every update with quick,
-  // slightly springy transitions; side changes slide over (FLIP).
-
-  let bubbleZ = 1;
-
-  function entryWordCount(entry) {
+  // ── STORE ──────────────────────────────────────────────────────────────────
+  function segmentsOf(entry) {
     const segs = Array.isArray(entry.segments) && entry.segments.length
       ? entry.segments : [entry.text || ''];
-    return segs.join(' ').trim().split(/\s+/).filter(Boolean).length;
+    return segs.map((s) => String(s || '').split(/\s+/).filter(Boolean)).filter((w) => w.length);
   }
-
-  // End of an utterance's time window for grouping. Partials are still open;
-  // entries without a wire endMs (older logs) estimate ~165 wpm.
-  function entryEndMs(entry) {
+  function wordCountOf(entry) {
+    return segmentsOf(entry).reduce((n, w) => n + w.length, 0);
+  }
+  function endOf(entry) {
     if (entry.partial) return Infinity;
     if (Number.isFinite(entry.endMs)) return entry.endMs;
-    return entry.startMs + Math.max(1500, entryWordCount(entry) * 360);
+    return entry.startMs + Math.max(1500, wordCountOf(entry) * 360); // ~165 wpm
   }
 
-  // Rendered bubbles in DOM (= start time) order.
-  function bubbleRecs() {
-    const out = [];
-    for (const el of els.transcript.children) {
-      if (!el.classList || !el.classList.contains('bubble')) continue;
-      const rec = state.rendered.get(Number(el.dataset.startMs));
-      if (rec) out.push(rec);
+  // Entry einfügen/mergen. Identität = startMs (Partials → Final gleicher Key).
+  function upsertEntry(entry, { animate = true } = {}) {
+    if (!entry || !Number.isFinite(entry.startMs)) return;
+    let rec = state.recs.get(entry.startMs);
+    if (!rec) {
+      rec = { data: entry, confirmed: 0, animate, anchorIdx: null, els: null, dirty: true };
+      state.recs.set(entry.startMs, rec);
+      const i = state.order.findIndex((s) => s > entry.startMs);
+      if (i < 0) state.order.push(entry.startMs); else state.order.splice(i, 0, entry.startMs);
+    } else {
+      // Final ersetzt Partial; Annotationen/verspätete Felder bleiben erhalten.
+      rec.data = { ...rec.data, ...entry };
+      // Finals kommen OHNE partial-Flag (der Draht setzt es nur bei true) —
+      // der Merge darf das alte true nicht überleben lassen, sonst bleibt die
+      // Blase ewig „live" (Caret, offene Gruppe, gedimmter Schwanz).
+      rec.data.partial = entry.partial === true;
+      rec.dirty = true;
     }
-    return out;
+    // Bestätigt-Zähler monoton halten (Server-stableWords kann pro Tick nur
+    // wachsen; nach dem Final gilt alles als bestätigt).
+    if (rec.data.partial && Number.isFinite(rec.data.stableWords)) {
+      rec.confirmed = Math.max(rec.confirmed, rec.data.stableWords);
+    }
+    if (!rec.data.partial) rec.confirmed = Infinity;
+    if (els.emptyHint) { els.emptyHint.remove(); els.emptyHint = null; }
+    render();
   }
 
-  // Partition into overlap groups: a bubble joins the current group when it
-  // starts before the group's latest end.
-  function computeGroups(recs) {
+  // Retro-Annotation (Wake/Stop erkannt, Interruption klassifiziert).
+  function applyAnnotation(ann) {
+    if (!ann || !Number.isFinite(ann.startMs)) return;
+    const rec = state.recs.get(ann.startMs);
+    if (!rec) return;
+    if (ann.wakeDetected) rec.data.wakeDetected = true;
+    if (ann.stopDetected) rec.data.stopDetected = true;
+    if (ann.floatInto) rec.data.floatInto = ann.floatInto;
+    rec.dirty = true;
+    render();
+  }
+
+  function resetStore() {
+    state.recs.clear();
+    state.order.length = 0;
+    state.blocks.clear();
+    accents.clear();
+    renderLegend();
+    els.feed.innerHTML = '';
+    els.emptyHint = null;
+  }
+
+  // Überlapp-Gruppen (Zeitfenster): Entry gehört zur offenen Gruppe, wenn es
+  // vor deren spätestem Ende beginnt ODER per floatInto explizit hinein zeigt.
+  function computeGroups() {
     const groups = [];
     let cur = null;
     let curEnd = -Infinity;
-    for (const rec of recs) {
-      if (!cur || rec.data.startMs >= curEnd) { cur = []; groups.push(cur); curEnd = -Infinity; }
+    let curSet = null;
+    for (const startMs of state.order) {
+      const rec = state.recs.get(startMs);
+      const host = rec.data.floatInto?.hostStartMs;
+      const joins = cur && (startMs < curEnd || (host != null && curSet.has(host)));
+      if (!joins) { cur = []; curSet = new Set(); groups.push(cur); curEnd = -Infinity; }
       cur.push(rec);
-      curEnd = Math.max(curEnd, entryEndMs(rec.data));
+      curSet.add(startMs);
+      curEnd = Math.max(curEnd, endOf(rec.data));
     }
     return groups;
   }
 
-  function setSide(rec, side) {
-    rec._side = side;
-    rec.el.classList.toggle('bubble--right', side === 'right');
-  }
+  // ── RENDERER ───────────────────────────────────────────────────────────────
+  const narrow = () => window.innerWidth < NARROW_PX;
 
-  // Viewport-top of the word LINE this bubble is anchored to (where the
-  // interruption happened inside its host), or null when unanchored. The
-  // anchor word index comes from the server (floatInto.atWordIndex, word
-  // timestamps); live partials without one anchor at the host's current last
-  // word — remembered once so the bubble stays put while the host grows.
-  function resolveAnchorTop(rec, group) {
-    const fi = rec.data.floatInto;
-    if (!fi) return null;
-    const host = group.find((r) => r.data.startMs === fi.hostStartMs);
-    if (!host || host === rec) return null;
-    const words = [];
-    for (const p of host.el.querySelectorAll('.w-para')) words.push(...wordsOfPara(p));
-    if (words.length === 0) return host.el.getBoundingClientRect().top;
-    if (Number.isFinite(fi.atWordIndex)) rec._anchorIdx = fi.atWordIndex;
-    else if (!Number.isFinite(rec._anchorIdx)) rec._anchorIdx = words.length - 1;
-    const w = words[Math.max(0, Math.min(words.length - 1, rec._anchorIdx))];
-    return w.getBoundingClientRect().top - 5; // bubble top edge ≈ that text line
-  }
-
-  function layoutGroup(group, narrow) {
-    if (group.length === 1 || narrow) {
-      // Solo bubble — or a narrow viewport, where width sharing and anchor
-      // lifting would squeeze text into one-word columns: plain full-width
-      // chronological list.
-      for (const rec of group) {
-        rec._share = 1;
-        rec.el.style.maxWidth = '';
-        rec.el.style.marginTop = '';
-        setSide(rec, 'left');
-      }
-      return;
+  function makeBubble(rec) {
+    const e = rec.data;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble' + (rec.animate ? ' bubble--enter' : '');
+    if (rec.animate) {
+      bubble.addEventListener('animationend', () => bubble.classList.remove('bubble--enter'), { once: true });
     }
-    // Widths + sides first — they change line wrapping and therefore heights.
-    // Shares may sum slightly above 100% (edges are allowed to overlap a bit).
-    const weights = group.map((r) => Math.max(1, entryWordCount(r.data)));
-    const total = weights.reduce((a, b) => a + b, 0);
-    const avg = total / group.length;
-    const byStart = new Map(group.map((r) => [r.data.startMs, r]));
-    let prevSide = 'right';
-    group.forEach((rec, i) => {
-      const wc = weights[i];
-      rec._share = Math.min(.78, Math.max(.24, (wc / total) * 1.06));
-      // Side rule, in priority order: the first bubble sits left; an anchored
-      // interjection takes the OPPOSITE side of its host (stable across ticks
-      // — the alternating rule used to flip it onto the host and the collision
-      // resolver then bounced it around); long talkers prefer left; everything
-      // else alternates.
-      let side;
-      const host = rec.data.floatInto ? byStart.get(rec.data.floatInto.hostStartMs) : null;
-      if (i === 0) side = 'left';
-      else if (host && host !== rec) side = host._side === 'left' ? 'right' : 'left';
-      else if (wc >= 25 && wc >= 1.3 * avg) side = 'left';
-      else side = prevSide === 'left' ? 'right' : 'left';
-      rec.el.style.maxWidth = `${Math.round(rec._share * 100)}%`;
-      setSide(rec, side);
-      prevSide = side;
-    });
-    // Vertical pass, sequential with measurements (each margin shifts the
-    // natural position of everything after it): anchored bubbles rise to the
-    // text line of their anchor word; unanchored ones cascade below the flow.
-    // Edges may overlap up to EDGE px (this must exceed the ~2% horizontal
-    // overlap the width shares produce, or the resolver fights the width rule
-    // and bubbles bounce between anchor and cascade every tick). Real overlaps
-    // push a bubble down below the colliding one. A small hysteresis keeps
-    // margins put when the target only wobbles by a few pixels (live growth
-    // shifts weights/heights slightly on every streaming tick).
-    const EDGE = 26;
-    const WOBBLE = 12;
-    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > EDGE
-      && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > EDGE;
-    group[0].el.style.marginTop = '';
-    const firstRect = group[0].el.getBoundingClientRect();
-    const groupTop = firstRect.top;
-    const placed = [firstRect];
-    let flowBottom = firstRect.bottom;
-    for (let i = 1; i < group.length; i++) {
-      const rec = group[i];
-      const prevMargin = parseInt(rec.el.style.marginTop, 10) || 0;
-      rec.el.style.marginTop = '';
-      const natTop = rec.el.getBoundingClientRect().top;
-      let targetTop = resolveAnchorTop(rec, group);
-      if (targetTop === null) targetTop = flowBottom + 2; // cascade, slight pull-up vs the 10px gap
-      targetTop = Math.max(targetTop, groupTop);
-      let delta = Math.round(targetTop - natTop);
-      rec.el.style.marginTop = `${delta}px`;
-      let rect = rec.el.getBoundingClientRect();
-      for (let guard = 0; guard < 6; guard++) {
-        const hit = placed.find((p) => overlaps(p, rect));
-        if (!hit) break;
-        delta += Math.round(hit.bottom - 8 - rect.top);
-        rec.el.style.marginTop = `${delta}px`;
-        rect = rec.el.getBoundingClientRect();
-      }
-      if (Math.abs(delta - prevMargin) <= WOBBLE && delta !== prevMargin) {
-        // Close enough to last tick's position → keep it (no micro-jitter),
-        // unless that would re-introduce a collision.
-        rec.el.style.marginTop = `${prevMargin}px`;
-        const kept = rec.el.getBoundingClientRect();
-        if (placed.some((p) => overlaps(p, kept))) rec.el.style.marginTop = `${delta}px`;
-        rect = rec.el.getBoundingClientRect();
-      }
-      placed.push(rect);
-      flowBottom = Math.max(flowBottom, rect.bottom);
-    }
-  }
-
-  // Full flow pass with FLIP: measure old positions, lay out with transitions
-  // off (measurements must not read mid-animation values), then let every
-  // moved bubble spring from its old spot to the new one.
-  function layoutAll() {
-    if (state.debug) return; // debug keeps the flat chronological list
-    const recs = bubbleRecs();
-    if (recs.length === 0) return;
-    const before = new Map();
-    for (const r of recs) before.set(r, r.el.getBoundingClientRect());
-    const narrow = els.transcript.clientWidth < 560;
-    els.transcript.classList.add('layouting');
-    for (const group of computeGroups(recs)) layoutGroup(group, narrow);
-    void els.transcript.offsetHeight;
-    els.transcript.classList.remove('layouting');
-    for (const r of recs) {
-      if (r.el.classList.contains('bubble--enter')) continue; // plop-in owns its transform
-      const b = before.get(r);
-      const a = r.el.getBoundingClientRect();
-      const dx = b.left - a.left;
-      const dy = b.top - a.top;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-        r.el.style.transition = 'none';
-        r.el.style.transform = `translate(${dx}px, ${dy}px)`;
-        void r.el.offsetWidth;
-        r.el.style.transition = '';
-        r.el.style.transform = '';
-      }
-    }
-    if (state.atBottom) scrollToBottom();
-  }
-
-  // Animate the bubble's height across a DOM mutation (smooth growth instead
-  // of jumps); keeps the view pinned to the bottom afterwards when it was.
-  function withHeightTransition(el, mutate) {
-    const h0 = el.offsetHeight;
-    mutate();
-    const h1 = el.offsetHeight;
-    if (h0 === h1) return;
-    el.style.height = `${h0}px`;
-    el.style.overflow = 'hidden';
-    void el.offsetHeight; // reflow so the transition has a start value
-    el.classList.add('h-anim');
-    el.style.height = `${h1}px`;
-    setTimeout(() => {
-      el.classList.remove('h-anim');
-      el.style.height = '';
-      el.style.overflow = '';
-      if (state.atBottom) scrollToBottom();
-    }, 380);
-  }
-
-  // ── colors / time formatting ────────────────────────────────────────────────
-  function hueFor(label) {
-    let h = 0;
-    for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
-    return h % 360;
-  }
-  function speakerColor(label) {
-    return `hsl(${hueFor(label)}, var(--speaker-sat), var(--speaker-light))`;
-  }
-  function pad2(n) { return String(n).padStart(2, '0'); }
-  function pad3(n) { return String(n).padStart(3, '0'); }
-  // hh:mm:ss, or hh:mm:ss.mmm with millisecond precision (debug).
-  function fmtTime(ms, withMs = false) {
-    const d = new Date(Number(ms));
-    if (Number.isNaN(d.getTime())) return '';
-    const base = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-    return withMs ? `${base}.${pad3(d.getMilliseconds())}` : base;
-  }
-  // Human-readable session timestamp from the epoch-ms session id.
-  function fmtDateTime(ms) {
-    const d = new Date(Number(ms));
-    if (Number.isNaN(d.getTime())) return String(ms);
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
-
-  // ── entry rendering ───────────────────────────────────────────────────────
-  function entryEl(entry, { animateWords = false } = {}) {
-    const wrap = document.createElement('article');
-    wrap.className = 'entry'
-      + (entry.kind === 'assistant' ? ' entry--assistant' : '')
-      + (entry.wakeDetected ? ' entry--wake' : '')
-      + (entry.stopDetected ? ' entry--stop' : '');
-    wrap.dataset.startMs = String(entry.startMs); // sorted insert + annotations
-
-    const meta = document.createElement('div');
-    meta.className = 'entry-meta';
-
-    const speaker = document.createElement('span');
-    speaker.className = 'entry-speaker';
-    if (entry.kind !== 'assistant') speaker.style.color = speakerColor(entry.label || '?');
-    speaker.textContent = entry.label || '?';
-    meta.appendChild(speaker);
-
-    if (entry.wakeDetected) meta.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
-    if (entry.stopDetected) meta.appendChild(badge('Stop', 'badge-stop'));
-    if (state.debug && entry.marker) meta.appendChild(badge(entry.marker, 'badge-marker'));
-
-    const time = document.createElement('span');
-    time.className = 'entry-time';
-    time.textContent = fmtTime(entry.startMs, state.debug); // hh:mm:ss.mmm in debug
-    meta.appendChild(time);
-
-    if (state.debug) {
-      const kind = document.createElement('span');
-      kind.className = 'entry-kind';
-      kind.textContent = entry.kind;
-      meta.appendChild(kind);
-    }
-
-    const body = document.createElement('div');
-    body.className = 'entry-body';
-    if (useWordRender(entry)) renderWordSegments(body, entry, { animate: animateWords });
-    else body.innerHTML = renderBody(entry);
-
-    wrap.appendChild(meta);
-    wrap.appendChild(body);
-
-    if (state.debug) {
-      const dbg = debugDetail(entry);
-      if (dbg) wrap.appendChild(dbg);
-    }
-    return wrap;
-  }
-
-  function badge(text, cls) {
-    const b = document.createElement('span');
-    b.className = `badge ${cls}`;
-    b.textContent = text;
-    return b;
-  }
-
-  // One equal bubble for the flow layout (normal mode): speaker + time on top,
-  // text below. Same structure for users and Rabenauge — only accent colors
-  // differ. Debug mode uses entryEl() above instead.
-  function bubbleEl(entry, { animateWords = false, animateIn = false } = {}) {
-    const el = document.createElement('article');
-    el.className = 'bubble'
-      + (entry.kind === 'assistant' ? ' bubble--assistant' : '')
-      + (entry.wakeDetected ? ' bubble--wake' : '')
-      + (entry.stopDetected ? ' bubble--stop' : '')
-      + (animateIn ? ' bubble--enter' : '');
-    el.dataset.startMs = String(entry.startMs);
-    el.style.zIndex = String(bubbleZ++);
-    // Drop the enter class once the plop finished so later FLIP moves apply.
-    if (animateIn) el.addEventListener('animationend', () => el.classList.remove('bubble--enter'), { once: true });
-
     const head = document.createElement('div');
     head.className = 'b-head';
-    head.title = `${fmtTime(entry.startMs)} · ${entry.label || '?'}`;
+    const avatar = document.createElement('div');
+    avatar.className = 'b-avatar';
     const name = document.createElement('span');
     name.className = 'b-name';
-    name.textContent = entry.label || '?';
-    if (entry.kind !== 'assistant') name.style.color = speakerColor(entry.label || '?');
-    head.appendChild(name);
-    // Inline time when the bubble has room; tiny interjections keep it in the
-    // tooltip only.
-    if (String(entry.text || '').length >= 15) {
-      const t = document.createElement('span');
-      t.className = 'b-time';
-      t.textContent = fmtTime(entry.startMs);
-      head.appendChild(t);
-    }
-    if (entry.wakeDetected) head.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
-    if (entry.stopDetected) head.appendChild(badge('Stop', 'badge-stop'));
-
+    const time = document.createElement('span');
+    time.className = 'b-time';
+    head.append(avatar, name, time);
     const body = document.createElement('div');
-    body.className = 'b-body';
-    if (useWordRender(entry)) renderWordSegments(body, entry, { animate: animateWords });
-    else body.innerHTML = renderBody(entry);
+    body.className = e.kind === 'assistant' ? 'b-md' : 'b-body';
+    bubble.append(head, body);
 
-    el.append(head, body);
-    return el;
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+    slot.dataset.startMs = String(e.startMs);
+    slot.appendChild(bubble);
+    rec.els = { slot, bubble, avatar, name, time, body, debug: null, mdKey: null };
+    return rec.els;
   }
 
-  // Sync a bubble's flags/badges after a final or an annotation.
-  function syncBubbleFlags(rec) {
-    const e = rec.data;
-    rec.el.classList.toggle('bubble--wake', !!e.wakeDetected);
-    rec.el.classList.toggle('bubble--stop', !!e.stopDetected);
-    const head = rec.el.querySelector('.b-head');
-    if (!head) return;
-    if (e.wakeDetected && !head.querySelector('.badge-wake')) head.appendChild(badge('→ ' + state.wakeWord, 'badge-wake'));
-    if (e.stopDetected && !head.querySelector('.badge-stop')) head.appendChild(badge('Stop', 'badge-stop'));
-  }
-
-  // Debug footer for an entry: STT diagnostics (user) or TTS/turn info (assistant).
-  function debugDetail(entry) {
-    const bits = [];
-    if (entry.kind === 'user' && entry.stt) {
-      const s = entry.stt;
-      if (s.noSpeechProb != null) bits.push(`no_speech ${Number(s.noSpeechProb).toFixed(2)}`);
-      if (s.durationMs != null) bits.push(`${Math.round(s.durationMs)}ms`);
-      if (s.wordCount != null) bits.push(`${s.wordCount} W`);
-      if (s.provider) bits.push(s.provider);
-      if (Array.isArray(s.chunkDurationsMs) && s.chunkDurationsMs.length > 1) bits.push(`chunks ${s.chunkDurationsMs.length}`);
-      if (Array.isArray(s.splitTypes) && s.splitTypes.length) bits.push(s.splitTypes.join('/'));
-    } else if (entry.kind === 'assistant' && entry.turn) {
-      const t = entry.turn;
-      if (t.ttsStatus) bits.push(`tts:${t.ttsStatus}${t.ttsError ? ` (${t.ttsError})` : ''}`);
-      if (t.ttsDurationMs != null) bits.push(`${Math.round(t.ttsDurationMs)}ms`);
-      if (t.ttsModel) bits.push(t.ttsModel);
-      if (t.speakerId != null) bits.push(`spk ${t.speakerId}`);
-      if (t.truncated) bits.push('abgebrochen');
-      for (const it of (t.interruptions || [])) {
-        bits.push(`⏸ ${it.by || '?'}${it.msPlayed != null ? ` @${Math.round(it.msPlayed)}ms` : ''}`);
+  // Wort-Spans eines Segments mit dem Soll abgleichen (append/replace/exit).
+  function reconcileWords(segEl, words, baseIdx, confirmed, marks, animate) {
+    const existing = Array.from(segEl.querySelectorAll('.w')).filter((w) => !w._exiting);
+    for (let i = 0; i < words.length; i++) {
+      const flat = baseIdx + i;
+      const tent = flat >= confirmed;
+      const kw = marks.get(flat) ?? null;
+      const cls = 'w' + (tent ? ' w--tent' : '') + (kw ? ` w--${kw}` : '');
+      let span = existing[i];
+      if (!span) {
+        span = document.createElement('span');
+        span.className = cls + (animate ? ' w--in' : '');
+        span.textContent = words[i];
+        if (segEl.lastChild) segEl.appendChild(document.createTextNode(' '));
+        segEl.appendChild(span);
+        continue;
       }
-    }
-    if (entry.kind === 'assistant' && entry.interrupted && !(entry.turn && entry.turn.truncated)) bits.push('abgebrochen');
-    if (!bits.length) return null;
-    const d = document.createElement('div');
-    d.className = 'entry-debug';
-    d.textContent = bits.join(' · ');
-    return d;
-  }
-
-  function clearTranscript() {
-    els.transcript.innerHTML = '';
-    state.lastStartMs = -Infinity;
-    state.rendered.clear();
-  }
-
-  function pushEntry(entry, { scroll, animate = false, layout = true }) {
-    if (els.emptyHint && els.emptyHint.parentNode) els.emptyHint.remove();
-    const el = state.debug
-      ? entryEl(entry, { animateWords: animate })
-      : bubbleEl(entry, { animateWords: animate, animateIn: animate });
-    // Insert in start-time order: after an SSE reconnect the snapshot only
-    // contains FINALIZED utterances, so a still-running monolog's partials
-    // arrive with an older startMs than lines already on screen.
-    let anchor = null;
-    const kids = els.transcript.querySelectorAll('.entry, .bubble');
-    for (let i = kids.length - 1; i >= 0; i--) {
-      if (Number(kids[i].dataset.startMs || 0) <= entry.startMs) { anchor = kids[i]; break; }
-    }
-    if (anchor) anchor.after(el);
-    else if (kids.length) kids[0].before(el);
-    else els.transcript.appendChild(el);
-    state.rendered.set(entry.startMs, { data: entry, el });
-    state.lastStartMs = Math.max(state.lastStartMs, entry.startMs);
-    if (layout) layoutAll();
-    if (scroll) {
-      if (state.atBottom) scrollToBottom();
-      else els.jump.hidden = false;
-    }
-  }
-
-  // Insert a new entry, or update an existing one in place (same startMs). The
-  // streaming STT publishes an utterance many times as words commit/appear;
-  // every update re-flows the overlap group (widths/sides shift dynamically).
-  function upsertEntry(entry) {
-    const rec = state.rendered.get(entry.startMs);
-    if (rec) {
-      const bodyEl = rec.el.querySelector(state.debug ? '.entry-body' : '.b-body');
-      if (useWordRender(entry) && bodyEl && (bodyEl.querySelector('.w-para') || bodyEl.children.length === 0)) {
-        rec.data = entry;
-        withHeightTransition(rec.el, () => renderWordSegments(bodyEl, entry, { animate: true }));
-        if (state.debug) { if (!entry.partial) syncDebugFooter(rec, entry); }
-        else syncBubbleFlags(rec);
-      } else if (state.debug) {
-        const parts = entry.kind === 'user' ? userParts(entry) : null;
-        if (parts) patchEntry(rec, entry, parts);       // smooth, append-only
-        else { rec.data = entry; const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; }
-      } else if (bodyEl) {
-        rec.data = entry;
-        withHeightTransition(rec.el, () => { bodyEl.innerHTML = renderBody(entry); });
-        syncBubbleFlags(rec);
-      }
-      layoutAll();
-      if (state.atBottom) scrollToBottom();
-      return;
-    }
-    // No out-of-order guard: entries are identified by startMs and inserted
-    // sorted, so late partials of an older utterance render correctly.
-    pushEntry(entry, { scroll: true, animate: true });
-  }
-
-  // Append-only paragraph patch: keep already-rendered paragraphs stable, update
-  // changed ones in place, fade in new ones. Never removes paragraphs during a
-  // partial (finalized text must not disappear); reconciles length + adds the
-  // debug footer only on the final (partial=false) update.
-  function patchEntry(rec, entry, parts) {
-    rec.data = entry;
-    const bodyEl = rec.el.querySelector('.entry-body');
-    if (!bodyEl) { const fresh = entryEl(entry); rec.el.replaceWith(fresh); rec.el = fresh; return; }
-
-    const existing = Array.from(bodyEl.children);
-    for (let i = 0; i < parts.length; i++) {
-      if (i < existing.length) {
-        const cur = existing[i]._src ?? existing[i].outerHTML;
-        if (cur !== parts[i]) bodyEl.replaceChild(makePart(parts[i]), existing[i]);
+      if (span.textContent !== words[i]) {
+        // Neues Wort remountet mit Blur-in (Artefakt: Key `${i}-${w}`).
+        const fresh = document.createElement('span');
+        fresh.className = cls + (animate ? ' w--in' : '');
+        fresh.textContent = words[i];
+        span.replaceWith(fresh);
       } else {
-        const el = makePart(parts[i]);
-        el.classList.add('para-enter'); // fade/slide-in (the "ease")
-        bodyEl.appendChild(el);
+        span.className = cls; // nur Zustandsklassen (tent/kw) nachziehen
       }
     }
-    if (!entry.partial) {
-      // Final: drop any surplus paragraphs (normally none — updates are monotonic)
-      // and sync the debug footer.
-      for (let i = bodyEl.children.length - 1; i >= parts.length; i--) bodyEl.children[i].remove();
-      syncDebugFooter(rec, entry);
+    for (let i = words.length; i < existing.length; i++) {
+      const span = existing[i];
+      if (span._exiting) continue;
+      span._exiting = true;
+      span.classList.add('w--out');
+      setTimeout(() => {
+        const prev = span.previousSibling;
+        if (prev && prev.nodeType === 3 && !prev.textContent.trim()) prev.remove();
+        span.remove();
+      }, 240);
     }
   }
 
-  function syncDebugFooter(rec, entry) {
-    const dbg = state.debug ? debugDetail(entry) : null;
-    const oldDbg = rec.el.querySelector('.entry-debug');
-    if (oldDbg && dbg) oldDbg.replaceWith(dbg);
-    else if (oldDbg && !dbg) oldDbg.remove();
-    else if (dbg) rec.el.appendChild(dbg);
+  function chunkSplitTag(split) {
+    const s = String(split || '');
+    const cls = s.startsWith('natural') ? 'chunk--natural'
+      : s.startsWith('forced') ? 'chunk--forced'
+        : s.startsWith('stream') ? 'chunk--stream' : 'chunk--other';
+    const tag = document.createElement('span');
+    tag.className = `chunk-split ${cls}`;
+    tag.textContent = s;
+    return tag;
   }
 
-  // Retro-mark a line by startMs (wake/stop detected after it was sent).
-  function applyAnnotation(ann) {
-    if (!ann || ann.startMs == null) return;
-    const rec = state.rendered.get(ann.startMs);
-    if (!rec) return;
-    if (ann.wakeDetected) rec.data.wakeDetected = true;
-    if (ann.stopDetected) rec.data.stopDetected = true;
-    if (!state.debug && rec.el.classList.contains('bubble')) {
-      syncBubbleFlags(rec);
-      const body = rec.el.querySelector('.b-body');
-      // Re-run the renderer so the detected words light up in place.
-      if (body && useWordRender(rec.data)) renderWordSegments(body, rec.data, { animate: false });
-      else if (body) body.innerHTML = renderBody(rec.data);
-      return;
-    }
-    const fresh = entryEl(rec.data);
-    rec.el.replaceWith(fresh);
-    rec.el = fresh;
-  }
+  function updateBubble(rec) {
+    const e = rec.data;
+    const { bubble, avatar, name, time, body } = rec.els;
+    const accent = accentFor(e.label, e.kind);
+    bubble.style.setProperty('--accent', accent);
+    bubble.classList.toggle('bubble--ended', !e.partial);
+    avatar.textContent = initialsFor(e.label);
+    name.textContent = e.label || '?';
+    time.textContent = fmtClock(e.startMs);
 
-  function renderSnapshot(snap) {
-    clearTranscript();
-    state.stopPhrases = (snap.sessionMeta && snap.sessionMeta.stopPhrases) || [];
-    state.wakeWord = (snap.sessionMeta && snap.sessionMeta.wakeword && snap.sessionMeta.wakeword.word) || 'Rabenauge';
-    renderVoice(snap.voice);
-    renderSessionMeta(snap);
-
-    if (snap.summary && snap.summary.trim()) {
-      els.summaryText.textContent = snap.summary;
-      els.summaryBox.hidden = false;
+    if (e.kind === 'assistant') {
+      // Markdown-Body; nur bei Textänderung neu rendern.
+      if (rec.els.mdKey !== e.text) {
+        rec.els.mdKey = e.text;
+        body.innerHTML = renderMarkdown(e.text || '');
+      }
     } else {
-      els.summaryBox.hidden = true;
+      // Debug: Roh-Chunks mit Split-Tags; sonst Segmente (Absatz je Gruppe).
+      const useChunks = state.debug && Array.isArray(e.chunks) && e.chunks.length;
+      const segs = useChunks
+        ? e.chunks.map((c) => String(c.text || '').split(/\s+/).filter(Boolean))
+        : segmentsOf(e);
+      const splits = useChunks ? e.chunks.map((c) => c.split) : null;
+      const flatWords = segs.flat();
+      const marks = computeKeywordMarks(flatWords, e);
+      const segEls = Array.from(body.children).filter((el) => el.classList.contains('seg'));
+      let base = 0;
+      for (let si = 0; si < segs.length; si++) {
+        let segEl = segEls[si];
+        if (!segEl) {
+          segEl = document.createElement('p');
+          segEl.className = 'seg';
+          body.appendChild(segEl);
+        }
+        if (splits && !segEl.querySelector('.chunk-split')) {
+          segEl.prepend(chunkSplitTag(splits[si]));
+        }
+        reconcileWords(segEl, segs[si], base, rec.confirmed, marks, rec.animate);
+        base += segs[si].length;
+      }
+      for (let si = segs.length; si < segEls.length; si++) segEls[si].remove();
+
+      // Caret ans Ende des letzten Segments, solange live.
+      let caret = body.querySelector('.caret');
+      if (e.partial) {
+        const last = body.lastElementChild;
+        if (!caret) { caret = document.createElement('span'); caret.className = 'caret'; }
+        if (last && caret.parentNode !== last) last.appendChild(caret);
+      } else if (caret) {
+        caret.remove();
+      }
     }
 
-    if (!snap.entries || snap.entries.length === 0) {
-      const p = document.createElement('p');
-      p.className = 'empty';
-      p.textContent = 'Noch nichts transkribiert.';
-      els.transcript.appendChild(p);
-      return;
+    // Debug-Fußzeile (nur final, nur Debug-Modus).
+    const wantDebug = state.debug && !e.partial;
+    if (wantDebug && !rec.els.debug) {
+      const d = document.createElement('div');
+      d.className = 'b-debug';
+      const meta = e.meta || {};
+      const bits = [`start ${fmtClock(e.startMs)}`];
+      if (Number.isFinite(e.endMs)) bits.push(`dauer ${((e.endMs - e.startMs) / 1000).toFixed(1)}s`);
+      if (meta.noSpeechProb != null) bits.push(`noSpeech ${Number(meta.noSpeechProb).toFixed(3)}`);
+      if (e.floatInto) bits.push(`float→${fmtClock(e.floatInto.hostStartMs)}${Number.isFinite(e.floatInto.atWordIndex) ? `@${e.floatInto.atWordIndex}` : ''}`);
+      d.textContent = bits.join(' · ');
+      rec.els.bubble.appendChild(d);
+      rec.els.debug = d;
+    } else if (!wantDebug && rec.els.debug) {
+      rec.els.debug.remove();
+      rec.els.debug = null;
     }
-    for (const e of snap.entries) pushEntry(e, { scroll: false, layout: false });
-    layoutAll(); // one flow pass over the whole history
-    scrollToBottom();
   }
 
-  function scrollToBottom() {
-    window.scrollTo({ top: document.body.scrollHeight });
+  // Anker: Slot eines Unterbrechers auf die Wortzeile seines Hosts ausrichten.
+  function anchorTargetPx(rec, group, rowTop) {
+    const fi = rec.data.floatInto;
+    let host = null;
+    let idx = null;
+    if (fi && fi.hostStartMs != null) {
+      host = group.find((r) => r.data.startMs === fi.hostStartMs && r !== rec) || null;
+      if (Number.isFinite(fi.atWordIndex)) idx = fi.atWordIndex;
+    }
+    if (!host) {
+      // Implizit: nicht-erste Blase der Gruppe hängt am längsten früher
+      // gestarteten Mitglied (Artefakt-Regel), Position beim Beitritt gemerkt.
+      const before = group.filter((r) => r !== rec && r.data.startMs < rec.data.startMs);
+      if (!before.length) return 0;
+      host = before.sort((a, b) => wordCountOf(b.data) - wordCountOf(a.data)
+        || a.data.startMs - b.data.startMs)[0];
+    }
+    const words = host.els ? host.els.bubble.querySelectorAll('.w') : [];
+    if (!words.length) return 0;
+    if (idx === null) {
+      if (rec.anchorIdx === null) rec.anchorIdx = words.length - 1; // einmal merken
+      idx = rec.anchorIdx;
+    }
+    const span = words[Math.max(0, Math.min(words.length - 1, idx))];
+    return Math.max(0, span.getBoundingClientRect().top - rowTop);
+  }
+
+  let renderScheduled = false;
+  function render() {
+    // Mehrere Store-Updates im selben Tick → ein Reconcile-Pass.
+    if (renderScheduled) return;
+    renderScheduled = true;
+    queueMicrotask(() => { renderScheduled = false; renderPass(); });
+  }
+
+  function renderPass() {
+    const groups = computeGroups();
+    const isNarrow = narrow();
+
+    // Nur OFFENE Blöcke werden gemessen/animiert — abgeschlossene Gruppen sind
+    // statisch; ohne diesen Guard erzwänge jeder Tick O(n) Reflows über die
+    // gesamte Historie.
+    const activeRecs = [];
+    for (const group of groups) {
+      const blk = state.blocks.get(group[0].data.startMs);
+      if (!blk || !blk.settled) activeRecs.push(...group);
+    }
+
+    // 1. FLIP-Vorher-Messung (nur Slots offener Blöcke, die es schon gibt).
+    const prevRect = new Map();
+    for (const rec of activeRecs) {
+      if (rec.els?.slot.isConnected) prevRect.set(rec.data.startMs, rec.els.slot.getBoundingClientRect());
+    }
+
+    // 2. DOM abgleichen: Blöcke in Gruppen-Reihenfolge, Slots in Dominanz-Ordnung.
+    const seenBlocks = new Set();
+    let anchorBlock = null; // als Nächstes einzufügender Block hängt hier dahinter
+    for (const group of groups) {
+      const key = group[0].data.startMs;
+      seenBlocks.add(key);
+      let blk = state.blocks.get(key);
+      if (!blk) {
+        const outer = document.createElement('div');
+        outer.className = 'block';
+        const inner = document.createElement('div');
+        const row = document.createElement('div');
+        row.className = 'row';
+        inner.appendChild(row);
+        outer.appendChild(inner);
+        blk = { outer, inner, row, settled: false, lastH: null };
+        state.blocks.set(key, blk);
+        if (anchorBlock) anchorBlock.after(outer);
+        else els.feed.prepend(outer);
+      }
+      anchorBlock = blk.outer;
+
+      // Dominanz: meiste Wörter zuerst, dann Startzeit (Artefakt-Sortierung).
+      const ordered = [...group].sort((a, b) => wordCountOf(b.data) - wordCountOf(a.data)
+        || a.data.startMs - b.data.startMs);
+      const solo = ordered.length === 1;
+      blk.row.classList.toggle('row--multi', !solo);
+
+      const targetSlots = ordered.map((rec) => (rec.els ?? makeBubble(rec)).slot);
+      const currentSlots = Array.from(blk.row.children);
+      const orderChanged = targetSlots.length !== currentSlots.length
+        || targetSlots.some((s, i) => currentSlots[i] !== s);
+      if (orderChanged) for (const s of targetSlots) blk.row.appendChild(s);
+
+      ordered.forEach((rec, i) => {
+        const slot = rec.els.slot;
+        slot.classList.toggle('slot--solo', solo);
+        slot.style.flexGrow = solo ? '1' : (i === 0 ? '2.2' : '1');
+        if (rec.dirty) { updateBubble(rec); rec.dirty = false; }
+      });
+
+      // Gruppe abgeschlossen? → Höhe freigeben, nicht mehr messen.
+      const open = group.some((r) => r.data.partial);
+      if (!open && !blk.settled) {
+        blk.settled = true;
+        setTimeout(() => {
+          blk.outer.style.height = 'auto';
+          blk.outer.classList.add('block--settled');
+        }, T_HEIGHT + 60);
+      } else if (open && blk.settled) {
+        blk.settled = false;
+        blk.outer.classList.remove('block--settled');
+        blk.lastH = null;
+      }
+    }
+    // Verwaiste Blöcke (Gruppen-Neuzuschnitt nach Snapshot) entfernen.
+    for (const [key, blk] of state.blocks) {
+      if (!seenBlocks.has(key)) { blk.outer.remove(); state.blocks.delete(key); }
+    }
+
+    // 3. Anker-Versatz (nach Layout; misst Wortzeilen im Host).
+    if (!isNarrow) {
+      for (const group of groups) {
+        if (group.length < 2) continue;
+        const blk = state.blocks.get(group[0].data.startMs);
+        if (blk.settled) continue; // eingefrorene Blöcke behalten ihren Versatz
+        const rowTop = blk.row.getBoundingClientRect().top;
+        for (const rec of group) {
+          const slot = rec.els.slot;
+          const target = anchorTargetPx(rec, group, rowTop);
+          const first = !slot._anchored;
+          slot._anchored = true;
+          slot.style.transitionProperty = 'margin-top, transform, flex-grow';
+          slot.style.transitionDuration = first ? '0ms' : `${T_ANCHOR}ms`;
+          slot.style.transitionTimingFunction = EASE;
+          slot.style.marginTop = `${target}px`;
+        }
+      }
+    }
+
+    // 4. SmoothHeight: Außenhöhe der offenen Blöcke weich nachführen.
+    for (const group of groups) {
+      const blk = state.blocks.get(group[0].data.startMs);
+      if (blk.settled) continue;
+      const h = blk.inner.offsetHeight;
+      if (blk.lastH === null) {
+        blk.outer.style.height = `${h}px`; // erster Frame: ohne Transition
+        blk.outer.style.transition = 'none';
+        void blk.outer.offsetHeight;
+        blk.outer.style.transition = `height ${T_HEIGHT}ms ${EASE}`;
+      } else if (blk.lastH !== h) {
+        blk.outer.style.height = `${h}px`;
+      }
+      blk.lastH = h;
+    }
+
+    // 5. FLIP-Nachher: horizontale Verschiebungen mit Ruberband animieren.
+    if (!isNarrow) {
+      for (const rec of activeRecs) {
+        const slot = rec.els?.slot;
+        const prev = prevRect.get(rec.data.startMs);
+        if (!slot || !prev || !slot.isConnected) continue;
+        const next = slot.getBoundingClientRect();
+        const dx = prev.left - next.left;
+        if (Math.abs(dx) > 1) {
+          slot.style.transition = 'none';
+          slot.style.transform = `translateX(${dx}px)`;
+          void slot.offsetWidth;
+          slot.style.transitionProperty = 'transform, margin-top, flex-grow';
+          slot.style.transitionDuration = `${T_FLIP}ms, ${T_ANCHOR}ms, ${T_SHAPE}ms`;
+          slot.style.transitionTimingFunction = `${EASE_SPRING}, ${EASE}, ${EASE}`;
+          slot.style.transform = '';
+        }
+      }
+    }
+  }
+
+  // ── Autoscroll (weiches exponentielles Nachziehen ans Feed-Ende) ───────────
+  (function scrollLoop() {
+    let last = performance.now();
+    function tick(now) {
+      const dt = now - last;
+      last = now;
+      if (state.autoScroll) {
+        const feed = els.feed;
+        const target = feed.scrollHeight - feed.clientHeight;
+        const delta = target - feed.scrollTop;
+        if (delta > 0.4) feed.scrollTop += delta * (1 - Math.exp(-dt / SCROLL_TC));
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  })();
+
+  function disableAuto() {
+    if (!state.autoScroll) return;
+    state.autoScroll = false;
+    els.jump.hidden = false;
+  }
+  function enableAuto() {
+    state.autoScroll = true;
     els.jump.hidden = true;
   }
+  els.feed.addEventListener('wheel', (e) => { if (e.deltaY < 0) disableAuto(); }, { passive: true });
+  let touchY = 0;
+  els.feed.addEventListener('touchstart', (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+  els.feed.addEventListener('touchmove', (e) => {
+    if (e.touches[0].clientY - touchY > 6) disableAuto();
+  }, { passive: true });
+  els.feed.addEventListener('scroll', () => {
+    if (state.autoScroll) return;
+    const dist = els.feed.scrollHeight - els.feed.clientHeight - els.feed.scrollTop;
+    if (dist < 36) enableAuto();
+  }, { passive: true });
+  els.jump.addEventListener('click', () => {
+    els.feed.scrollTop = els.feed.scrollHeight - els.feed.clientHeight;
+    enableAuto();
+  });
+  window.addEventListener('resize', () => {
+    // Breitenwechsel: Höhen der offenen Blöcke neu messen.
+    for (const blk of state.blocks.values()) { if (!blk.settled) blk.lastH = null; }
+    render();
+  });
 
-  // ── status (data transport: SSE / polling) ──────────────────────────────────
+  // ── Status / Voice / Meta / Summary ────────────────────────────────────────
   function setStatus(kind, text) {
-    els.status.className = `status status--${kind}`;
-    els.status.innerHTML = `●&nbsp;${text}`;
+    els.status.className = `pill pill--${kind}`;
+    els.status.textContent = text;
+    state.live = kind === 'live';
+    els.liveDot.classList.toggle('live-dot--on', state.live);
   }
 
-  // ── voice-channel / bot presence (header pill + members popover) ─────────────
   function renderVoice(voice) {
     if (!voice) {
-      els.voice.className = 'voice voice--unknown';
+      els.voice.className = 'pill pill--unknown';
       els.voice.textContent = '🎙 unbekannt';
       els.membersPop.hidden = true;
       return;
     }
     const n = (voice.members || []).length;
     if (voice.populated) {
-      els.voice.className = 'voice voice--connected';
-      els.voice.textContent = `🎙 Rabenauge verbunden · ${n} im Channel`;
+      els.voice.className = 'pill pill--connected';
+      els.voice.textContent = `🎙 verbunden · ${n} im Channel`;
     } else if (voice.connected) {
-      els.voice.className = 'voice voice--alone';
-      els.voice.textContent = '🎙 Rabenauge verbunden · allein';
+      els.voice.className = 'pill pill--alone';
+      els.voice.textContent = '🎙 verbunden · allein';
     } else {
-      els.voice.className = 'voice voice--offline';
-      els.voice.textContent = '🎙 Rabenauge nicht verbunden';
+      els.voice.className = 'pill pill--offline';
+      els.voice.textContent = '🎙 nicht verbunden';
     }
-
     els.membersList.innerHTML = '';
     els.membersCount.textContent = String(n);
     els.membersPop.hidden = n === 0;
-    for (const m of voice.members) {
+    for (const m of voice.members || []) {
       const li = document.createElement('li');
       li.textContent = m.label || '?';
-      li.style.color = speakerColor(m.label || '?');
+      li.style.color = accentFor(m.label || '?', 'user');
       els.membersList.appendChild(li);
     }
   }
 
-  // ── debug-only session-meta header ──────────────────────────────────────────
   function renderSessionMeta(snap) {
     const meta = snap.sessionMeta;
     if (!state.debug || !meta) { els.sessionMeta.hidden = true; return; }
     const rows = [];
     const add = (k, v) => { if (v != null && v !== '') rows.push([k, v]); };
-    const where = [meta.guildName, meta.channelName].filter(Boolean).join(' / ');
-    add('Channel', where);
+    add('Channel', [meta.guildName, meta.channelName].filter(Boolean).join(' / '));
     add('Start', fmtDateTime(snap.startedAt));
     add('Wake-Word', meta.wakeword && meta.wakeword.word);
     add('Stop-Phrases', Array.isArray(meta.stopPhrases) ? meta.stopPhrases.join(', ') : null);
     add('LLM', meta.llm && [meta.llm.provider, meta.llm.model].filter(Boolean).join(' / '));
-    add('STT', meta.stt && [meta.stt.provider, meta.stt.language, meta.stt.temperature != null ? `T=${meta.stt.temperature}` : null].filter(Boolean).join(' / '));
+    add('STT', meta.stt && [meta.stt.provider, meta.stt.language,
+      meta.stt.temperature != null ? `T=${meta.stt.temperature}` : null].filter(Boolean).join(' / '));
     add('TTS', meta.tts && meta.tts.provider);
-    add('Version', [meta.botVersion ? `bot ${meta.botVersion}` : null, meta.serverVersion ? `server ${meta.serverVersion}` : null].filter(Boolean).join(' · '));
-    if (snap.debug) add('Clock', `offset ${Math.round(snap.debug.clockOffsetMs || 0)}ms${snap.debug.lastRttMs != null ? `, rtt ${Math.round(snap.debug.lastRttMs)}ms` : ''} (${snap.debug.clockSyncCount || 0}×)`);
-
+    add('Version', [meta.botVersion ? `bot ${meta.botVersion}` : null,
+      meta.serverVersion ? `server ${meta.serverVersion}` : null].filter(Boolean).join(' · '));
+    if (snap.debug) {
+      add('Clock', `offset ${Math.round(snap.debug.clockOffsetMs || 0)}ms`
+        + `${snap.debug.lastRttMs != null ? `, rtt ${Math.round(snap.debug.lastRttMs)}ms` : ''}`
+        + ` (${snap.debug.clockSyncCount || 0}×)`);
+    }
     els.sessionMetaBody.innerHTML = '';
     for (const [k, v] of rows) {
       const dt = document.createElement('dt'); dt.textContent = k;
       const dd = document.createElement('dd'); dd.textContent = v;
-      els.sessionMetaBody.appendChild(dt);
-      els.sessionMetaBody.appendChild(dd);
+      els.sessionMetaBody.append(dt, dd);
     }
     els.sessionMeta.hidden = false;
   }
 
-  // ── transport: SSE primary ──────────────────────────────────────────────────
-  function baseUrl() {
-    return location.pathname.replace(/\/[^/]*$/, '');
+  function renderSnapshot(snap) {
+    resetStore();
+    state.stopPhrases = (snap.sessionMeta && snap.sessionMeta.stopPhrases) || [];
+    state.wakeWord = (snap.sessionMeta && snap.sessionMeta.wakeword && snap.sessionMeta.wakeword.word) || 'Rabenauge';
+    renderVoice(snap.voice);
+    renderSessionMeta(snap);
+    if (snap.summary && snap.summary.trim()) {
+      els.summaryText.textContent = snap.summary;
+      els.summaryBox.hidden = false;
+    } else {
+      els.summaryBox.hidden = true;
+    }
+    if (!snap.entries || !snap.entries.length) {
+      const p = document.createElement('p');
+      p.className = 'empty';
+      p.textContent = 'Noch nichts transkribiert.';
+      els.feed.appendChild(p);
+      els.emptyHint = p;
+      return;
+    }
+    for (const e of snap.entries) upsertEntry(e, { animate: false });
+    // Historie ohne Einschwingen: sofort ans Ende springen.
+    requestAnimationFrame(() => {
+      els.feed.scrollTop = els.feed.scrollHeight - els.feed.clientHeight;
+    });
   }
+
+  // ── TRANSPORT: SSE primär, Polling-Fallback ────────────────────────────────
+  function baseUrl() { return location.pathname.replace(/\/[^/]*$/, ''); }
   function liveUrl() {
     const q = state.sessionId ? `?sessionId=${encodeURIComponent(state.sessionId)}` : '';
     return `${baseUrl()}/live${q}`;
   }
-
   function stopTransport() {
     if (state.es) { state.es.close(); state.es = null; }
     if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
@@ -958,18 +776,17 @@
     let es;
     try { es = new EventSource(liveUrl()); } catch { startPolling(); return; }
     state.es = es;
-
     es.addEventListener('snapshot', (ev) => {
       state.sseFailures = 0;
       setStatus('live', 'SSE');
-      try { renderSnapshot(JSON.parse(ev.data)); } catch {}
+      try { renderSnapshot(JSON.parse(ev.data)); } catch (e) { console.warn('snapshot render:', e); }
     });
-    es.addEventListener('entry', (ev) => { try { upsertEntry(JSON.parse(ev.data)); } catch {} });
+    es.addEventListener('entry', (ev) => {
+      try { upsertEntry(JSON.parse(ev.data)); } catch (e) { console.warn('entry:', e); }
+    });
     es.addEventListener('presence', (ev) => { try { renderVoice(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('annotation', (ev) => { try { applyAnnotation(JSON.parse(ev.data)); } catch {} });
     es.addEventListener('session_ended', () => {
-      // Finalize ran: flip this session from active to past in the picker and
-      // say so in the status pill (the transcript itself stays on screen).
       setStatus('ended', 'Session beendet');
       loadSessions();
     });
@@ -987,7 +804,6 @@
     };
   }
 
-  // ── transport: polling fallback ──────────────────────────────────────────────
   async function pollOnce() {
     if (!state.sessionId) return;
     try {
@@ -1007,7 +823,7 @@
     state.pollTimer = setInterval(pollOnce, 3000);
   }
 
-  // ── session picker ────────────────────────────────────────────────────────
+  // ── Session-Picker ─────────────────────────────────────────────────────────
   function sessionLabel(s) {
     const when = fmtDateTime(s.startedAt != null ? s.startedAt : Number(s.sessionId));
     const where = [s.guildName, s.channelName].filter(Boolean).join(' / ');
@@ -1017,10 +833,9 @@
     const opt = document.createElement('option');
     opt.value = s.sessionId;
     opt.textContent = sessionLabel(s);
-    opt.title = s.sessionId; // raw id still reachable
+    opt.title = s.sessionId;
     parent.appendChild(opt);
   }
-
   async function loadSessions() {
     try {
       const res = await fetch(`${baseUrl()}/sessions${state.showPast ? '?all=1' : ''}`, { cache: 'no-store' });
@@ -1028,8 +843,7 @@
       const active = (data && data.sessions) || [];
       const past = (data && data.past) || [];
       els.select.innerHTML = '';
-
-      if (active.length === 0 && past.length === 0) {
+      if (!active.length && !past.length) {
         const opt = document.createElement('option');
         opt.value = '';
         opt.textContent = '(keine Session)';
@@ -1045,22 +859,18 @@
         for (const s of past) addOption(g, s);
         els.select.appendChild(g);
       }
-      if (!state.sessionId && active.length) state.sessionId = active[0].sessionId; // newest active
+      if (!state.sessionId && active.length) state.sessionId = active[0].sessionId;
       if (state.sessionId) {
         els.select.value = state.sessionId;
-        // The viewed session may be in neither group (e.g. it just got
-        // finalized and "vergangene" is unchecked) — keep it selectable.
         if (els.select.value !== state.sessionId) {
           addOption(els.select, { sessionId: state.sessionId, startedAt: Number(state.sessionId) });
           els.select.value = state.sessionId;
         }
       }
-    } catch {
-      /* picker stays empty; live endpoint still auto-detects newest */
-    }
+    } catch { /* Picker bleibt leer; /live erkennt die neueste Session selbst */ }
   }
 
-  // ── URL sync ────────────────────────────────────────────────────────────────
+  // ── URL-Sync + Wiring ──────────────────────────────────────────────────────
   function syncUrl() {
     const p = new URLSearchParams();
     if (state.sessionId) p.set('sessionId', state.sessionId);
@@ -1070,18 +880,20 @@
     history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
   }
 
-  // ── wiring ──────────────────────────────────────────────────────────────────
-  els.debug.checked = state.debug;
+  els.debugBtn.classList.toggle('btn--active', state.debug);
   document.body.classList.toggle('debug', state.debug);
-  els.debug.addEventListener('change', () => {
-    state.debug = els.debug.checked;
+  els.debugBtn.addEventListener('click', () => {
+    state.debug = !state.debug;
+    els.debugBtn.classList.toggle('btn--active', state.debug);
     document.body.classList.toggle('debug', state.debug);
     syncUrl();
-    startSse(); // fresh snapshot re-renders with/without debug fields
+    startSse(); // frischer Snapshot rendert mit/ohne Debug-Felder
   });
 
-  els.past.addEventListener('change', async () => {
-    state.showPast = els.past.checked;
+  els.pastBtn.classList.toggle('btn--active', state.showPast);
+  els.pastBtn.addEventListener('click', async () => {
+    state.showPast = !state.showPast;
+    els.pastBtn.classList.toggle('btn--active', state.showPast);
     syncUrl();
     await loadSessions();
   });
@@ -1092,22 +904,12 @@
     startSse();
   });
 
-  els.jump.addEventListener('click', () => { state.atBottom = true; scrollToBottom(); });
-
-  window.addEventListener('scroll', () => {
-    const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
-    state.atBottom = nearBottom;
-    if (nearBottom) els.jump.hidden = true;
-  }, { passive: true });
-
-  // Minimal test seam (only when ?e2e=1) to drive the live updater from tests
-  // without a real STT/audio backend.
-  if (new URLSearchParams(location.search).has('e2e')) {
-    window.__transcript = { upsertEntry, clearTranscript, state };
+  // Test-Seam (nur ?e2e=1): Live-Updater ohne echtes Audio/STT ansteuern.
+  if (params.has('e2e')) {
+    window.__transcript = { upsertEntry, applyAnnotation, renderSnapshot, resetStore, state };
   }
 
   (async function init() {
-    els.past.checked = state.showPast;
     await loadSessions();
     syncUrl();
     if (typeof EventSource !== 'undefined') startSse();

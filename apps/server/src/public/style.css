@@ -1,481 +1,353 @@
-/* Live-transcript UI styling.
+/* Live-Transkript — Artefakt-Look.
  *
- * Self-hosted Roboto (no external calls — see fonts/LICENSE.txt, Apache-2.0).
- * All visual knobs live in :root below so the look can be finetuned without
- * touching the markup or JS. Dark by default (companion display / debugging);
- * the [data-theme="light"] block flips the palette.
+ * Eine feste Akzentfarbe pro Sprecher (JS setzt --accent pro Blase);
+ * Tint/Border/Glow werden per color-mix daraus berechnet. Alle Animations-
+ * Konstanten (bewusst langsam) liegen hier als CSS-Variablen — app.js hält
+ * Spiegel-Konstanten mit denselben Werten (Werte synchron halten!).
+ *
+ * Self-hosted Roboto (kein externer Call — fonts/LICENSE.txt, Apache-2.0);
+ * Inter/JetBrains Mono stehen vorne im Stack, falls das System sie hat.
  */
 
 @font-face {
   font-family: 'Roboto';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
+  font-style: normal; font-weight: 400; font-display: swap;
   src: url('fonts/roboto-latin-400-normal.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Roboto';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
+  font-style: normal; font-weight: 700; font-display: swap;
   src: url('fonts/roboto-latin-700-normal.woff2') format('woff2');
 }
 
 :root {
-  --font: 'Roboto', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: ui-monospace, 'Cascadia Code', 'Roboto Mono', monospace;
+  /* Farbwelt (Artefakt) */
+  --bg: #14161b;
+  --bg-raise: #191b21;
+  --bg-raise2: #16181d;
+  --bg-bubble: #1e2128;
+  --bg-bubble-ended: #1a1d23;
+  --border: #23262d;
+  --border-soft: #2c3037;
+  --border-bubble: #2a2e35;
+  --text: #e6e8eb;
+  --text-soft: #c3c7cd;
+  --text-mute: #9ea3ab;
+  --text-dim: #6b7078;
+  --text-faint: #565a63;
+  --word-confirmed: #f1f2f4;
+  --word-tentative: #787e88;
+  --teal: #4fd1c5;
 
-  --bg: #15171c;
-  --bg-elev: #1c1f26;
-  --bg-line: #20242c;
-  --border: #2c313b;
-  --text: #e7e9ee;
-  --text-dim: #98a0ae;
-  --accent: #7aa2f7;         /* Rabenauge / assistant */
-  --accent-soft: #2a3350;
-  --ok: #7bd88f;
-  --warn: #e0af68;
-  --err: #f7768e;
+  /* Timing/Easing (Artefakt) — Spiegel in app.js */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --t-word: 800ms;
+  --t-bubble-in: 900ms;
+  --t-shape: 1100ms;
+  --t-flip: 950ms;
+  --t-height: 950ms;
+  --t-anchor: 700ms;
+  --bubble-gap: 12px;
 
-  /* Speaker name colors are generated from an HSL hue per label (see JS),
-     these control their saturation/lightness so they stay legible on --bg. */
-  --speaker-sat: 62%;
-  --speaker-light: 70%;
-
-  --maxw: 920px;
-  --gap: 14px;
-  --radius: 10px;
-
-  /* Word-level streaming animations (see renderWordSegments in app.js).
-     --w-morph/--w-exit have JS twins (MORPH_HALF_MS ≈ --w-morph, EXIT_MS = --w-exit). */
-  --w-enter-dur: 2.4s;      /* new word: blur → sharp */
-  --w-morph: .45s;          /* corrected word: blur out, swap, sharpen */
-  --w-exit: .4s;            /* retracted hypothesis word: blur away */
-  --w-tent-opacity: .55;    /* unconfirmed (tentative) words */
-  --bubble-resize: .35s;    /* speech-bubble growth */
-}
-
-[data-theme="light"] {
-  --bg: #f6f7f9;
-  --bg-elev: #ffffff;
-  --bg-line: #eef0f3;
-  --border: #d9dde3;
-  --text: #1a1d23;
-  --text-dim: #5c6675;
-  --accent: #3b5bdb;
-  --accent-soft: #dbe4ff;
-  --speaker-light: 38%;
+  --font: 'Inter', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
 
-html, body { margin: 0; }
-
+html, body { height: 100%; }
 body {
-  /* min-height (not a fixed height:100%): a fixed body height clips the
-     sticky topbar's containing block to one viewport, so it scrolls away
-     once the transcript grows past it. min-height lets the box grow with
-     content and keeps the bar pinned throughout. */
-  min-height: 100vh;
-  font-family: var(--font);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-size: 16px;
-  line-height: 1.5;
-  display: flex;
-  flex-direction: column;
+  font-family: var(--font);
 }
 
-/* ── top bar ─────────────────────────────────────────────────────────────── */
+/* ── Keyframes (Artefakt) ─────────────────────────────────────────────────── */
+@keyframes wordIn { from { opacity: 0; filter: blur(7px); } to { opacity: 1; filter: blur(0); } }
+@keyframes bubbleIn {
+  from { opacity: 0; filter: blur(14px); transform: scale(0.5); }
+  to   { opacity: 1; filter: blur(0);    transform: scale(1); }
+}
+@keyframes caretBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes jumpIn { from { opacity: 0; transform: translate(-50%, 8px) scale(0.9); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+@keyframes wordOut { from { opacity: 1; } to { opacity: 0; filter: blur(6px); } }
+
+/* ── Topbar ───────────────────────────────────────────────────────────────── */
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 5;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--gap);
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  background: var(--bg-elev);
+  gap: 14px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-raise);
+  flex-shrink: 0;
+  flex-wrap: wrap;
 }
 .topbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.topbar-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.topbar h1 { font-size: 1.05rem; margin: 0; font-weight: 700; letter-spacing: .2px; }
+.topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 
-.status { font-size: .82rem; color: var(--text-dim); white-space: nowrap; }
-.status--connecting { color: var(--warn); }
-.status--live { color: var(--ok); }
-.status--polling { color: var(--accent); }
-.status--error { color: var(--err); }
-.status--ended { color: var(--text-dim); }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-faint);
+  transition: all 0.2s;
+}
+.live-dot--on {
+  background: var(--teal);
+  box-shadow: 0 0 0 4px rgba(79, 209, 197, 0.15);
+}
+.app-title {
+  font-size: 13px; font-weight: 600; letter-spacing: 0.3px; color: var(--text-mute);
+}
 
-/* voice-channel / bot presence — independent of the data connection above */
-.voice {
-  font-size: .82rem;
-  white-space: nowrap;
-  padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-line);
-  color: var(--text-dim);
-}
-.voice--connected { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
-.voice--alone { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
-.voice--offline { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
-.voice--unknown { color: var(--text-dim); }
-
-/* members popover — lives in the header so it's always reachable without
-   scrolling; a collapsed <details> that opens a small floating panel. */
-.members-pop { position: relative; }
-.members-pop > summary {
-  list-style: none;
-  cursor: pointer;
-  font-size: .82rem;
-  color: var(--text-dim);
-  padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-line);
-  white-space: nowrap;
-}
-.members-pop > summary::-webkit-details-marker { display: none; }
-.members-pop[open] > summary { color: var(--text); border-color: var(--accent); }
-.members-list {
-  list-style: none;
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  z-index: 8;
-  margin: 0;
-  padding: 8px;
-  min-width: 160px;
-  max-width: 280px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
-}
-.members-list li {
-  font-size: .85rem;
-  font-weight: 700;
+.pill {
+  font-size: 12px;
   padding: 3px 10px;
   border-radius: 999px;
-  background: var(--bg-line);
-  border: 1px solid var(--border);
-  /* name color set inline per speaker (hue) from JS */
+  border: 1px solid var(--border-soft);
+  background: #1d2026;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+.pill--live      { border-color: var(--teal); color: var(--teal); background: rgba(79,209,197,0.10); }
+.pill--polling   { border-color: #f6ad55; color: #f6ad55; background: rgba(246,173,85,0.10); }
+.pill--error     { border-color: #fc8181; color: #fc8181; background: rgba(252,129,129,0.10); }
+.pill--ended     { border-color: var(--border-soft); color: var(--text-dim); }
+.pill--connecting{ color: var(--text-dim); }
+.pill--unknown   { color: var(--text-dim); }
+.pill--connected { border-color: var(--teal); color: var(--teal); background: rgba(79,209,197,0.10); }
+.pill--alone     { border-color: #f6ad55; color: #f6ad55; background: rgba(246,173,85,0.10); }
+.pill--offline   { color: var(--text-dim); }
+
+/* Buttons im Artefakt-Stil */
+.btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  background: #1d2026;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: var(--text-faint); }
+.btn--active, .btn--primary {
+  border-color: var(--teal);
+  background: rgba(79, 209, 197, 0.12);
+  color: var(--teal);
+}
+.btn:disabled { opacity: 0.45; cursor: default; }
+
+.field select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  background: #1d2026;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-family: var(--font);
+  max-width: 340px;
 }
 
-/* debug-only session-meta header (collapsed) */
-.session-meta {
-  max-width: var(--maxw);
-  width: 100%;
-  margin: 12px auto 0;
-  padding: 0 16px;
+/* Members-Popover */
+.members-pop { position: relative; }
+.members-pop summary {
+  list-style: none; cursor: pointer;
+  padding: 6px 12px; border-radius: 6px;
+  border: 1px solid var(--border-soft); background: #1d2026;
+  color: var(--text-soft); font-size: 12px; font-weight: 600;
 }
-.session-meta > summary { cursor: pointer; color: var(--text-dim); font-size: .85rem; }
-.session-meta-body {
-  margin: 8px 0 0;
-  padding: 10px 14px;
-  background: var(--bg-elev);
+.members-pop summary::-webkit-details-marker { display: none; }
+.members-pop[open] summary { border-color: var(--teal); color: var(--teal); }
+.members-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+  margin: 0; padding: 8px 12px; list-style: none; min-width: 160px;
+  background: var(--bg-raise); border: 1px solid var(--border-soft); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+.members-list li { padding: 3px 0; }
+
+/* ── Legende ──────────────────────────────────────────────────────────────── */
+.legend {
+  display: flex;
+  gap: 18px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raise2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-mute);
+}
+.legend-speakers { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+.legend-speaker { display: flex; align-items: center; gap: 6px; }
+.legend-speaker .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.legend-divider { width: 1px; height: 14px; background: var(--border-soft); margin: 0 4px; }
+.legend-states { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.swatch { width: 14px; height: 10px; border-radius: 3px; display: inline-block; }
+.swatch--tentative { background: #3a3f47; }
+.swatch--confirmed { background: var(--text); margin-left: 8px; }
+
+/* ── Session-Meta (Debug) + Zusammenfassung ──────────────────────────────── */
+.session-meta, .summary {
+  margin: 8px 20px 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 4px 14px;
-  font-size: .85rem;
+  border-radius: 8px;
+  background: var(--bg-raise2);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.session-meta summary, .summary summary {
+  cursor: pointer; padding: 8px 12px; color: var(--text-mute); font-weight: 600;
+}
+.session-meta-body {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px;
+  padding: 4px 12px 10px; margin: 0;
 }
 .session-meta-body dt { color: var(--text-dim); }
-.session-meta-body dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.session-meta-body dd { margin: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.summary-text { padding: 4px 12px 10px; color: var(--text-soft); white-space: pre-wrap; }
 
-.field { display: flex; align-items: center; gap: 6px; font-size: .82rem; color: var(--text-dim); }
-.field select {
-  font-family: inherit;
-  font-size: .85rem;
-  color: var(--text);
-  background: var(--bg-line);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 8px;
-  max-width: 260px;
+/* ── Feed ─────────────────────────────────────────────────────────────────── */
+.feed-wrap { flex: 1; position: relative; min-height: 0; }
+.feed {
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px 20px 200px;
 }
-.toggle { display: flex; align-items: center; gap: 6px; font-size: .82rem; color: var(--text-dim); cursor: pointer; user-select: none; }
-.toggle input { accent-color: var(--accent); }
+.empty { color: var(--text-dim); font-size: 14px; }
 
-/* ── summary box ─────────────────────────────────────────────────────────── */
-.summary {
-  max-width: var(--maxw);
-  width: 100%;
-  margin: 12px auto 0;
-  padding: 0 16px;
-}
-.summary > summary { cursor: pointer; color: var(--text-dim); font-size: .85rem; }
-.summary-text {
-  margin-top: 8px;
-  padding: 12px 14px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-dim);
-  font-size: .92rem;
-  white-space: pre-wrap;
-}
+/* Block = Überlapp-Gruppe. Außenhöhe wird von JS animiert (SmoothHeight);
+ * geschlossene Blöcke laufen mit height:auto ohne Clipping weiter. */
+.block { overflow: hidden; }
+.block--settled { overflow: visible; }
 
-/* ── transcript ──────────────────────────────────────────────────────────── */
-.transcript {
-  flex: 1;
-  width: 100%;
-  max-width: var(--maxw);
-  margin: 0 auto;
-  padding: 16px 16px 96px;
+.row {
   display: flex;
-  flex-direction: column;
   gap: 10px;
-  /* Own stacking context: bubble z-indexes stay local and can never rise
-     above the sticky topbar or the settings drawer. */
-  isolation: isolate;
-}
-.empty { color: var(--text-dim); text-align: center; margin-top: 40px; font-style: italic; }
-
-.entry {
-  display: grid;
-  grid-template-columns: minmax(80px, 160px) 1fr;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  background: var(--bg-line);
-  animation: fade-in .18s ease-out;
-}
-.entry--assistant { background: var(--accent-soft); }
-@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-
-.entry-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.entry-speaker {
-  font-weight: 700;
-  word-break: break-word;
-  /* color set inline per speaker (hue) from JS */
-}
-.entry--assistant .entry-speaker { color: var(--accent); }
-.entry-time { font-size: .72rem; color: var(--text-dim); font-family: var(--font-mono); }
-.entry-nsp { font-size: .72rem; color: var(--text-dim); font-family: var(--font-mono); }
-.entry-nsp.high { color: var(--warn); }
-
-.entry-body { min-width: 0; overflow-wrap: anywhere; }
-.entry-body > :first-child { margin-top: 0; }
-.entry-body > :last-child { margin-bottom: 0; }
-.entry-body p { margin: 0 0 .4em; }
-.entry-body h1, .entry-body h2, .entry-body h3 { margin: .3em 0 .2em; line-height: 1.25; }
-.entry-body h1 { font-size: 1.15rem; }
-.entry-body h2 { font-size: 1.08rem; }
-.entry-body h3 { font-size: 1rem; }
-.entry-body ul, .entry-body ol { margin: .2em 0 .4em; padding-left: 1.3em; }
-.entry-body li { margin: .1em 0; }
-.entry-body code {
-  font-family: var(--font-mono);
-  font-size: .88em;
-  background: rgba(127, 127, 127, .18);
-  padding: .08em .35em;
-  border-radius: 4px;
-}
-.entry-body blockquote {
-  margin: .3em 0;
-  padding-left: .8em;
-  border-left: 3px solid var(--border);
-  color: var(--text-dim);
-}
-.entry-body a { color: var(--accent); }
-
-/* debug: show the structural grid lines + kind tag */
-body.debug .entry { outline: 1px dashed var(--border); }
-.entry-kind { font-size: .68rem; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
-
-/* wake-word trigger: the whole line that went to the LLM is emphasized */
-.entry--wake {
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-/* stop: just the stop token is marked (see .stop-token), line stays subtle */
-.entry--stop { box-shadow: inset 3px 0 0 var(--err); }
-.stop-token {
-  background: color-mix(in srgb, var(--err) 30%, transparent);
-  color: var(--text);
-  border-radius: 3px;
-  padding: 0 .25em;
-  font-weight: 700;
+  margin-bottom: var(--bubble-gap);
+  align-items: flex-start;
 }
 
-/* meta badges (wake/stop/interrupt markers) */
-.badge {
-  font-size: .68rem;
-  font-weight: 700;
-  padding: 1px 7px;
-  border-radius: 999px;
+/* Blasen-Spalte (flex-grow animiert bei Solo/Overlap-Wechsel, FLIP via transform) */
+.slot {
+  flex-basis: 0;
+  min-width: 0;
+  transition: flex-grow var(--t-shape) var(--ease);
+}
+.slot--solo { max-width: 94%; }
+.row--multi .slot { min-width: 130px; }
+
+/* ── Bubble (Artefakt) ────────────────────────────────────────────────────── */
+.bubble {
+  --accent: var(--teal);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-bubble));
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-bubble));
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 13px;
+  margin-bottom: var(--bubble-gap); /* Abstand unten → verschiebt Anker nicht */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
+  transition: box-shadow 0.3s, border-color 0.3s, background 0.4s;
+  transform-origin: center center;
+}
+.bubble--enter { animation: bubbleIn var(--t-bubble-in) var(--ease) both; }
+.bubble--ended {
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-bubble-ended));
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-bubble));
+  border-left-color: var(--accent);
+  box-shadow: none;
+}
+
+.b-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.b-avatar {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: var(--bg);
+  font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.b-name { font-size: 12px; font-weight: 600; color: var(--text-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.b-time {
+  margin-left: auto; font-size: 10.5px; color: var(--text-faint);
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  width: max-content;
 }
-.badge-wake { color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
-.badge-stop { color: var(--err); background: color-mix(in srgb, var(--err) 18%, transparent); }
-.badge-marker { color: var(--text-dim); background: var(--bg-line); text-transform: uppercase; letter-spacing: .4px; }
 
-/* per-entry debug footer (STT diagnostics / TTS lifecycle) */
-.entry-debug {
-  grid-column: 1 / -1;
-  margin-top: 4px;
-  font-size: .72rem;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
+.b-body { font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.b-body .seg { margin: 0; }
+.b-body .seg + .seg { margin-top: 6px; }
+
+/* Wörter: bestätigt hell, unbestätigt gedimmt+kursiv; Einblenden mit Blur. */
+.w { display: inline; color: var(--word-confirmed); transition: color 0.4s ease, font-style 0.2s; }
+.w--in { animation: wordIn var(--t-word) ease-out; }
+.w--tent { color: var(--word-tentative); font-style: italic; }
+.w--out { animation: wordOut 220ms ease-in both; }
+.w--wake { color: var(--teal); text-shadow: 0 0 12px rgba(79, 209, 197, 0.55); font-style: normal; }
+.w--stop { color: #fc8181; text-shadow: 0 0 12px rgba(252, 129, 129, 0.45); font-style: normal; }
+
+/* Schreib-Caret solange die Äußerung live ist */
+.caret {
+  display: inline-block; width: 2px; height: 13px;
+  background: var(--accent); margin-left: 3px;
+  vertical-align: text-bottom;
+  animation: caretBlink 0.9s step-end infinite;
+}
+
+/* Assistant-Antwort: Markdown-Body statt Wort-Spans */
+.b-md { font-size: 15px; line-height: 1.5; }
+.b-md p, .b-md h1, .b-md h2, .b-md h3, .b-md ul, .b-md ol, .b-md blockquote { margin: 0 0 6px; }
+.b-md h1 { font-size: 1.15em; } .b-md h2 { font-size: 1.08em; } .b-md h3 { font-size: 1.02em; }
+.b-md code { font-family: var(--font-mono); font-size: 0.88em; background: #14161b; padding: 1px 5px; border-radius: 4px; }
+.b-md blockquote { border-left: 2px solid var(--border-soft); padding-left: 8px; color: var(--text-mute); }
+.b-md a { color: var(--teal); }
+
+/* Debug-Zusatz: Chunk-Split-Tags + Meta-Fußzeile */
+.chunk-split {
+  display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 4px; font-size: 10px; font-family: var(--font-mono);
+  vertical-align: 1px;
+}
+.chunk--natural { background: rgba(79, 209, 197, 0.14); color: var(--teal); }
+.chunk--forced  { background: rgba(246, 173, 85, 0.14); color: #f6ad55; }
+.chunk--stream  { background: rgba(183, 148, 244, 0.14); color: #b794f4; }
+.chunk--other   { background: #2a2e35; color: var(--text-mute); }
+.b-debug {
+  margin-top: 6px; padding-top: 5px;
+  border-top: 1px dashed var(--border-soft);
+  font-size: 10.5px; color: var(--text-dim);
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
-/* Live streaming: new paragraphs (finalized chunks) fade/slide in instead of
-   snapping in — existing paragraphs stay put (append-only). */
-@keyframes para-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-.entry-body > .para-enter { animation: para-enter .28s ease-out; }
-@media (prefers-reduced-motion: reduce) { .entry-body > .para-enter { animation: none; } }
-
-/* ── word-level streaming (blur → sharpen) ────────────────────────────────────
-   Each spoken word is a .w span. New words materialize from a blur; corrected
-   words blur out, swap text and sharpen again (.w-blur set/removed by JS);
-   words the server has not confirmed yet (.w-tent) stay dimmed and slightly
-   soft until the agreement promotes them. The enter keyframes only define
-   `from` — they animate towards the element's CURRENT style, so a word can
-   enter straight into its tentative look without a fight between rules. */
-.w {
-  transition: opacity var(--w-morph) ease, filter var(--w-morph) ease;
-}
-.w-tent {
-  opacity: var(--w-tent-opacity);
-  filter: blur(.6px);
-}
-@keyframes w-enter { from { opacity: 0; filter: blur(9px); } }
-.w-enter { animation: w-enter var(--w-enter-dur) ease-out; }
-.w-blur, .w-exit { opacity: .08; filter: blur(8px); }
-
-/* speech bubbles grow/shrink smoothly (height animated across DOM patches) */
-.entry.h-anim, .bubble.h-anim { transition: height var(--bubble-resize) ease; }
-
-/* detected keywords, marked on the word spans (whole words only) */
-.w-kw-wake { color: var(--accent); font-weight: 700; }
-.w-kw-stop {
-  background: color-mix(in srgb, var(--err) 30%, transparent);
-  border-radius: 3px;
-  padding: 0 .22em;
-  font-weight: 700;
-}
-
-/* ── equal bubbles: flow layout ───────────────────────────────────────────────
-   Every utterance is one bubble: speaker + time on top, text below — the SAME
-   card for everyone (users and Rabenauge, long and short). Bubbles never nest;
-   parallel talkers share the row width (max-width set by app.js from the
-   group's word weights), sides alternate dynamically, and a bubble may sit
-   next to the previous one (negative top margin) with a slight edge overlap.
-   Transitions are quick and slightly springy ("plop"). */
-.bubble {
-  position: relative;
-  display: block;
-  width: fit-content;
-  max-width: 100%;
-  padding: 7px 12px 8px;
-  background: var(--bg-line);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 3px 10px rgba(0, 0, 0, .25);
-  transition:
-    max-width .28s cubic-bezier(.3, 1.4, .5, 1),
-    margin .28s cubic-bezier(.3, 1.4, .5, 1),
-    transform .28s cubic-bezier(.3, 1.4, .5, 1);
-}
-.bubble--right { margin-left: auto; }
-.bubble--assistant { background: var(--accent-soft); }
-.bubble--wake {
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent), 0 3px 10px rgba(0, 0, 0, .25);
-}
-.bubble--stop { box-shadow: inset 3px 0 0 var(--err), 0 3px 10px rgba(0, 0, 0, .25); }
-
-.b-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 2px;
-}
-.b-name { font-weight: 700; /* speaker hue set inline from JS */ }
-.bubble--assistant .b-name { color: var(--accent); }
-.b-time {
-  font-size: .72rem;
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.b-body { min-width: 0; overflow-wrap: anywhere; }
-.b-body > :first-child { margin-top: 0; }
-.b-body > :last-child { margin-bottom: 0; }
-.b-body p { margin: 0 0 .35em; }
-
-/* plop in: small and blurry → full size (only `from`, lands on current styles) */
-@keyframes bubble-enter { from { opacity: 0; filter: blur(8px); transform: scale(.6); } }
-.bubble--enter { animation: bubble-enter .3s cubic-bezier(.3, 1.4, .5, 1); }
-
-/* during a layout pass measurements must not read mid-animation values */
-.transcript.layouting .bubble { transition: none !important; }
-
-@media (prefers-reduced-motion: reduce) {
-  .w, .entry.h-anim, .bubble { transition: none; }
-  .w-enter, .bubble--enter { animation: none; }
-}
-
-/* Debug per-chunk view: each raw whisper chunk on its own line with a split tag. */
-.entry-body p.chunk { position: relative; padding-left: 2px; margin: 0 0 .35em; }
-.chunk-split {
-  display: inline-block;
-  font-size: .62rem;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .3px;
-  padding: 0 5px;
-  margin-right: 6px;
-  border-radius: 4px;
-  vertical-align: 1px;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-}
-.chunk-split.chunk--natural { color: var(--ok); border-color: rgba(123, 216, 143, .45); }
-.chunk-split.chunk--forced  { color: var(--warn); border-color: rgba(224, 175, 104, .45); }
-.chunk-split.chunk--other   { color: var(--text-dim); }
-
-/* ── jump-to-latest ──────────────────────────────────────────────────────── */
+/* ── Jump-Button (Artefakt) ───────────────────────────────────────────────── */
+.jump-latest[hidden] { display: none; } /* explizites display:flex schlüge sonst das hidden-Attribut */
 .jump-latest {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 6;
-  font-family: inherit;
-  font-size: .85rem;
-  color: var(--text);
-  background: var(--accent);
-  border: none;
-  border-radius: 999px;
-  padding: 8px 14px;
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(79, 209, 197, 0.16);
+  border: 1px solid var(--teal);
+  color: var(--teal);
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: jumpIn 220ms ease-out;
+  backdrop-filter: blur(6px);
 }
-.jump-latest[hidden] { display: none; }
 
-@media (max-width: 560px) {
-  .entry { grid-template-columns: 1fr; gap: 4px; }
-  .entry-meta { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-
-  /* Stack the bar so the Debug toggle wraps onto its own line instead of
-     being clipped off the right edge on phones. */
-  .topbar { flex-direction: column; align-items: stretch; gap: 8px; }
-  .topbar-right { width: 100%; justify-content: space-between; gap: 10px; }
-  .topbar-right .field { flex: 1; min-width: 0; }
-  .topbar-right .field select { flex: 1; max-width: none; min-width: 0; }
-  .toggle { flex: 0 0 auto; }
+/* ── Schmale Viewports: Blasen stapeln, keine Anker-Versätze ─────────────── */
+@media (max-width: 640px) {
+  .row { display: block; }
+  .row--multi .slot { min-width: 0; }
+  .slot { margin-top: 0 !important; transform: none !important; }
+  .slot--solo { max-width: 100%; }
+  .field select { max-width: 180px; }
 }

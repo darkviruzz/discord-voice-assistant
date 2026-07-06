@@ -39,6 +39,9 @@ function toClientEntry(entry, meta) {
   if (Array.isArray(entry.chunks)) out.chunks = entry.chunks;
   if (Number.isFinite(entry.endMs)) out.endMs = entry.endMs;
   if (entry.partial) out.partial = true;
+  // Rücknahme: die Utterance bekam kein Final (leer/Bracket-only/STT-Fehler) —
+  // der Client entfernt die zuvor gezeigte Partial-Blase.
+  if (entry.retracted) out.retracted = true;
   if (entry.stableWords != null) out.stableWords = entry.stableWords;
   if (entry.floatInto) out.floatInto = entry.floatInto; // interruption side bubble
   if (entry.meta) out.meta = entry.meta;

@@ -237,14 +237,19 @@ body {
   align-items: flex-start;
 }
 
-/* Blasen-Spalte (flex-grow animiert bei Solo/Overlap-Wechsel, FLIP via transform) */
-.slot {
+/* Sprecher-Spalte: eine pro Nutzer in der Gruppe, Blasen stapeln darin.
+ * Breite folgt dem Inhalt (flex-grow 1–3, von JS gesetzt und animiert);
+ * horizontale Umordnung per FLIP-Transform. */
+.col {
   flex-basis: 0;
   min-width: 0;
   transition: flex-grow var(--t-shape) var(--ease);
 }
-.slot--solo { max-width: 94%; }
-.row--multi .slot { min-width: 130px; }
+.col--solo { max-width: 94%; }
+.row--multi .col { min-width: 130px; }
+
+/* Unterdrückt jede Transition für einen Frame (Erst-Platzierung von Ankern). */
+.no-anim, .no-anim * { transition: none !important; }
 
 /* ── Bubble (Artefakt) ────────────────────────────────────────────────────── */
 .bubble {
@@ -256,7 +261,10 @@ body {
   padding: 10px 13px;
   margin-bottom: var(--bubble-gap); /* Abstand unten → verschiebt Anker nicht */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
-  transition: box-shadow 0.3s, border-color 0.3s, background 0.4s;
+  /* margin-top trägt den Anker-Versatz (Unterbrechungs-Wortzeile) — animiert,
+   * damit Blasen bei Layout-Änderungen gleiten statt springen. */
+  transition: box-shadow 0.3s, border-color 0.3s, background 0.4s,
+    margin-top var(--t-anchor) var(--ease);
   transform-origin: center center;
 }
 .bubble--enter { animation: bubbleIn var(--t-bubble-in) var(--ease) both; }
@@ -346,8 +354,9 @@ body {
 /* ── Schmale Viewports: Blasen stapeln, keine Anker-Versätze ─────────────── */
 @media (max-width: 640px) {
   .row { display: block; }
-  .row--multi .slot { min-width: 0; }
-  .slot { margin-top: 0 !important; transform: none !important; }
-  .slot--solo { max-width: 100%; }
+  .row--multi .col { min-width: 0; }
+  .col { transform: none !important; }
+  .col--solo { max-width: 100%; }
+  .row .bubble { margin-top: 0 !important; }
   .field select { max-width: 180px; }
 }

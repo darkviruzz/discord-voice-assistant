@@ -395,6 +395,9 @@ async function streamingTick(sessionId, session, userId, sp) {
   const res = await stream.tick(pcm);
   // utterance ended mid-transcribe → the final entry owns the display now
   if (!res?.changed || sp.stream !== stream) return;
+  // Nichts Anzeigbares (z. B. nur weggefilterte Sound-Annotationen wie
+  // "[Musik]") → keine leere Blase mit Caret in der UI erzeugen.
+  if (!String(res.text || '').trim()) return;
   publishEntry(sessionId, {
     label: stream.label,
     text: res.text,
@@ -716,6 +719,19 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       : (metadata.userDisplayName || String(userId));
     const entryStartMs = stream?.startMs ?? metadata.startTsMs ?? Date.now();
 
+    // Publizierte Live-Partials zurücknehmen, wenn diese Utterance KEIN finales
+    // Entry bekommt (leeres/Bracket-only-Transkript wie "[Sprecherwechsel]",
+    // STT-Fehler). Ohne Rücknahme bliebe die Partial-Blase mit Caret bis zum
+    // Reload in der UI stehen. Für nie publizierte startMs ist das client-
+    // seitig ein No-op.
+    let partialPublished = stream?.hasContent() ?? false;
+    const retractPartial = () => {
+      if (!partialPublished || !session) return;
+      publishEntry(sessionId, {
+        label: liveLabel, text: '', startMs: entryStartMs, kind: 'user', retracted: true,
+      });
+    };
+
     // 3. STT.
     //    Streaming path: only the streamer's remaining active window is
     //    transcribed once more (complete audio, full context); everything the
@@ -752,15 +768,18 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         stt = { ...chunked.stt, mode: 'stream+chunked' };
       } else {
         const onProgress = (session && liveContextEnabled())
-          ? ({ segments, chunks }) => publishEntry(sessionId, {
-              label: liveLabel,
-              text: segments.join(' '),
-              segments,
-              chunks,
-              startMs: entryStartMs,
-              kind: 'user',
-              partial: true,
-            })
+          ? ({ segments, chunks }) => {
+              partialPublished = true;
+              publishEntry(sessionId, {
+                label: liveLabel,
+                text: segments.join(' '),
+                segments,
+                chunks,
+                startMs: entryStartMs,
+                kind: 'user',
+                partial: true,
+              });
+            }
           : undefined;
         const result = await transcribeChunked(pcm48k, { onProgress });
         transcripts = result.transcripts;
@@ -770,6 +789,7 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       }
     } catch (e) {
       warn('pipeline: stt error:', e.message);
+      retractPartial();
       return;
     }
 
@@ -821,6 +841,10 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         // Keep the interruption placement across the partial→final swap.
         if (stream?.floatInto) stored.floatInto = stream.floatInto;
         publishEntry(sessionId, stored, { noSpeechProb: stt?.noSpeechProbAvg ?? null });
+      } else {
+        // makeEntry hat das Transkript verworfen (leer / Bracket-only wie
+        // "[Sprecherwechsel]") — bereits gezeigte Partials zurücknehmen.
+        retractPartial();
       }
       maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
     }

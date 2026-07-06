@@ -28,6 +28,7 @@
   const T_HEIGHT = 950;    // Blockhöhe
   const T_ANCHOR = 700;    // vertikaler Anker-Versatz
   const SCROLL_TC = 620;   // Zeitkonstante Autoscroll (größer = langsamer)
+  const BUBBLE_GAP = 12;   // vertikaler Blasen-Abstand (--bubble-gap)
   const NARROW_PX = 640;   // ab hier stapeln statt nebeneinander (wie CSS)
 
   const $ = (sel) => document.querySelector(sel);
@@ -225,12 +226,36 @@
     return entry.startMs + Math.max(1500, wordCountOf(entry) * 360); // ~165 wpm
   }
 
+  // Blase einer zurückgezogenen/verwaisten Utterance entfernen.
+  function removeRec(startMs) {
+    const rec = state.recs.get(startMs);
+    if (!rec) return;
+    state.recs.delete(startMs);
+    const i = state.order.indexOf(startMs);
+    if (i >= 0) state.order.splice(i, 1);
+    rec.els?.bubble.remove();
+    render();
+  }
+
+  // Sicherheitsnetz gegen verwaiste Partials, deren Final/Rücknahme verloren
+  // ging (Server-Neustart, getrennte SSE-Verbindung im falschen Moment): ein
+  // Partial, das 2 min lang kein Update bekam, ist tot — still entfernen.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [startMs, rec] of [...state.recs]) {
+      if (rec.data.partial && now - (rec.touchedAt || now) > 120_000) removeRec(startMs);
+    }
+  }, 30_000);
+
   // Entry einfügen/mergen. Identität = startMs (Partials → Final gleicher Key).
   function upsertEntry(entry, { animate = true } = {}) {
     if (!entry || !Number.isFinite(entry.startMs)) return;
+    // Rücknahme: die Utterance bekam kein Final (Rauschen/Bracket-only wie
+    // "[Sprecherwechsel]", STT-Fehler) — Partial-Blase entfernen.
+    if (entry.retracted) { removeRec(entry.startMs); return; }
     let rec = state.recs.get(entry.startMs);
     if (!rec) {
-      rec = { data: entry, confirmed: 0, animate, anchorIdx: null, els: null, dirty: true };
+      rec = { data: entry, confirmed: 0, animate, anchorIdx: null, anchorHost: null, els: null, dirty: true };
       state.recs.set(entry.startMs, rec);
       const i = state.order.findIndex((s) => s > entry.startMs);
       if (i < 0) state.order.push(entry.startMs); else state.order.splice(i, 0, entry.startMs);
@@ -243,6 +268,7 @@
       rec.data.partial = entry.partial === true;
       rec.dirty = true;
     }
+    rec.touchedAt = Date.now();
     // Bestätigt-Zähler monoton halten (Server-stableWords kann pro Tick nur
     // wachsen; nach dem Final gilt alles als bestätigt).
     if (rec.data.partial && Number.isFinite(rec.data.stableWords)) {
@@ -301,6 +327,7 @@
     const e = rec.data;
     const bubble = document.createElement('div');
     bubble.className = 'bubble' + (rec.animate ? ' bubble--enter' : '');
+    bubble.dataset.startMs = String(e.startMs);
     if (rec.animate) {
       bubble.addEventListener('animationend', () => bubble.classList.remove('bubble--enter'), { once: true });
     }
@@ -316,13 +343,38 @@
     const body = document.createElement('div');
     body.className = e.kind === 'assistant' ? 'b-md' : 'b-body';
     bubble.append(head, body);
-
-    const slot = document.createElement('div');
-    slot.className = 'slot';
-    slot.dataset.startMs = String(e.startMs);
-    slot.appendChild(bubble);
-    rec.els = { slot, bubble, avatar, name, time, body, debug: null, mdKey: null };
+    rec.els = { bubble, avatar, name, time, body, debug: null, mdKey: null };
     return rec.els;
+  }
+
+  // Spalten einer Überlapp-Gruppe: EINE Spalte pro Sprecher (Folge-Blasen
+  // desselben Nutzers stapeln darin); fremde Blasen dürfen eine bestehende
+  // Spalte weiternutzen, wenn sie zeitlich nicht mit deren Inhalt kollidieren
+  // (rückwärts gesucht → die zuletzt aktive passende Spalte gewinnt).
+  // Spalten-Identität = startMs der ersten Blase.
+  function packColumns(group) {
+    const cols = [];
+    const byLabel = new Map();
+    for (const rec of group) {
+      let col = byLabel.get(rec.data.label);
+      if (!col) {
+        for (let i = cols.length - 1; i >= 0; i--) {
+          if (rec.data.startMs >= cols[i].maxEnd) { col = cols[i]; break; }
+        }
+      }
+      if (!col) { col = { key: rec.data.startMs, recs: [], maxEnd: -Infinity }; cols.push(col); }
+      col.recs.push(rec);
+      col.maxEnd = Math.max(col.maxEnd, endOf(rec.data));
+      byLabel.set(rec.data.label, col);
+    }
+    return cols;
+  }
+
+  // Spaltenbreite folgt dem Inhalt: die LÄNGSTE Blase der Spalte entscheidet
+  // (nicht die Anzahl) — kurze Einwürfe 1, lange Monologe bis 3.
+  function colGrow(col) {
+    const maxChars = Math.max(1, ...col.recs.map((r) => String(r.data.text || '').length));
+    return Math.min(3, Math.max(1, maxChars / 60));
   }
 
   // Wort-Spans eines Segments mit dem Soll abgleichen (append/replace/exit).
@@ -448,31 +500,62 @@
     }
   }
 
-  // Anker: Slot eines Unterbrechers auf die Wortzeile seines Hosts ausrichten.
-  function anchorTargetPx(rec, group, rowTop) {
+  // Gewünschte Oberkante (Viewport-px) einer Blase: die Wortzeile, an der die
+  // Unterbrechung passierte. floatInto (Server, wortgenau) gewinnt; sonst
+  // zeit-basiert gegen die dominante Blase, die beim Start dieser Blase gerade
+  // „lief" — nicht aus der eigenen Spalte (dort regelt der Fluss den Platz).
+  // null = kein Anker (normale Fluss-Position).
+  function desiredTopFor(rec, group, colOf) {
     const fi = rec.data.floatInto;
     let host = null;
     let idx = null;
     if (fi && fi.hostStartMs != null) {
       host = group.find((r) => r.data.startMs === fi.hostStartMs && r !== rec) || null;
-      if (Number.isFinite(fi.atWordIndex)) idx = fi.atWordIndex;
+      if (host && Number.isFinite(fi.atWordIndex)) idx = fi.atWordIndex;
     }
     if (!host) {
-      // Implizit: nicht-erste Blase der Gruppe hängt am längsten früher
-      // gestarteten Mitglied (Artefakt-Regel), Position beim Beitritt gemerkt.
-      const before = group.filter((r) => r !== rec && r.data.startMs < rec.data.startMs);
-      if (!before.length) return 0;
-      host = before.sort((a, b) => wordCountOf(b.data) - wordCountOf(a.data)
+      const t = rec.data.startMs;
+      const cands = group.filter((r) => r !== rec
+        && colOf.get(r) !== colOf.get(rec)
+        && r.data.startMs <= t && endOf(r.data) > t);
+      if (!cands.length) return null;
+      host = cands.sort((a, b) => wordCountOf(b.data) - wordCountOf(a.data)
         || a.data.startMs - b.data.startMs)[0];
     }
-    const words = host.els ? host.els.bubble.querySelectorAll('.w') : [];
-    if (!words.length) return 0;
+    if (!host.els) return null;
+    const words = host.els.bubble.querySelectorAll('.w');
+    if (!words.length) return host.els.bubble.getBoundingClientRect().top;
     if (idx === null) {
-      if (rec.anchorIdx === null) rec.anchorIdx = words.length - 1; // einmal merken
+      // Wortindex EINMAL bestimmen und merken (bleibt beim Wachsen stabil und
+      // ist bildschirmbreiten-invariant): beendeter Host → zeit-proportional
+      // über seine Wörter; laufender Host → sein aktuell letztes Wort.
+      if (rec.anchorHost !== host.data.startMs || rec.anchorIdx == null) {
+        const end = endOf(host.data);
+        rec.anchorHost = host.data.startMs;
+        rec.anchorIdx = Number.isFinite(end)
+          ? Math.round((words.length - 1) * Math.min(1, Math.max(0,
+            (rec.data.startMs - host.data.startMs) / Math.max(1, end - host.data.startMs))))
+          : words.length - 1;
+      }
       idx = rec.anchorIdx;
     }
     const span = words[Math.max(0, Math.min(words.length - 1, idx))];
-    return Math.max(0, span.getBoundingClientRect().top - rowTop);
+    return span.getBoundingClientRect().top;
+  }
+
+  // margin-top einer Blase setzen; erste Platzierung ohne Transition (die
+  // Blase soll AN ihrer Position erscheinen, nicht hinrutschen).
+  function setMarginTop(el, px, immediate) {
+    const val = `${Math.round(px)}px`;
+    if (el.style.marginTop === val) return;
+    if (immediate) {
+      el.classList.add('no-anim');
+      el.style.marginTop = val;
+      void el.offsetHeight;
+      el.classList.remove('no-anim');
+    } else {
+      el.style.marginTop = val;
+    }
   }
 
   let renderScheduled = false;
@@ -487,22 +570,22 @@
     const groups = computeGroups();
     const isNarrow = narrow();
 
-    // Nur OFFENE Blöcke werden gemessen/animiert — abgeschlossene Gruppen sind
-    // statisch; ohne diesen Guard erzwänge jeder Tick O(n) Reflows über die
-    // gesamte Historie.
-    const activeRecs = [];
-    for (const group of groups) {
-      const blk = state.blocks.get(group[0].data.startMs);
-      if (!blk || !blk.settled) activeRecs.push(...group);
-    }
-
-    // 1. FLIP-Vorher-Messung (nur Slots offener Blöcke, die es schon gibt).
+    // 1. FLIP-Vorher-Messung: Spalten-Positionen offener Blöcke. Abgeschlossene
+    // Gruppen sind statisch — ohne diesen Guard erzwänge jeder Tick O(n)
+    // Reflows über die gesamte Historie.
     const prevRect = new Map();
-    for (const rec of activeRecs) {
-      if (rec.els?.slot.isConnected) prevRect.set(rec.data.startMs, rec.els.slot.getBoundingClientRect());
+    for (const group of groups) {
+      const key = group[0].data.startMs;
+      const blk = state.blocks.get(key);
+      if (!blk || blk.settled || !blk.colEls) continue;
+      for (const [ck, el] of blk.colEls) {
+        if (el.isConnected) prevRect.set(`${key}:${ck}`, el.getBoundingClientRect());
+      }
     }
 
-    // 2. DOM abgleichen: Blöcke in Gruppen-Reihenfolge, Slots in Dominanz-Ordnung.
+    // 2. DOM abgleichen: Blöcke in Gruppen-Reihenfolge; je Gruppe Spalten in
+    // Dominanz-Ordnung (längster Inhalt zuerst), je Spalte Blasen in
+    // Zeit-Reihenfolge.
     const seenBlocks = new Set();
     let anchorBlock = null; // als Nächstes einzufügender Block hängt hier dahinter
     for (const group of groups) {
@@ -517,30 +600,56 @@
         row.className = 'row';
         inner.appendChild(row);
         outer.appendChild(inner);
-        blk = { outer, inner, row, settled: false, lastH: null };
+        blk = { outer, inner, row, settled: false, lastH: null, colEls: new Map(), cols: null, colOf: null };
         state.blocks.set(key, blk);
         if (anchorBlock) anchorBlock.after(outer);
         else els.feed.prepend(outer);
       }
       anchorBlock = blk.outer;
 
-      // Dominanz: meiste Wörter zuerst, dann Startzeit (Artefakt-Sortierung).
-      const ordered = [...group].sort((a, b) => wordCountOf(b.data) - wordCountOf(a.data)
-        || a.data.startMs - b.data.startMs);
-      const solo = ordered.length === 1;
+      const cols = packColumns(group);
+      cols.sort((a, b) => colGrow(b) - colGrow(a) || a.key - b.key);
+      const colOf = new Map();
+      for (const col of cols) for (const rec of col.recs) colOf.set(rec, col);
+      blk.cols = cols;
+      blk.colOf = colOf;
+
+      const solo = group.length === 1;
       blk.row.classList.toggle('row--multi', !solo);
 
-      const targetSlots = ordered.map((rec) => (rec.els ?? makeBubble(rec)).slot);
-      const currentSlots = Array.from(blk.row.children);
-      const orderChanged = targetSlots.length !== currentSlots.length
-        || targetSlots.some((s, i) => currentSlots[i] !== s);
-      if (orderChanged) for (const s of targetSlots) blk.row.appendChild(s);
+      // Spalten-Elemente (per key wiederverwendet) in Dominanz-Ordnung.
+      const seenCols = new Set();
+      const targetCols = cols.map((col) => {
+        seenCols.add(col.key);
+        let el = blk.colEls.get(col.key);
+        if (!el) {
+          el = document.createElement('div');
+          el.className = 'col';
+          blk.colEls.set(col.key, el);
+        }
+        return el;
+      });
+      for (const [ck, el] of blk.colEls) {
+        if (!seenCols.has(ck)) { el.remove(); blk.colEls.delete(ck); }
+      }
+      const currentCols = Array.from(blk.row.children);
+      const colOrderChanged = targetCols.length !== currentCols.length
+        || targetCols.some((el, i) => currentCols[i] !== el);
+      if (colOrderChanged) for (const el of targetCols) blk.row.appendChild(el);
 
-      ordered.forEach((rec, i) => {
-        const slot = rec.els.slot;
-        slot.classList.toggle('slot--solo', solo);
-        slot.style.flexGrow = solo ? '1' : (i === 0 ? '2.2' : '1');
-        if (rec.dirty) { updateBubble(rec); rec.dirty = false; }
+      cols.forEach((col, i) => {
+        const el = targetCols[i];
+        el.classList.toggle('col--solo', solo);
+        el.style.flexGrow = solo ? '1' : colGrow(col).toFixed(2);
+        // Blasen der Spalte in Zeit-Reihenfolge (Spaltenwechsel = Move).
+        const targetBubbles = col.recs.map((rec) => (rec.els ?? makeBubble(rec)).bubble);
+        const cur = Array.from(el.children);
+        if (targetBubbles.length !== cur.length || targetBubbles.some((b, j) => cur[j] !== b)) {
+          for (const b of targetBubbles) el.appendChild(b);
+        }
+        for (const rec of col.recs) {
+          if (rec.dirty) { updateBubble(rec); rec.dirty = false; }
+        }
       });
 
       // Gruppe abgeschlossen? → Höhe freigeben, nicht mehr messen.
@@ -557,27 +666,30 @@
         blk.lastH = null;
       }
     }
-    // Verwaiste Blöcke (Gruppen-Neuzuschnitt nach Snapshot) entfernen.
+    // Verwaiste Blöcke (Gruppen-Neuzuschnitt nach Snapshot/Rücknahme) entfernen.
     for (const [key, blk] of state.blocks) {
       if (!seenBlocks.has(key)) { blk.outer.remove(); state.blocks.delete(key); }
     }
 
-    // 3. Anker-Versatz (nach Layout; misst Wortzeilen im Host).
+    // 3. Anker-Versatz (nach Layout; misst Wortzeilen im Host). margin-top
+    // liegt auf der BLASE: gewünschte Position = Unterbrechungs-Wortzeile,
+    // aber nie oberhalb der vorherigen Blase derselben Spalte (Stapelregel —
+    // der Cursor läuft Blase für Blase mit).
     if (!isNarrow) {
       for (const group of groups) {
-        if (group.length < 2) continue;
         const blk = state.blocks.get(group[0].data.startMs);
-        if (blk.settled) continue; // eingefrorene Blöcke behalten ihren Versatz
+        if (blk.settled || group.length < 2) continue;
         const rowTop = blk.row.getBoundingClientRect().top;
-        for (const rec of group) {
-          const slot = rec.els.slot;
-          const target = anchorTargetPx(rec, group, rowTop);
-          const first = !slot._anchored;
-          slot._anchored = true;
-          slot.style.transitionProperty = 'margin-top, transform, flex-grow';
-          slot.style.transitionDuration = first ? '0ms' : `${T_ANCHOR}ms`;
-          slot.style.transitionTimingFunction = EASE;
-          slot.style.marginTop = `${target}px`;
+        for (const col of blk.cols) {
+          let cursor = rowTop;
+          for (const rec of col.recs) {
+            const b = rec.els.bubble;
+            const desired = desiredTopFor(rec, group, blk.colOf);
+            const mt = desired != null ? Math.max(0, desired - cursor) : 0;
+            setMarginTop(b, mt, !b._anchored);
+            b._anchored = true;
+            cursor += mt + b.offsetHeight + BUBBLE_GAP;
+          }
         }
       }
     }
@@ -598,22 +710,25 @@
       blk.lastH = h;
     }
 
-    // 5. FLIP-Nachher: horizontale Verschiebungen mit Ruberband animieren.
+    // 5. FLIP-Nachher: horizontale Spalten-Verschiebungen mit Ruberband.
     if (!isNarrow) {
-      for (const rec of activeRecs) {
-        const slot = rec.els?.slot;
-        const prev = prevRect.get(rec.data.startMs);
-        if (!slot || !prev || !slot.isConnected) continue;
-        const next = slot.getBoundingClientRect();
-        const dx = prev.left - next.left;
-        if (Math.abs(dx) > 1) {
-          slot.style.transition = 'none';
-          slot.style.transform = `translateX(${dx}px)`;
-          void slot.offsetWidth;
-          slot.style.transitionProperty = 'transform, margin-top, flex-grow';
-          slot.style.transitionDuration = `${T_FLIP}ms, ${T_ANCHOR}ms, ${T_SHAPE}ms`;
-          slot.style.transitionTimingFunction = `${EASE_SPRING}, ${EASE}, ${EASE}`;
-          slot.style.transform = '';
+      for (const group of groups) {
+        const key = group[0].data.startMs;
+        const blk = state.blocks.get(key);
+        if (!blk || blk.settled) continue;
+        for (const [ck, el] of blk.colEls) {
+          const prev = prevRect.get(`${key}:${ck}`);
+          if (!prev || !el.isConnected) continue;
+          const dx = prev.left - el.getBoundingClientRect().left;
+          if (Math.abs(dx) > 1) {
+            el.style.transition = 'none';
+            el.style.transform = `translateX(${dx}px)`;
+            void el.offsetWidth;
+            el.style.transitionProperty = 'transform, flex-grow';
+            el.style.transitionDuration = `${T_FLIP}ms, ${T_SHAPE}ms`;
+            el.style.transitionTimingFunction = `${EASE_SPRING}, ${EASE}`;
+            el.style.transform = '';
+          }
         }
       }
     }

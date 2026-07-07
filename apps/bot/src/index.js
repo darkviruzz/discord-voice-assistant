@@ -256,7 +256,7 @@ client.on('interactionCreate', async (i) => {
         onProgress: ({ phase, elapsedMs, deadlineMs }) => {
           let msg;
           if (phase === 'starting') {
-            msg = '⏳ Server offline – starte ihn per SSH …';
+            msg = '⏳ Server offline – starte ihn …';
           } else {
             const sec = Math.round(elapsedMs / 1000);
             const total = Math.round(deadlineMs / 1000);

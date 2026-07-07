@@ -73,7 +73,7 @@ function runStartCmd(cmd) {
 export async function ensureServerReachable({
   onProgress = () => {},
   probeTimeoutMs = 1000,
-  startTimeoutMs = 30000,
+  startTimeoutMs = Number(process.env.SERVER_START_TIMEOUT_MS) || 30000,
   pollIntervalMs = 2000,
 } = {}) {
   const baseUrl = process.env.SERVER_BASE_URL;

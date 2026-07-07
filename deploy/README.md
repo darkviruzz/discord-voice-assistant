@@ -386,6 +386,59 @@ needs to be registered on Proxmox once (see "Bot side" below).
 > encrypted secret store) — same trust tier as the SSH key already living
 > there. Rotate `GH_PAT` periodically and scope it to `read:packages` only.
 
+#### Bot-triggered launch (`SERVER_START_CMD`)
+
+The bot already has a generic "start the server if it's offline" hook
+(`SERVER_START_CMD` in `apps/bot/.env`, see `apps/bot/src/serverAutoStart.js`):
+on `/join`, if `SERVER_BASE_URL` isn't reachable, it runs that command
+fire-and-forget, then polls until reachable or `SERVER_START_TIMEOUT_MS`
+elapses. `deploy/scripts/cloud-start.sh` is built to be that command for the
+Verda path — it launches a fresh instance via the Verda Cloud API, so the bot
+can bring its own server up with no manual step.
+
+One-time setup (needs the `verda` CLI, authenticated via `verda auth login`
+with Cloud API credentials from console.verda.com under **Keys**):
+
+```bash
+verda ssh-key add                # your existing pubkey -> note the returned ID
+verda startup-script add          # paste gen-verda-startup.sh's output -> note the returned ID
+```
+
+Then configure `cloud-start.sh` (env vars — put in e.g. `deploy/verda.env` on
+Proxmox and source it, or export in the bot's systemd unit environment):
+
+```ini
+VERDA_CLIENT_ID=...
+VERDA_CLIENT_SECRET=...
+VERDA_SSH_KEY_ID=...              # from `verda ssh-key add`
+VERDA_STARTUP_SCRIPT_ID=...       # from `verda startup-script add`
+VERDA_LOCATION=FIN-01
+VERDA_HOSTNAME=va-gpu             # identity used for the idempotency check
+VERDA_OS_IMAGE=ubuntu-22.04       # verify the exact image name via `verda instance-types` first
+VERDA_MIN_VRAM_GB=24
+VERDA_MAX_HOURLY=1.00             # refuses to launch above this — no silent overspend
+```
+
+Safety properties baked in: **idempotent** (won't create a second instance if
+one with `VERDA_HOSTNAME` is already running/provisioning — safe against a
+double `/join`), and **price-capped** (picks the cheapest instance type that
+meets `VERDA_MIN_VRAM_GB`, then aborts instead of launching if that price
+exceeds `VERDA_MAX_HOURLY`). Test with `cloud-start.sh --dry-run` first — it
+prints the exact API payload without creating anything.
+
+Then in `apps/bot/.env`:
+
+```ini
+SERVER_START_CMD=/path/to/deploy/scripts/cloud-start.sh
+SERVER_START_TIMEOUT_MS=300000    # cold boot: provisioning + startup script + image pull, ~3 min observed
+```
+
+> Field names in `cloud-start.sh` (`instance_type`, `gpu_memory.size_in_gigabytes`,
+> `price_per_hour`, `ssh_key_ids`, `startup_script_id`, …) come from Verda's
+> published API docs and are not yet verified against a live response —
+> confirm with `--dry-run` and a real `GET /v1/instance-types` call before
+> relying on this unattended.
+
 ### Option B — Tailscale (lighter)
 
 ```bash

@@ -24,7 +24,8 @@ WORKDIR /src
 ARG CUDA_ARCHS=80;86;89;90
 
 # Static ggml/whisper libs → the only dynamic deps left are the CUDA runtime
-# libraries, which are provided by the runtime base image below.
+# libraries (provided by the runtime base image below) and libgomp (OpenMP,
+# installed explicitly in the runtime stage since it's not in the base image).
 RUN cmake -B build \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
@@ -36,7 +37,7 @@ RUN cmake -B build \
 # ── runtime stage ────────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/bin/whisper-server /usr/local/bin/whisper-server

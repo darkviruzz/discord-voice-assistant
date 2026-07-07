@@ -123,6 +123,11 @@ services:
       FINALIZE_UPLOAD_DIR: /data/uploads
       ARCHIVE_DIR: /data/archive
       SPEAKER_MAP_FILE: /data/speaker-map.json
+      # Default './transcripts' resolves relative to the app's WORKDIR, which
+      # the non-root container user can't mkdir — pointed at the already-
+      # writable /data volume instead (was silently failing every event:
+      # "transcript: log error: EACCES: permission denied, mkdir './transcripts'").
+      TRANSCRIPT_DIR: /data/transcripts
       FINALIZE_TZ: ${FINALIZE_TZ:-Europe/Berlin}
       # Campaign context source (pulled into the campaign volume by start.sh).
       OBSIDIAN_VAULT_PATH: /data/campaign

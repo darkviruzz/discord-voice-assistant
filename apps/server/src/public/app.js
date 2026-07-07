@@ -347,25 +347,25 @@
     return rec.els;
   }
 
-  // Spalten einer Überlapp-Gruppe: EINE Spalte pro Sprecher (Folge-Blasen
-  // desselben Nutzers stapeln darin); fremde Blasen dürfen eine bestehende
-  // Spalte weiternutzen, wenn sie zeitlich nicht mit deren Inhalt kollidieren
-  // (rückwärts gesucht → die zuletzt aktive passende Spalte gewinnt).
-  // Spalten-Identität = startMs der ersten Blase.
+  // Spalten einer Überlapp-Gruppe: GENAU EINE Spalte pro Sprecher. Alle Blasen
+  // desselben Nutzers stapeln (zeitlich sortiert) in seiner Spalte; verschiedene
+  // Sprecher bekommen getrennte Spalten, damit parallele Einwürfe in einen
+  // langen Monolog nebeneinander auffächern statt sich in einer Spalte zu
+  // drängen. (Ein Zusammenlegen zweier Sprecher-Spalten bei genügend
+  // vertikalem Platz ist bewusst NICHT drin — es führte über Zeit-Lücken zu
+  // Über-Merges; die vertikale Ausrichtung übernimmt der Anker-Pass.)
+  // Spalten-Identität = startMs der ersten Blase des Sprechers (stabil).
   function packColumns(group) {
     const cols = [];
     const byLabel = new Map();
     for (const rec of group) {
       let col = byLabel.get(rec.data.label);
       if (!col) {
-        for (let i = cols.length - 1; i >= 0; i--) {
-          if (rec.data.startMs >= cols[i].maxEnd) { col = cols[i]; break; }
-        }
+        col = { key: rec.data.startMs, label: rec.data.label, recs: [] };
+        byLabel.set(rec.data.label, col);
+        cols.push(col);
       }
-      if (!col) { col = { key: rec.data.startMs, recs: [], maxEnd: -Infinity }; cols.push(col); }
       col.recs.push(rec);
-      col.maxEnd = Math.max(col.maxEnd, endOf(rec.data));
-      byLabel.set(rec.data.label, col);
     }
     return cols;
   }
@@ -577,7 +577,7 @@
     for (const group of groups) {
       const key = group[0].data.startMs;
       const blk = state.blocks.get(key);
-      if (!blk || blk.settled || !blk.colEls) continue;
+      if (!blk || blk.frozen || !blk.colEls) continue;
       for (const [ck, el] of blk.colEls) {
         if (el.isConnected) prevRect.set(`${key}:${ck}`, el.getBoundingClientRect());
       }
@@ -600,7 +600,7 @@
         row.className = 'row';
         inner.appendChild(row);
         outer.appendChild(inner);
-        blk = { outer, inner, row, settled: false, lastH: null, colEls: new Map(), cols: null, colOf: null };
+        blk = { outer, inner, row, frozen: false, freezeScheduled: false, lastH: null, colEls: new Map(), cols: null, colOf: null };
         state.blocks.set(key, blk);
         if (anchorBlock) anchorBlock.after(outer);
         else els.feed.prepend(outer);
@@ -652,16 +652,24 @@
         }
       });
 
-      // Gruppe abgeschlossen? → Höhe freigeben, nicht mehr messen.
+      // Gruppe abgeschlossen? Dann NACH diesem Pass (Anker + Höhe laufen unten
+      // noch für sie!) einfrieren: Höhe freigeben und künftig nicht mehr messen.
+      // Wichtig: `frozen` wird verzögert gesetzt, damit ein frisch geladener,
+      // sofort-fertiger Block hier NICHT die Anker-/Höhen-Schritte überspringt
+      // (sonst bleibt margin-top=0 — genau der Bug beim Laden vergangener
+      // Sessions). Offen gewordene Blöcke (Live-Fortsetzung) tauen wieder auf.
       const open = group.some((r) => r.data.partial);
-      if (!open && !blk.settled) {
-        blk.settled = true;
+      if (!open && !blk.frozen && !blk.freezeScheduled) {
+        blk.freezeScheduled = true;
         setTimeout(() => {
+          blk.frozen = true;
+          blk.freezeScheduled = false;
           blk.outer.style.height = 'auto';
           blk.outer.classList.add('block--settled');
         }, T_HEIGHT + 60);
-      } else if (open && blk.settled) {
-        blk.settled = false;
+      } else if (open && (blk.frozen || blk.freezeScheduled)) {
+        blk.frozen = false;
+        blk.freezeScheduled = false;
         blk.outer.classList.remove('block--settled');
         blk.lastH = null;
       }
@@ -678,7 +686,7 @@
     if (!isNarrow) {
       for (const group of groups) {
         const blk = state.blocks.get(group[0].data.startMs);
-        if (blk.settled || group.length < 2) continue;
+        if (blk.frozen || group.length < 2) continue;
         const rowTop = blk.row.getBoundingClientRect().top;
         for (const col of blk.cols) {
           let cursor = rowTop;
@@ -694,10 +702,10 @@
       }
     }
 
-    // 4. SmoothHeight: Außenhöhe der offenen Blöcke weich nachführen.
+    // 4. SmoothHeight: Außenhöhe der (noch nicht eingefrorenen) Blöcke nachführen.
     for (const group of groups) {
       const blk = state.blocks.get(group[0].data.startMs);
-      if (blk.settled) continue;
+      if (blk.frozen) continue;
       const h = blk.inner.offsetHeight;
       if (blk.lastH === null) {
         blk.outer.style.height = `${h}px`; // erster Frame: ohne Transition
@@ -715,7 +723,7 @@
       for (const group of groups) {
         const key = group[0].data.startMs;
         const blk = state.blocks.get(key);
-        if (!blk || blk.settled) continue;
+        if (!blk || blk.frozen) continue;
         for (const [ck, el] of blk.colEls) {
           const prev = prevRect.get(`${key}:${ck}`);
           if (!prev || !el.isConnected) continue;
@@ -775,10 +783,25 @@
     els.feed.scrollTop = els.feed.scrollHeight - els.feed.clientHeight;
     enableAuto();
   });
+  // Breitenwechsel ändert Wortpositionen → Anker-Versätze werden ungültig.
+  // Alle (auch eingefrorenen) Blöcke auftauen und neu vermessen; debounced,
+  // damit ein Resize-Drag nicht Dutzende Reconcile-Pässe auslöst.
+  let resizeTimer = null;
   window.addEventListener('resize', () => {
-    // Breitenwechsel: Höhen der offenen Blöcke neu messen.
-    for (const blk of state.blocks.values()) { if (!blk.settled) blk.lastH = null; }
-    render();
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      for (const blk of state.blocks.values()) {
+        blk.frozen = false;
+        blk.freezeScheduled = false;
+        blk.lastH = null;
+        blk.outer.classList.remove('block--settled');
+        for (const el of blk.colEls.values()) {
+          for (const b of el.children) b._anchored = false; // Erst-Platzierung ohne Anim
+        }
+      }
+      render();
+    }, 150);
   });
 
   // ── Status / Voice / Meta / Summary ────────────────────────────────────────

@@ -17,9 +17,14 @@
 #     order from the FIN region in the dashboard.
 #   - On-demand by default: is_spot is explicitly false unless
 #     VERDA_ALLOW_SPOT=true — a spot instance can be pre-empted mid-session.
-#   - Price-capped: among the location-filtered, VRAM-qualifying types, picks
-#     the CHEAPEST, then aborts (does not launch) if that price exceeds
-#     VERDA_MAX_HOURLY — never silently pays more than expected.
+#   - Price-capped: among the location-filtered, VRAM-qualifying types, tries
+#     the CHEAPEST first, skipping any candidate above VERDA_MAX_HOURLY —
+#     never silently pays more than expected.
+#   - Resilient to transient stock-outs: a "service_unavailable" response
+#     (observed in practice, especially for spot — capacity can vanish
+#     between the availability check and the actual order) is retried a few
+#     times, then falls through to the next-cheapest candidate still under
+#     the price cap. Any other error aborts immediately (not transient).
 #
 # Requires: curl, jq
 #
@@ -55,8 +60,13 @@
 #                             instead of price_per_hour when true (spot is
 #                             cheaper but the instance can be reclaimed
 #                             mid-session; leave off for live play)
+#   VERDA_RETRY_ATTEMPTS      default 3 — retries per candidate on a
+#                             "service_unavailable" (no capacity) response
+#   VERDA_RETRY_DELAY_S       default 5 — seconds between those retries
 #
 # Usage: ./cloud-start.sh [--dry-run]
+# --dry-run prints the payload for the cheapest candidate only (no retry/
+# fallback loop — that only matters for the real creation call).
 #
 # NOTE: field/endpoint names verified against a real Verda API response
 # (2026-07). Re-check with --dry-run after any Verda API changes.
@@ -101,15 +111,15 @@ if [ -n "$EXISTING" ]; then
   exit 0
 fi
 
-# ── 3. Pick the cheapest GPU type that is (a) orderable in a matching
-#      location and (b) meets the VRAM floor ────────────────────────────────
+# ── 3. Rank ALL GPU types that are (a) orderable in a matching location and
+#      (b) meet the VRAM floor, cheapest first ─────────────────────────────
 AVAILABILITY=$(auth "$API/instance-availability")
 TYPES=$(auth "$API/instance-types")
 
 # When VERDA_ALLOW_SPOT=true, rank by spot_price (and only consider types
 # that actually have one) instead of the on-demand price_per_hour — otherwise
 # enabling spot never changed the pick, only the is_spot flag sent below.
-PICK=$(jq -n --argjson avail "$AVAILABILITY" --argjson types "$TYPES" \
+CANDIDATES=$(jq -n --argjson avail "$AVAILABILITY" --argjson types "$TYPES" \
   --arg prefix "$VERDA_LOCATION_PREFIX" --argjson minvram "$VERDA_MIN_VRAM_GB" \
   --argjson spot "$VERDA_ALLOW_SPOT" '
   ($types | map({(.instance_type): .}) | add) as $bytype
@@ -121,36 +131,70 @@ PICK=$(jq -n --argjson avail "$AVAILABILITY" --argjson types "$TYPES" \
       | select($price != null)
       | {location_code: $loc, instance_type: $it, price: $price, currency: $t.currency, name: $t.name}
     ]
-  | sort_by(.price | tonumber) | .[0] // empty
+  | sort_by(.price | tonumber)
 ')
-[ -n "$PICK" ] || die "no instance type >= ${VERDA_MIN_VRAM_GB}GB VRAM orderable in a '${VERDA_LOCATION_PREFIX}*' location$([ "$VERDA_ALLOW_SPOT" = true ] && echo ' with spot pricing')"
+NUM_CANDIDATES=$(jq 'length' <<<"$CANDIDATES")
+[ "$NUM_CANDIDATES" -gt 0 ] || die "no instance type >= ${VERDA_MIN_VRAM_GB}GB VRAM orderable in a '${VERDA_LOCATION_PREFIX}*' location$([ "$VERDA_ALLOW_SPOT" = true ] && echo ' with spot pricing')"
 
-LOCATION_CODE=$(jq -r '.location_code' <<<"$PICK")
-INSTANCE_TYPE=$(jq -r '.instance_type' <<<"$PICK")
-PRICE=$(jq -r '.price' <<<"$PICK")
-CURRENCY=$(jq -r '.currency' <<<"$PICK")
-log "cheapest match: $INSTANCE_TYPE ($(jq -r '.name' <<<"$PICK")) in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h ($([ "$VERDA_ALLOW_SPOT" = true ] && echo spot || echo on-demand))"
+# ── 4/5. Try candidates cheapest-first. Skip anything over VERDA_MAX_HOURLY.
+#         A transient "service_unavailable" (no capacity right now — common
+#         for spot) is retried a few times before moving to the next
+#         candidate; any other error aborts immediately (not transient). ───
+RETRY_ATTEMPTS="${VERDA_RETRY_ATTEMPTS:-3}"
+RETRY_DELAY_S="${VERDA_RETRY_DELAY_S:-5}"
+auth_raw() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
 
-# ── 4. Price safety gate — abort rather than silently overspend ────────────
-if awk -v p="$PRICE" -v max="$VERDA_MAX_HOURLY" 'BEGIN { exit !(p > max) }'; then
-  die "price ${PRICE} ${CURRENCY}/h exceeds VERDA_MAX_HOURLY=${VERDA_MAX_HOURLY} — refusing to launch. Raise the cap or lower VERDA_MIN_VRAM_GB if that's acceptable."
-fi
+CREATED=0
+for i in $(seq 0 $((NUM_CANDIDATES - 1))); do
+  C=$(jq -c ".[$i]" <<<"$CANDIDATES")
+  LOCATION_CODE=$(jq -r '.location_code' <<<"$C")
+  INSTANCE_TYPE=$(jq -r '.instance_type' <<<"$C")
+  PRICE=$(jq -r '.price' <<<"$C")
+  CURRENCY=$(jq -r '.currency' <<<"$C")
+  NAME=$(jq -r '.name' <<<"$C")
 
-# ── 5. Create the instance ──────────────────────────────────────────────────
-PAYLOAD=$(jq -n \
-  --arg it "$INSTANCE_TYPE" --arg img "$VERDA_OS_IMAGE" --arg loc "$LOCATION_CODE" \
-  --arg host "$VERDA_HOSTNAME" --arg sk "$VERDA_SSH_KEY_ID" --arg sid "$VERDA_STARTUP_SCRIPT_ID" \
-  --arg volname "${VERDA_HOSTNAME}-os" \
-  --argjson volsize "$VERDA_OS_VOLUME_SIZE_GB" --argjson spot "$VERDA_ALLOW_SPOT" \
-  '{instance_type:$it, image:$img, location_code:$loc, hostname:$host,
-    description:"voice-assistant auto-launch", ssh_key_ids:[$sk], startup_script_id:$sid,
-    os_volume:{name:$volname, size:$volsize}, is_spot:$spot}')
+  if awk -v p="$PRICE" -v max="$VERDA_MAX_HOURLY" 'BEGIN { exit !(p > max) }'; then
+    log "skipping $INSTANCE_TYPE in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h — exceeds VERDA_MAX_HOURLY=${VERDA_MAX_HOURLY}"
+    continue
+  fi
 
-if [ "$DRY_RUN" = 1 ]; then
-  log "DRY RUN — would POST $API/instances with:"
-  jq . <<<"$PAYLOAD"
-  exit 0
-fi
+  log "trying $INSTANCE_TYPE ($NAME) in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h ($([ "$VERDA_ALLOW_SPOT" = true ] && echo spot || echo on-demand))"
 
-RESP=$(auth -X POST "$API/instances" -H 'Content-Type: application/json' -d "$PAYLOAD")
-log "launched: $(jq -r '.id // .' <<<"$RESP")"
+  PAYLOAD=$(jq -n \
+    --arg it "$INSTANCE_TYPE" --arg img "$VERDA_OS_IMAGE" --arg loc "$LOCATION_CODE" \
+    --arg host "$VERDA_HOSTNAME" --arg sk "$VERDA_SSH_KEY_ID" --arg sid "$VERDA_STARTUP_SCRIPT_ID" \
+    --arg volname "${VERDA_HOSTNAME}-os" \
+    --argjson volsize "$VERDA_OS_VOLUME_SIZE_GB" --argjson spot "$VERDA_ALLOW_SPOT" \
+    '{instance_type:$it, image:$img, location_code:$loc, hostname:$host,
+      description:"voice-assistant auto-launch", ssh_key_ids:[$sk], startup_script_id:$sid,
+      os_volume:{name:$volname, size:$volsize}, is_spot:$spot}')
+
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRY RUN — would POST $API/instances with:"
+    jq . <<<"$PAYLOAD"
+    exit 0
+  fi
+
+  for attempt in $(seq 1 "$RETRY_ATTEMPTS"); do
+    HTTP_BODY=$(mktemp)
+    HTTP_CODE=$(auth_raw -o "$HTTP_BODY" -w '%{http_code}' -X POST "$API/instances" -H 'Content-Type: application/json' -d "$PAYLOAD")
+    if [ "$HTTP_CODE" -lt 400 ]; then
+      log "launched: $(jq -r '.id // .' "$HTTP_BODY")"
+      rm -f "$HTTP_BODY"
+      CREATED=1
+      break 2
+    fi
+    ERR_CODE=$(jq -r '.code // empty' "$HTTP_BODY" 2>/dev/null || true)
+    ERR_MSG=$(jq -r '.message // empty' "$HTTP_BODY" 2>/dev/null || true)
+    rm -f "$HTTP_BODY"
+    if [ "$ERR_CODE" = "service_unavailable" ]; then
+      log "attempt $attempt/$RETRY_ATTEMPTS: $ERR_MSG — retrying in ${RETRY_DELAY_S}s"
+      sleep "$RETRY_DELAY_S"
+      continue
+    fi
+    die "instance creation failed (HTTP $HTTP_CODE): ${ERR_MSG:-${ERR_CODE:-unknown error}}"
+  done
+  log "$INSTANCE_TYPE in $LOCATION_CODE still unavailable after $RETRY_ATTEMPTS attempts — trying next-cheapest option"
+done
+
+[ "$CREATED" = 1 ] || die "no candidate under VERDA_MAX_HOURLY=${VERDA_MAX_HOURLY} could be launched (all out of capacity or above the cap)"

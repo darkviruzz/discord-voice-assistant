@@ -140,10 +140,11 @@ fi
 PAYLOAD=$(jq -n \
   --arg it "$INSTANCE_TYPE" --arg img "$VERDA_OS_IMAGE" --arg loc "$LOCATION_CODE" \
   --arg host "$VERDA_HOSTNAME" --arg sk "$VERDA_SSH_KEY_ID" --arg sid "$VERDA_STARTUP_SCRIPT_ID" \
+  --arg volname "${VERDA_HOSTNAME}-os" \
   --argjson volsize "$VERDA_OS_VOLUME_SIZE_GB" --argjson spot "$VERDA_ALLOW_SPOT" \
   '{instance_type:$it, image:$img, location_code:$loc, hostname:$host,
     description:"voice-assistant auto-launch", ssh_key_ids:[$sk], startup_script_id:$sid,
-    os_volume:{size:$volsize}, is_spot:$spot}')
+    os_volume:{name:$volname, size:$volsize}, is_spot:$spot}')
 
 if [ "$DRY_RUN" = 1 ]; then
   log "DRY RUN — would POST $API/instances with:"

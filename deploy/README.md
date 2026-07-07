@@ -407,6 +407,53 @@ SERVER_BASE_URL=ws://10.10.0.2:7440      # WireGuard IP (or 100.x.y.z Tailscale)
 CONTROL_BEARER=<same secret as deploy/.env>
 ```
 
+### Web UI access (live transcripts)
+
+The server also serves a small web UI (live transcript view, bubble-flow
+layout) on the same port, at `/transcript` — no separate port or container.
+It's protected by HTTP Basic auth (`TRANSCRIPT_UI_USER`/`_PASS` in
+`deploy/server.env`, default `greyhawk`/`greyhawk`; `TRANSCRIPT_UI_AUTH=off`
+disables auth entirely).
+
+`10.10.0.2` only exists inside the WireGuard tunnel, so a browser on the home
+LAN can't reach it directly — same problem as the bot container earlier.
+Since the bot host already has a route to `10.10.0.0/24` (see the container
+routing fix above), reuse it: run a small nginx reverse proxy **on the bot
+host**, bound to its LAN IP, forwarding to the tunnel IP:
+
+```bash
+# on the bot host (e.g. 192.168.20.21):
+sudo apt-get update && sudo apt-get install -y nginx
+
+sudo tee /etc/nginx/sites-available/va-transcript <<'EOF'
+server {
+    listen 192.168.20.21:7440;
+
+    location / {
+        proxy_pass http://10.10.0.2:7440;
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_set_header Host $host;
+        proxy_buffering off;        # SSE (/transcript/live) must not be buffered
+        proxy_read_timeout 3600s;   # keep long-lived SSE connections open
+    }
+}
+EOF
+
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo ln -sf /etc/nginx/sites-available/va-transcript /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx && sudo systemctl enable nginx
+```
+
+Then browse to `http://192.168.20.21:7440/transcript/` from anywhere on the
+home LAN. No per-instance changes needed — the tunnel IP (`10.10.0.2`) is
+fixed regardless of which GPU instance is behind it.
+
+> **Before exposing this beyond the home LAN** (e.g. via an existing
+> Cloudflared tunnel + your own domain): change `TRANSCRIPT_UI_USER`/`_PASS`
+> away from the `greyhawk`/`greyhawk` default first. Basic auth over a public
+> Cloudflared hostname with default credentials is publishing an open login.
+
 ---
 
 ## Security checklist
@@ -428,6 +475,9 @@ is built so that, done right, **nothing is reachable from the public internet**.
   jurisdiction (DataCrunch/Verda, Hetzner).
 - **Private images.** Keep the GHCR packages private; `docker login ghcr.io` on
   the instance with a **read-only** Personal Access Token (`read:packages`).
+- **Web UI credentials.** Before exposing `/transcript` beyond the home LAN
+  (Cloudflared or any other public tunnel), change `TRANSCRIPT_UI_USER`/`_PASS`
+  away from the `greyhawk`/`greyhawk` default — see "Web UI access" above.
 - **Destroy, don't just stop.** After a session, pull the data back (`stop.sh`)
   and **terminate** the instance so no disk lingers on the provider. Persist only
   the model volume (no session data) if you want fast restarts.

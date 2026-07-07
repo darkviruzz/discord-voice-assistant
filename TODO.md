@@ -117,6 +117,12 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
   - Persistierung über Bot-Restart hinweg (sonst geht Timer verloren)
   - Bei Server-offline → Discord-Hinweis „Session muss manuell finalisiert werden"
 
+- [ ] **Re-Finalize aus dem Archiv anbieten** — aktuell braucht `finalizeSession()` (`apps/server/src/finalize/index.js`) die transienten Upload-WAVs (`FINALIZE_UPLOAD_DIR`); nach dem üblichen Cleanup (`FINALIZE_KEEP_UPLOADS=false`, Standard) existieren die Original-WAVs nur noch im Langzeit-Archiv (`ARCHIVE_DIR/<session>/audio/*.wav` + `manifest.json`). Für eine bereits finalisierte Session gibt es aktuell keinen Weg, sie erneut zu transkribieren/mergen (z. B. nach einem Bugfix im Merge-Algorithmus).
+  - Konkreter Anlass: Leerzeichen-Bug beim Zusammensetzen gesplitteter Unterbrecher-Spans aus Sub-Wort-Tokens (`words.map(w => w.w).join(' ')` in `apps/server/src/finalize/merge.js:442` — join fügt zwischen jedem Whisper-Token ein Leerzeichen ein, auch mitten im Wort: „Witch ern" statt „Witchern"). Das JSONL-`text`-Feld selbst ist sauber; nur der Weave-Reassembly-Pfad zerstört Wörter.
+  - Neuer Server-Codepfad `finalizeFromArchive(archiveDirName)`: Manifest aus `ARCHIVE_DIR/<session>/manifest.json` statt aus dem Upload-Verzeichnis lesen, WAVs aus `ARCHIVE_DIR/<session>/audio/` statt `FINALIZE_UPLOAD_DIR` verwenden — sonst identischer Ablauf (re-STT optional überspringbar, wenn nur neu gemerged werden soll)
+  - Bot-Seite: `/finalize show` und `/finalize run` scheitern aktuell auch an bereits archivierten Sessions, weil `SessionManager.loadById` nur im Bot-`DATA_DIR` sucht (`apps/bot/src/session.js`), nicht im Server-`ARCHIVE_DIR` — Session-ID vs. Archiv-Ordnername (`YYYY-MM-DDTHH-mm-ss-SSSZ`, UTC) ist zusätzlich verwirrend, da leicht mit Lokalzeit verwechselbar
+  - Sollte auch reines Re-Merge (ohne erneute STT) unterstützen, wenn nur der Merge-/Weave-Code sich geändert hat — spart GPU-Zeit bei reinen Formatierungs-Fixes
+
 - [ ] **Optional: LLM-Summary bei Finalize** — analog Meeting-Minutes.
   - Eigener Block im Markdown, separat vom rohen Transkript
   - Modell-Wahl noch offen (gleiches Ollama-Modell oder kleineres/schnelleres)

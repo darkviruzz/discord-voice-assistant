@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { warn } from './logger.js';
+import { broadcastToAllBots } from './broadcast.js';
 
 // JSONL schema version. Stamped on EVERY event so offline/finalize tooling can
 // branch on it. Bump when the shape or semantics of any event field changes.
@@ -22,21 +23,31 @@ function normalizeValue(value) {
 }
 
 export function logTranscriptEvent(sessionId, type, fields = {}) {
+  const event = normalizeValue({
+    schemaVersion: SCHEMA_VERSION,
+    tsMs: Date.now(),
+    type,
+    sessionId: sessionId.toString(),
+    ...fields,
+  });
+
   const dir = (process.env.TRANSCRIPT_DIR ?? './transcripts').replace(/\/+$/, '');
   try {
     mkdirSync(dir, { recursive: true });
-    const event = normalizeValue({
-      schemaVersion: SCHEMA_VERSION,
-      tsMs: Date.now(),
-      type,
-      sessionId: sessionId.toString(),
-      ...fields,
-    });
     appendFileSync(
       join(dir, `session_${sessionId}.jsonl`),
       JSON.stringify(event) + '\n',
     );
   } catch (e) {
     warn('transcript: log error:', e.message);
+  }
+
+  // Also push it to the bot in near-real-time, so the (persistent) bot host
+  // ends up with its own copy without waiting on stop.sh/manual pulls from
+  // the (ephemeral) GPU instance — see apps/bot/src/transcriptWriter.js.
+  try {
+    broadcastToAllBots({ type: 'transcript_event', sessionId: sessionId.toString(), event });
+  } catch (e) {
+    warn('transcript: broadcast error:', e.message);
   }
 }

@@ -4,6 +4,7 @@ import { UplinkClient } from './uplink.js';
 import { DownlinkClient } from './downlink.js';
 import { log, warn, debug } from '../logger.js';
 import { ensureServerReachable } from '../serverAutoStart.js';
+import { writeTranscriptEvent } from '../transcriptWriter.js';
 
 // How long the transport may sit outside READY during an active session
 // before we re-run SERVER_START_CMD (e.g. a spot instance got reclaimed —
@@ -139,6 +140,10 @@ export function start({ botId } = {}) {
       case 'finalize_request':
         control.ack(msg.cmdId, true);
         if (_finalizeRequestCallback) _finalizeRequestCallback({ sessionId: msg.sessionId, reason: msg.reason });
+        break;
+      case 'transcript_event':
+        writeTranscriptEvent(msg.sessionId, msg.event);
+        control.ack(msg.cmdId, true);
         break;
       default:
         debug('transport: unhandled server command', msg.type);

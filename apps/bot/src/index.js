@@ -12,6 +12,7 @@ import { UtteranceRecorder } from './recorder.js';
 import { buildManifest, writeManifest, uploadSession, applyRetention } from './finalize.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
+import { startTranscriptCleanup } from './transcriptWriter.js';
 import * as transport from './transport/index.js';
 
 const client = new Client({
@@ -85,6 +86,7 @@ function recoverOldSessions() {
 client.once('clientReady', async () => {
   log(`Bot v${getVersion()} online als ${client.user.tag}`);
   setBotStatus(null);
+  startTranscriptCleanup();
   await recoverOldSessions();
   transport.start({ botId: client.user.id });
 

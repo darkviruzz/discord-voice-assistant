@@ -182,7 +182,13 @@ for i in $(seq 0 $((NUM_CANDIDATES - 1))); do
     HTTP_BODY=$(mktemp)
     HTTP_CODE=$(auth_raw -o "$HTTP_BODY" -w '%{http_code}' -X POST "$API/instances" -H 'Content-Type: application/json' -d "$PAYLOAD")
     if [ "$HTTP_CODE" -lt 400 ]; then
-      log "launched: $(jq -r '.id // .' "$HTTP_BODY")"
+      INSTANCE_ID=$(jq -r '.id // empty' "$HTTP_BODY" 2>/dev/null || true)
+      if [ -n "$INSTANCE_ID" ]; then
+        log "launched: $INSTANCE_ID"
+      else
+        log "launched (HTTP $HTTP_CODE, response wasn't parseable JSON — raw body follows)"
+        cat "$HTTP_BODY" >&2
+      fi
       rm -f "$HTTP_BODY"
       CREATED=1
       break 2

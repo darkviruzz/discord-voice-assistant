@@ -10,8 +10,15 @@
 #   - Idempotent: skips creation if an instance with VERDA_HOSTNAME already
 #     exists in a running/provisioning/ordered state (no duplicate billing
 #     from a double /join or a retry).
-#   - Price-capped: picks the CHEAPEST instance type that meets the VRAM
-#     floor, then aborts (does not launch) if that price exceeds
+#   - Location-scoped: only considers instance types actually orderable in a
+#     location starting with VERDA_LOCATION_PREFIX (default FIN — EU
+#     jurisdiction), via GET /v1/instance-availability. This is also why the
+#     unscoped /v1/instance-types listing shows SKUs you won't see/can't
+#     order from the FIN region in the dashboard.
+#   - On-demand by default: is_spot is explicitly false unless
+#     VERDA_ALLOW_SPOT=true — a spot instance can be pre-empted mid-session.
+#   - Price-capped: among the location-filtered, VRAM-qualifying types, picks
+#     the CHEAPEST, then aborts (does not launch) if that price exceeds
 #     VERDA_MAX_HOURLY — never silently pays more than expected.
 #
 # Requires: curl, jq
@@ -26,24 +33,30 @@
 #                                            (console.verda.com, under Keys)
 #   VERDA_SSH_KEY_ID          from `verda ssh-key add`
 #   VERDA_STARTUP_SCRIPT_ID   from `verda startup-script add`
-#   VERDA_LOCATION            default FIN-01
+#   VERDA_LOCATION_PREFIX     default FIN — restricts candidates to
+#                             locations whose code starts with this
+#                             (FIN-01/02/03 all match; whichever is cheapest
+#                             AND has the type in stock wins)
 #   VERDA_HOSTNAME            default va-gpu       — identity for idempotency
 #   VERDA_OS_IMAGE            default ubuntu-22.04 — verify the exact image
 #                             name against `verda instance-types`/console
 #                             before relying on this unattended
+#   VERDA_OS_VOLUME_SIZE_GB   default 100 — OS/NVMe disk size
 #   VERDA_MIN_VRAM_GB         default 24  — filters out GPUs too small for
 #                             the stack (whisper medium + ollama model)
 #   VERDA_MAX_HOURLY          default 1.00 — same currency the API returns
 #                             (usually eur/usd per instance type; check the
 #                             `currency` field the script logs)
+#   VERDA_ALLOW_SPOT          default false — set true to allow spot pricing
+#                             (cheaper, but the instance can be reclaimed
+#                             mid-session; leave off for live play)
 #
 # Usage: ./cloud-start.sh [--dry-run]
 #
-# NOTE: field names below (instance_type, gpu_memory.size_in_gigabytes,
-# price_per_hour, currency, hostname, status, ssh_key_ids, startup_script_id)
-# are taken from Verda's published API docs, not yet verified against a real
-# response. Run with --dry-run first and check the printed payload / a real
-# `GET /v1/instance-types` response before wiring this into SERVER_START_CMD.
+# NOTE: field/endpoint names below are taken from Verda's published API docs,
+# not yet verified against a real response. Run with --dry-run first and
+# check the printed payload against a real API response before wiring this
+# into SERVER_START_CMD.
 set -euo pipefail
 
 DRY_RUN=0
@@ -53,11 +66,13 @@ DRY_RUN=0
 : "${VERDA_CLIENT_SECRET:?set VERDA_CLIENT_SECRET}"
 : "${VERDA_SSH_KEY_ID:?set VERDA_SSH_KEY_ID}"
 : "${VERDA_STARTUP_SCRIPT_ID:?set VERDA_STARTUP_SCRIPT_ID}"
-VERDA_LOCATION="${VERDA_LOCATION:-FIN-01}"
+VERDA_LOCATION_PREFIX="${VERDA_LOCATION_PREFIX:-FIN}"
 VERDA_HOSTNAME="${VERDA_HOSTNAME:-va-gpu}"
 VERDA_OS_IMAGE="${VERDA_OS_IMAGE:-ubuntu-22.04}"
+VERDA_OS_VOLUME_SIZE_GB="${VERDA_OS_VOLUME_SIZE_GB:-100}"
 VERDA_MIN_VRAM_GB="${VERDA_MIN_VRAM_GB:-24}"
 VERDA_MAX_HOURLY="${VERDA_MAX_HOURLY:-1.00}"
+VERDA_ALLOW_SPOT="${VERDA_ALLOW_SPOT:-false}"
 
 API="https://api.verda.com/v1"
 log() { printf '[cloud-start] %s\n' "$*" >&2; }
@@ -83,16 +98,29 @@ if [ -n "$EXISTING" ]; then
   exit 0
 fi
 
-# ── 3. Pick the cheapest GPU type that meets the VRAM floor ─────────────────
-PICK=$(auth "$API/instance-types" \
-  | jq -c --argjson minvram "$VERDA_MIN_VRAM_GB" \
-    '[.[] | select(.gpu_memory.size_in_gigabytes >= $minvram)] | sort_by(.price_per_hour | tonumber) | .[0] // empty')
-[ -n "$PICK" ] || die "no instance type with >= ${VERDA_MIN_VRAM_GB}GB VRAM found"
+# ── 3. Pick the cheapest GPU type that is (a) orderable in a matching
+#      location and (b) meets the VRAM floor ────────────────────────────────
+AVAILABILITY=$(auth "$API/instance-availability")
+TYPES=$(auth "$API/instance-types")
 
+PICK=$(jq -n --argjson avail "$AVAILABILITY" --argjson types "$TYPES" \
+  --arg prefix "$VERDA_LOCATION_PREFIX" --argjson minvram "$VERDA_MIN_VRAM_GB" '
+  ($types | map({(.instance_type): .}) | add) as $bytype
+  | [ $avail[] | select(.location_code | startswith($prefix)) | .location_code as $loc
+      | .availabilities[] as $it
+      | ($bytype[$it]) as $t
+      | select($t != null and $t.gpu_memory.size_in_gigabytes >= $minvram)
+      | {location_code: $loc, instance_type: $it, price_per_hour: $t.price_per_hour, currency: $t.currency, name: $t.name}
+    ]
+  | sort_by(.price_per_hour | tonumber) | .[0] // empty
+')
+[ -n "$PICK" ] || die "no instance type >= ${VERDA_MIN_VRAM_GB}GB VRAM orderable in a '${VERDA_LOCATION_PREFIX}*' location"
+
+LOCATION_CODE=$(jq -r '.location_code' <<<"$PICK")
 INSTANCE_TYPE=$(jq -r '.instance_type' <<<"$PICK")
 PRICE=$(jq -r '.price_per_hour' <<<"$PICK")
 CURRENCY=$(jq -r '.currency' <<<"$PICK")
-log "cheapest match: $INSTANCE_TYPE ($(jq -r '.name' <<<"$PICK")) at ${PRICE} ${CURRENCY}/h"
+log "cheapest match: $INSTANCE_TYPE ($(jq -r '.name' <<<"$PICK")) in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h"
 
 # ── 4. Price safety gate — abort rather than silently overspend ────────────
 if awk -v p="$PRICE" -v max="$VERDA_MAX_HOURLY" 'BEGIN { exit !(p > max) }'; then
@@ -101,10 +129,12 @@ fi
 
 # ── 5. Create the instance ──────────────────────────────────────────────────
 PAYLOAD=$(jq -n \
-  --arg it "$INSTANCE_TYPE" --arg img "$VERDA_OS_IMAGE" --arg loc "$VERDA_LOCATION" \
+  --arg it "$INSTANCE_TYPE" --arg img "$VERDA_OS_IMAGE" --arg loc "$LOCATION_CODE" \
   --arg host "$VERDA_HOSTNAME" --arg sk "$VERDA_SSH_KEY_ID" --arg sid "$VERDA_STARTUP_SCRIPT_ID" \
+  --argjson volsize "$VERDA_OS_VOLUME_SIZE_GB" --argjson spot "$VERDA_ALLOW_SPOT" \
   '{instance_type:$it, image:$img, location_code:$loc, hostname:$host,
-    description:"voice-assistant auto-launch", ssh_key_ids:[$sk], startup_script_id:$sid}')
+    description:"voice-assistant auto-launch", ssh_key_ids:[$sk], startup_script_id:$sid,
+    os_volume:{size:$volsize}, is_spot:$spot}')
 
 if [ "$DRY_RUN" = 1 ]; then
   log "DRY RUN — would POST $API/instances with:"

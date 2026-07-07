@@ -412,19 +412,29 @@ VERDA_CLIENT_ID=...
 VERDA_CLIENT_SECRET=...
 VERDA_SSH_KEY_ID=...              # from `verda ssh-key add`
 VERDA_STARTUP_SCRIPT_ID=...       # from `verda startup-script add`
-VERDA_LOCATION=FIN-01
+VERDA_LOCATION_PREFIX=FIN         # only consider locations starting with this (FIN-01/02/03 all match)
 VERDA_HOSTNAME=va-gpu             # identity used for the idempotency check
 VERDA_OS_IMAGE=ubuntu-22.04       # verify the exact image name via `verda instance-types` first
+VERDA_OS_VOLUME_SIZE_GB=100
 VERDA_MIN_VRAM_GB=24
 VERDA_MAX_HOURLY=1.00             # refuses to launch above this — no silent overspend
+VERDA_ALLOW_SPOT=false            # spot is cheaper but can be pre-empted mid-session
 ```
 
 Safety properties baked in: **idempotent** (won't create a second instance if
 one with `VERDA_HOSTNAME` is already running/provisioning — safe against a
-double `/join`), and **price-capped** (picks the cheapest instance type that
-meets `VERDA_MIN_VRAM_GB`, then aborts instead of launching if that price
-exceeds `VERDA_MAX_HOURLY`). Test with `cloud-start.sh --dry-run` first — it
-prints the exact API payload without creating anything.
+double `/join`); **location-scoped** (only considers instance types actually
+orderable — via `GET /v1/instance-availability` — in a location matching
+`VERDA_LOCATION_PREFIX`, which is also why the unscoped instance-types listing
+shows SKUs you can't actually order from FIN); **on-demand by default**
+(`is_spot` explicit `false` unless `VERDA_ALLOW_SPOT=true`); and
+**price-capped** (picks the cheapest qualifying type, then aborts instead of
+launching if that price exceeds `VERDA_MAX_HOURLY`). Test with
+`cloud-start.sh --dry-run` first — it prints the exact API payload without
+creating anything, and re-sourcing your env file before each `--dry-run` run
+is all that's needed to pick up config changes (no service restart required
+for manual testing — that's only for when `SERVER_START_CMD` runs through the
+bot's systemd environment, see below).
 
 Then in `apps/bot/.env`:
 

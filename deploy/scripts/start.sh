@@ -6,6 +6,13 @@
 #   - wait for every service to report healthy
 set -euo pipefail
 
+BUILD_LOCAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --build) BUILD_LOCAL=1 ;;
+  esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$DEPLOY_DIR"
@@ -95,9 +102,20 @@ pull_campaign() {
 }
 pull_campaign
 
-# ── 3. Build + start ─────────────────────────────────────────────────────────
-step "Building images (first run may take a while: whisper.cpp CUDA build)"
-"${COMPOSE[@]}" build
+# ── 3. Fetch/build images + start ────────────────────────────────────────────
+# Default: pull the version-pinned images CI already published to GHCR (fast,
+# byte-identical to what you validated elsewhere). Pass --build to compile
+# from source instead (only needed when iterating on the Dockerfiles).
+if [ "$BUILD_LOCAL" = 1 ]; then
+  step "Building images from source (--build): whisper.cpp CUDA build may take a while"
+  "${COMPOSE[@]}" build
+else
+  step "Pulling pre-built images (IMAGE_TAG=${IMAGE_TAG:-latest})"
+  if ! "${COMPOSE[@]}" pull; then
+    warn "Pull failed — falling back to local build (pass --build to always build)"
+    "${COMPOSE[@]}" build
+  fi
+fi
 
 step "Starting Ollama and pulling model: $OLLAMA_MODEL"
 "${COMPOSE[@]}" up -d ollama

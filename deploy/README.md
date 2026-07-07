@@ -167,6 +167,12 @@ cp ../apps/server/.env.example server.env   # loaded as an optional env_file
 re-downloaded, so subsequent starts on the **same** instance are fast. A
 **fresh** instance always re-downloads (volumes are local to the instance).
 
+By default `start.sh` **pulls** the version-pinned images CI already published
+to GHCR (seconds, no compile) — this is what makes a fresh instance fast too.
+Pass `./scripts/start.sh --build` to compile from source instead (only needed
+when iterating on `deploy/whisper/Dockerfile` or `services/piper/Dockerfile`
+themselves).
+
 ---
 
 ## Services

@@ -418,8 +418,14 @@ VERDA_OS_IMAGE=ubuntu-22.04       # verify the exact image name via `verda insta
 VERDA_OS_VOLUME_SIZE_GB=100
 VERDA_MIN_VRAM_GB=24
 VERDA_MAX_HOURLY=1.00             # refuses to launch above this — no silent overspend
-VERDA_ALLOW_SPOT=false            # spot is cheaper but can be pre-empted mid-session
+VERDA_ALLOW_SPOT=false            # true = rank by spot_price instead of on-demand price
 ```
+
+> **Currency caveat:** the API has been observed returning `usd` for an
+> instance type the Verda dashboard shows in `eur` for the same SKU/location —
+> `VERDA_MAX_HOURLY` is compared against whatever currency that specific type
+> reports (logged on every run), it is not currency-normalized. Check the
+> logged currency, don't assume it matches the dashboard's display currency.
 
 Safety properties baked in: **idempotent** (won't create a second instance if
 one with `VERDA_HOSTNAME` is already running/provisioning — safe against a
@@ -427,8 +433,9 @@ double `/join`); **location-scoped** (only considers instance types actually
 orderable — via `GET /v1/instance-availability` — in a location matching
 `VERDA_LOCATION_PREFIX`, which is also why the unscoped instance-types listing
 shows SKUs you can't actually order from FIN); **on-demand by default**
-(`is_spot` explicit `false` unless `VERDA_ALLOW_SPOT=true`); and
-**price-capped** (picks the cheapest qualifying type, then aborts instead of
+(ranked by `price_per_hour` and `is_spot` sent as `false`, unless
+`VERDA_ALLOW_SPOT=true` switches ranking to `spot_price` and sends `is_spot: true`);
+and **price-capped** (picks the cheapest qualifying type, then aborts instead of
 launching if that price exceeds `VERDA_MAX_HOURLY`). Test with
 `cloud-start.sh --dry-run` first — it prints the exact API payload without
 creating anything, and re-sourcing your env file before each `--dry-run` run

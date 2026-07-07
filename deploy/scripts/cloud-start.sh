@@ -44,19 +44,22 @@
 #   VERDA_OS_VOLUME_SIZE_GB   default 100 — OS/NVMe disk size
 #   VERDA_MIN_VRAM_GB         default 24  — filters out GPUs too small for
 #                             the stack (whisper medium + ollama model)
-#   VERDA_MAX_HOURLY          default 1.00 — same currency the API returns
-#                             (usually eur/usd per instance type; check the
-#                             `currency` field the script logs)
-#   VERDA_ALLOW_SPOT          default false — set true to allow spot pricing
-#                             (cheaper, but the instance can be reclaimed
+#   VERDA_MAX_HOURLY          default 1.00 — compared against whatever
+#                             currency THAT instance type reports (the
+#                             `currency` field the script logs) — the API has
+#                             been observed returning usd for a type the
+#                             Verda dashboard displays in eur for the same
+#                             SKU/location, so the cap isn't currency-normalized;
+#                             check the logged currency before trusting the cap
+#   VERDA_ALLOW_SPOT          default false — ranks candidates by spot_price
+#                             instead of price_per_hour when true (spot is
+#                             cheaper but the instance can be reclaimed
 #                             mid-session; leave off for live play)
 #
 # Usage: ./cloud-start.sh [--dry-run]
 #
-# NOTE: field/endpoint names below are taken from Verda's published API docs,
-# not yet verified against a real response. Run with --dry-run first and
-# check the printed payload against a real API response before wiring this
-# into SERVER_START_CMD.
+# NOTE: field/endpoint names verified against a real Verda API response
+# (2026-07). Re-check with --dry-run after any Verda API changes.
 set -euo pipefail
 
 DRY_RUN=0
@@ -103,24 +106,30 @@ fi
 AVAILABILITY=$(auth "$API/instance-availability")
 TYPES=$(auth "$API/instance-types")
 
+# When VERDA_ALLOW_SPOT=true, rank by spot_price (and only consider types
+# that actually have one) instead of the on-demand price_per_hour — otherwise
+# enabling spot never changed the pick, only the is_spot flag sent below.
 PICK=$(jq -n --argjson avail "$AVAILABILITY" --argjson types "$TYPES" \
-  --arg prefix "$VERDA_LOCATION_PREFIX" --argjson minvram "$VERDA_MIN_VRAM_GB" '
+  --arg prefix "$VERDA_LOCATION_PREFIX" --argjson minvram "$VERDA_MIN_VRAM_GB" \
+  --argjson spot "$VERDA_ALLOW_SPOT" '
   ($types | map({(.instance_type): .}) | add) as $bytype
   | [ $avail[] | select(.location_code | startswith($prefix)) | .location_code as $loc
       | .availabilities[] as $it
       | ($bytype[$it]) as $t
       | select($t != null and $t.gpu_memory.size_in_gigabytes >= $minvram)
-      | {location_code: $loc, instance_type: $it, price_per_hour: $t.price_per_hour, currency: $t.currency, name: $t.name}
+      | (if $spot then $t.spot_price else $t.price_per_hour end) as $price
+      | select($price != null)
+      | {location_code: $loc, instance_type: $it, price: $price, currency: $t.currency, name: $t.name}
     ]
-  | sort_by(.price_per_hour | tonumber) | .[0] // empty
+  | sort_by(.price | tonumber) | .[0] // empty
 ')
-[ -n "$PICK" ] || die "no instance type >= ${VERDA_MIN_VRAM_GB}GB VRAM orderable in a '${VERDA_LOCATION_PREFIX}*' location"
+[ -n "$PICK" ] || die "no instance type >= ${VERDA_MIN_VRAM_GB}GB VRAM orderable in a '${VERDA_LOCATION_PREFIX}*' location$([ "$VERDA_ALLOW_SPOT" = true ] && echo ' with spot pricing')"
 
 LOCATION_CODE=$(jq -r '.location_code' <<<"$PICK")
 INSTANCE_TYPE=$(jq -r '.instance_type' <<<"$PICK")
-PRICE=$(jq -r '.price_per_hour' <<<"$PICK")
+PRICE=$(jq -r '.price' <<<"$PICK")
 CURRENCY=$(jq -r '.currency' <<<"$PICK")
-log "cheapest match: $INSTANCE_TYPE ($(jq -r '.name' <<<"$PICK")) in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h"
+log "cheapest match: $INSTANCE_TYPE ($(jq -r '.name' <<<"$PICK")) in $LOCATION_CODE at ${PRICE} ${CURRENCY}/h ($([ "$VERDA_ALLOW_SPOT" = true ] && echo spot || echo on-demand))"
 
 # ── 4. Price safety gate — abort rather than silently overspend ────────────
 if awk -v p="$PRICE" -v max="$VERDA_MAX_HOURLY" 'BEGIN { exit !(p > max) }'; then

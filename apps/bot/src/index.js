@@ -244,38 +244,55 @@ client.on('interactionCreate', async (i) => {
       const channel = member.voice.channel;
       if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });
 
-      // Auto-start can take up to ~30 s — defer the reply so Discord doesn't
-      // time out the interaction (3 s limit for non-deferred replies).
+      // Cloud cold-starts can take minutes (SERVER_START_TIMEOUT_MS) — defer
+      // the reply so Discord doesn't time out the interaction (3 s limit for
+      // non-deferred replies).
       await i.deferReply({ flags: MessageFlags.Ephemeral });
 
-      // Collect status lines so warnings stay visible in the final reply
-      // (a single editReply at the end would otherwise overwrite them).
-      const statusLines = [];
+      // Join and start recording immediately — never block on the server.
+      // Offline recording already works (server only adds STT/LLM/live-view
+      // features), so there's no reason to make the user wait minutes for a
+      // cold cloud instance just to join voice.
+      //
+      // `otherLines` holds the join/session status (set once, below);
+      // `serverStatusLine` holds the latest server auto-start status and is
+      // updated asynchronously by the background ensureServerReachable
+      // call. Both are re-rendered together on every change so one never
+      // clobbers the other in the single editReply-able message.
+      const otherLines = [];
+      let serverStatusLine = null;
+      const renderStatus = () => {
+        const lines = [...otherLines];
+        if (serverStatusLine) lines.push(serverStatusLine);
+        i.editReply({ content: lines.join('\n') }).catch(() => {});
+      };
 
-      const startResult = await ensureServerReachable({
+      ensureServerReachable({
         onProgress: ({ phase, elapsedMs, deadlineMs }) => {
-          let msg;
           if (phase === 'starting') {
-            msg = '⏳ Server offline – starte ihn …';
+            serverStatusLine = '⏳ Server offline – starte ihn im Hintergrund …';
           } else {
             const sec = Math.round(elapsedMs / 1000);
             const total = Math.round(deadlineMs / 1000);
-            msg = `⏳ Warte bis Server bereit ist (${sec}s/${total}s) …`;
+            serverStatusLine = `⏳ Warte bis Server bereit ist (${sec}s/${total}s) …`;
           }
-          i.editReply({ content: msg }).catch(() => {});
+          renderStatus();
         },
-      });
-      if (startResult === 'started') {
-        log('join: server auto-started successfully');
-        statusLines.push('🟢 Server gestartet.');
-      } else if (startResult === 'no-cmd') {
-        warn('join: server offline, no SERVER_START_CMD — continuing in offline mode');
-        statusLines.push('⚠️ Server offline (kein Auto-Start konfiguriert) – Aufnahme läuft lokal.');
-      } else if (startResult === 'timeout') {
-        warn('join: server did not come up — continuing in offline mode');
-        statusLines.push('⚠️ Server-Start fehlgeschlagen (Timeout) – Aufnahme läuft lokal.');
-      }
-      // 'already-online' and 'no-base-url' produce no extra status line.
+      }).then((startResult) => {
+        if (startResult === 'started') {
+          log('join: server auto-started successfully');
+          serverStatusLine = '🟢 Server gestartet.';
+        } else if (startResult === 'no-cmd') {
+          warn('join: server offline, no SERVER_START_CMD — continuing in offline mode');
+          serverStatusLine = '⚠️ Server offline (kein Auto-Start konfiguriert) – Aufnahme läuft lokal.';
+        } else if (startResult === 'timeout') {
+          warn('join: server did not come up — continuing in offline mode');
+          serverStatusLine = '⚠️ Server-Start fehlgeschlagen (Timeout) – Aufnahme läuft lokal.';
+        } else {
+          return; // 'already-online' / 'no-base-url' — no extra status line
+        }
+        renderStatus();
+      }).catch((err) => warn('join: ensureServerReachable failed:', err.message));
 
       const connection = joinVoiceChannel({
         channelId: channel.id,
@@ -392,7 +409,7 @@ client.on('interactionCreate', async (i) => {
         transport.speakingEnd(userId);
       });
 
-      statusLines.push(resumed
+      otherLines.push(resumed
         ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (\`${sessions.active.id}\`).`
         : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session \`${sessions.active.id}\`).`);
 
@@ -404,11 +421,11 @@ client.on('interactionCreate', async (i) => {
           .filter((m) => !m.user.bot && !map[m.id])
           .map((m) => m.displayName);
         if (unmapped.length) {
-          statusLines.push(`ℹ️ Ohne Sprecher-Zuordnung: ${unmapped.join(', ')} — mit \`/finalize map\` zuordnen (sonst wird der Anzeigename verwendet).`);
+          otherLines.push(`ℹ️ Ohne Sprecher-Zuordnung: ${unmapped.join(', ')} — mit \`/finalize map\` zuordnen (sonst wird der Anzeigename verwendet).`);
         }
       } catch { /* server offline — skip reminder */ }
 
-      await i.editReply({ content: statusLines.join('\n') });
+      renderStatus();
     }
 
     if (i.commandName === 'leave') {

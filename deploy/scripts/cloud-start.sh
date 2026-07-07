@@ -43,9 +43,12 @@
 #                             (FIN-01/02/03 all match; whichever is cheapest
 #                             AND has the type in stock wins)
 #   VERDA_HOSTNAME            default va-gpu       — identity for idempotency
-#   VERDA_OS_IMAGE            default ubuntu-22.04 — verify the exact image
-#                             name against `verda instance-types`/console
-#                             before relying on this unattended
+#   VERDA_OS_IMAGE            default ubuntu-22.04-cuda-12.4-docker — a bare
+#                             "ubuntu-22.04" image has NO nvidia driver/CUDA/
+#                             docker preinstalled and will fail at `docker
+#                             login` partway through the startup script
+#                             (confirmed in testing); verify the exact image
+#                             slug via `GET /v1/images` if you change it
 #   VERDA_OS_VOLUME_SIZE_GB   default 100 — OS/NVMe disk size
 #   VERDA_MIN_VRAM_GB         default 24  — filters out GPUs too small for
 #                             the stack (whisper medium + ollama model)
@@ -81,7 +84,7 @@ DRY_RUN=0
 : "${VERDA_STARTUP_SCRIPT_ID:?set VERDA_STARTUP_SCRIPT_ID}"
 VERDA_LOCATION_PREFIX="${VERDA_LOCATION_PREFIX:-FIN}"
 VERDA_HOSTNAME="${VERDA_HOSTNAME:-va-gpu}"
-VERDA_OS_IMAGE="${VERDA_OS_IMAGE:-ubuntu-22.04}"
+VERDA_OS_IMAGE="${VERDA_OS_IMAGE:-ubuntu-22.04-cuda-12.4-docker}"
 VERDA_OS_VOLUME_SIZE_GB="${VERDA_OS_VOLUME_SIZE_GB:-100}"
 VERDA_MIN_VRAM_GB="${VERDA_MIN_VRAM_GB:-24}"
 VERDA_MAX_HOURLY="${VERDA_MAX_HOURLY:-1.00}"

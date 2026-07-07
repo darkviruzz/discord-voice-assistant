@@ -117,6 +117,12 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
   - Persistierung über Bot-Restart hinweg (sonst geht Timer verloren)
   - Bei Server-offline → Discord-Hinweis „Session muss manuell finalisiert werden"
 
+- [ ] **Re-Finalize aus dem Archiv anbieten** — aktuell braucht `finalizeSession()` (`apps/server/src/finalize/index.js`) die transienten Upload-WAVs (`FINALIZE_UPLOAD_DIR`); nach dem üblichen Cleanup (`FINALIZE_KEEP_UPLOADS=false`, Standard) existieren die Original-WAVs nur noch im Langzeit-Archiv (`ARCHIVE_DIR/<session>/audio/*.wav` + `manifest.json`). Für eine bereits finalisierte Session gibt es aktuell keinen Weg, sie erneut zu transkribieren/mergen (z. B. nach einem Bugfix im Merge-Algorithmus).
+  - Konkreter Anlass: Leerzeichen-Bug beim Zusammensetzen gesplitteter Unterbrecher-Spans aus Sub-Wort-Tokens (`words.map(w => w.w).join(' ')` in `apps/server/src/finalize/merge.js:442` — join fügt zwischen jedem Whisper-Token ein Leerzeichen ein, auch mitten im Wort: „Witch ern" statt „Witchern"). Das JSONL-`text`-Feld selbst ist sauber; nur der Weave-Reassembly-Pfad zerstört Wörter.
+  - Neuer Server-Codepfad `finalizeFromArchive(archiveDirName)`: Manifest aus `ARCHIVE_DIR/<session>/manifest.json` statt aus dem Upload-Verzeichnis lesen, WAVs aus `ARCHIVE_DIR/<session>/audio/` statt `FINALIZE_UPLOAD_DIR` verwenden — sonst identischer Ablauf (re-STT optional überspringbar, wenn nur neu gemerged werden soll)
+  - Bot-Seite: `/finalize show` und `/finalize run` scheitern aktuell auch an bereits archivierten Sessions, weil `SessionManager.loadById` nur im Bot-`DATA_DIR` sucht (`apps/bot/src/session.js`), nicht im Server-`ARCHIVE_DIR` — Session-ID vs. Archiv-Ordnername (`YYYY-MM-DDTHH-mm-ss-SSSZ`, UTC) ist zusätzlich verwirrend, da leicht mit Lokalzeit verwechselbar
+  - Sollte auch reines Re-Merge (ohne erneute STT) unterstützen, wenn nur der Merge-/Weave-Code sich geändert hat — spart GPU-Zeit bei reinen Formatierungs-Fixes
+
 - [ ] **Optional: LLM-Summary bei Finalize** — analog Meeting-Minutes.
   - Eigener Block im Markdown, separat vom rohen Transkript
   - Modell-Wahl noch offen (gleiches Ollama-Modell oder kleineres/schnelleres)
@@ -154,11 +160,12 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Phase 5 — Web-UI
 
-- [ ] **Live-Transkript-Web-UI** — Browser-View für das laufende Transkript.
+- [x] **Live-Transkript-Web-UI** — umgesetzt: read-only Browser-View unter `/transcript/` auf dem Server-Port (statisch aus `apps/server/src/public/`, kein Build, keine Fremdaufrufe). SSE (`/transcript/live`) primär, JSON-Polling (`/transcript/snapshot/:id`) als Fallback. Volle History beim Aufruf aus dem JSONL rekonstruiert (überlebt Reload + Summary-Folding); gefaltete Turns als einklappbare Zusammenfassung. Markdown-Rendering, farbige Sprechernamen (Rabenauge in Akzentfarbe), selbst gehostete Roboto-Schrift, `?debug=1` (Timestamps, Event-Art, `no_speech_prob`). Basic-Auth standardmäßig an (`greyhawk`/`greyhawk`, per `TRANSCRIPT_UI_*` konfigurier-/abschaltbar). Pub/sub `liveBus.js`; Endpunkte `transcriptApi.js` + `transcriptView.js` + `transcriptAuth.js`.
   - Auto-Sync / Auto-Reload (Server-sent events oder einfaches Polling)
   - Useful für Debugging *und* als Spieler-Begleit-Display während der Session
   - Reines Read-Only, kein User-Input
   - Renderer kann den Markdown direkt anzeigen, oder strukturiert mit Sprecher-Spalten / Timestamps für Debug-Modus
+  - **Erweiterungen (1.5.1/1.5.2)**: Voice-Status-Pill + Member-Popover im Header (live `presence`); Session-Picker mit lesbaren Zeitstempeln + Checkbox für vergangene Sessions (`?all=1`, JSONL-Scan); Wake-Word-Markierung der ganzen getriggerten Zeile + Stop-Token-Markierung (live via `annotation`); Debug-Modus erweitert um STT-Diagnostik, TTS-Lifecycle/Interrupts und einklappbaren `session_meta`-Header; Mobile-Topbar-Fix.
 
 ---
 
@@ -201,9 +208,18 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 - [ ] **Wort-Probabilitäts-Markierung** — unsichere Wörter mit `[unsicher]` im Log.
   - Nice-to-have für Audits, niedriger Impact
 
+- [x] **Streaming-STT (LocalAgreement) statt Chunk-Transkription** — umgesetzt in `feature/streaming-stt` (`apps/server/src/sttStreaming.js`).
+  - Live-Pfad ohne Chunk-Grenzen: wachsendes Fenster jede Sekunde als Ganzes transkribieren, Wörter nach doppelter Bestätigung committen (LocalAgreement-2), Fenster an bestätigten Satzgrenzen fixieren (`STT_STREAM_TRIM_SECONDS`), fixierten Text als Whisper-Prompt weiterreichen
+  - Fixt den Duplikations-Bug der Forced-Overlap-Chunks doppelt: Live-Pfad hat keine Chunks mehr; der verbleibende Fallback-/Finalize-Pfad schneidet den Overlap jetzt zeitbasiert über Wort-Zeitstempel (`stitchByTime`) statt per Textvergleich
+  - Utterance-Ende: nur noch Restfenster-Transkription (0,5 s statt 10 s bei 86 s Rede); bestätigte Wörter werden nie zurückgenommen
+  - Web-UI: Wort-für-Wort-Rendering mit Blur→Sharpen-Einblendung, Morph bei Korrekturen, gedimmte unbestätigte Wörter, sanfte Bubble-Höhenanimation
+  - Messung (tests/Quantengravitation.m4a, 86 s, RX 6800 XT Vulkan medium-q5_0): erstes Partial nach ~1 s, Ø-Tick 0,7 s, WER 2,6 % (Chunk-Pfad: 8,4 %), 0 Text-Dopplungen
+  - E2E-Simulation: `node tests/ui-sim.mjs` (Server auf :7441, speist das Testaudio in Echtzeit ein)
+
 - [ ] **Verbessertes Stitching innerhalb einer Utterance** — Whisper-Timestamps statt RMS für Silence-Splitting.
   - Match nächstes Audio-Snippet bei zuletzt erkanntem Satzzeichen (`.!?`)
   - Großer Aufwand (~3–4 h), MVP-irrelevant
+  - Teilweise durch Streaming-STT erledigt (Live-Pfad chunk-frei; `stitchByTime` nutzt Timestamps)
 
 - [x] **`session-rolling-summary`** — umgesetzt in `feature/live-transcript-llm-context` (`apps/server/src/rollingSummary.js`). Statt `conversationHistory` faltet der Live-Transkript-Puffer ältere Turns asynchron in eine rollende Zusammenfassung (Schwellen `LIVE_RAW_WINDOW_CHARS`/`LIVE_FOLD_CHARS`, Single-Flight, Remove-after-Success). Gegen Token-Blowup bei Mehrstunden-Sessions.
 
@@ -237,7 +253,7 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
 ## Verworfen
 
-- **WebSocket-basiertes Piper-Streaming** (`piper-streaming` / `paroli`) — evaluiert in `feature/piper-pipeline-rework`. HTTP-Chunked-Streaming liefert identische TTFA (first-byte innerhalb von 100–200 ms), kein messbarer Vorteil für unser 0.5–2s End-to-End-Ziel. Aufwand >> Nutzen.
+- **whisper-amd-windows (ChharithOeun) als STT-Backend** — evaluiert und lokal getestet (2026-07-02, vor `feature/streaming-stt`). Nicht kompatibel mit dem Streaming-Ziel und dem Setup: (1) explizit **kein** Streaming/Server/Mikrofon — nur dateibasierte Batch-Transkription; (2) das DirectML-Versprechen hält nicht — faster-whisper/CTranslate2 kennt kein DirectML, `transcribe.py` crasht mit `unsupported device directml` (die GPU-Erkennung prüft nur ONNX-Provider, die mit der Whisper-Inferenz nichts zu tun haben); (3) weitere Bugs: falscher kwarg `word_level_timestamps` (crasht jede Transkription), `verify_gpu.py` crasht an cp1252, requirements.txt installiert das CPU-`onnxruntime` über das DirectML-Paket; (4) gemessener CPU-Fallback: **0,4× Echtzeit** (small int8) vs. **16–24× Echtzeit** des bestehenden whisper.cpp-Vulkan-Servers (medium-q5_0, warm). Der Vulkan-Server bleibt; NVIDIA-Umzug später über den CUDA-Build von whisper.cpp (identische HTTP-API).
 - **Mehrere gleichzeitige Sessions** — Bot ist bewusst auf einen Voice-Channel beschränkt.
 - **`/redact`-Command** — würde LLM-Entscheidungen erfordern. Off-Topic-Filter passiert manuell oder in der externen Cowork-Pipeline.
 - **`/marker`-Command** — gleiches Argument; Anker im Transkript besser über Pause-Erkennung + Spielernotizen.

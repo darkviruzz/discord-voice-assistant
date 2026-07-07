@@ -268,13 +268,16 @@ client.on('interactionCreate', async (i) => {
       };
 
       ensureServerReachable({
-        onProgress: ({ phase, elapsedMs, deadlineMs }) => {
+        onProgress: ({ phase, elapsedMs, deadlineMs, cmdStatus }) => {
           if (phase === 'starting') {
             serverStatusLine = '⏳ Server offline – starte ihn im Hintergrund …';
           } else {
             const sec = Math.round(elapsedMs / 1000);
             const total = Math.round(deadlineMs / 1000);
             serverStatusLine = `⏳ Warte bis Server bereit ist (${sec}s/${total}s) …`;
+            if (cmdStatus?.message) {
+              serverStatusLine += `\n> ${cmdStatus.message}`;
+            }
           }
           renderStatus();
         },

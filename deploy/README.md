@@ -356,6 +356,36 @@ wg genkey | tee privatekey | wg pubkey > publickey
 > The instance dials **out** to the home endpoint (`PersistentKeepalive`), so no
 > inbound port on the cloud provider is required.
 
+#### Zero-touch: Verda startup script
+
+Verda instances support a "startup script" that runs automatically on first
+boot (`verda startup-script add` or via the dashboard). `deploy/scripts/gen-verda-startup.sh`
+generates one that brings up the WireGuard tunnel, clones the repo, writes
+`deploy/.env`, logs into GHCR, and runs `start.sh` — so a fresh instance is
+fully healthy by the time you SSH in, no manual setup at all.
+
+The generator itself holds no secrets (safe to commit); it reads them from
+env vars and bakes them into its *output*, which you must **not** commit:
+
+```bash
+WG_PRIVATE_KEY=...      # reuse the SAME key across instances — see below
+WG_HOME_PUBKEY=...      # Proxmox's public key (from `wg show` on the instance)
+WG_ENDPOINT=yourdomain.myfritz.net:51820 \
+GH_USER=... GH_PAT=...  # read:packages + repo scope, give it a real expiry
+CONTROL_BEARER=...      # must match apps/bot/.env
+IMAGE_TAG=...           \
+./deploy/scripts/gen-verda-startup.sh > verda-startup.sh
+```
+
+Paste `verda-startup.sh`'s content into Verda's startup-script field. Reuse
+the **same** `WG_PRIVATE_KEY` on every regeneration — that's what lets
+Proxmox's peer entry stay untouched forever; only its matching public key
+needs to be registered on Proxmox once (see "Bot side" below).
+
+> **Security note:** Verda's startup scripts are stored as plain text (no
+> encrypted secret store) — same trust tier as the SSH key already living
+> there. Rotate `GH_PAT` periodically and scope it to `read:packages` only.
+
 ### Option B — Tailscale (lighter)
 
 ```bash

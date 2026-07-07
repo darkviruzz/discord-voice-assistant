@@ -3,6 +3,16 @@ import { ControlClient } from './control.js';
 import { UplinkClient } from './uplink.js';
 import { DownlinkClient } from './downlink.js';
 import { log, warn, debug } from '../logger.js';
+import { ensureServerReachable } from '../serverAutoStart.js';
+
+// How long the transport may sit outside READY during an active session
+// before we re-run SERVER_START_CMD (e.g. a spot instance got reclaimed —
+// the control socket's own reconnect loop only ever retries the SAME
+// address, it never spins up a replacement server).
+const WATCHDOG_THRESHOLD_MS = Number(process.env.SERVER_WATCHDOG_THRESHOLD_MS) || 90_000;
+// Minimum gap between watchdog-triggered restart attempts, so a persistent
+// failure doesn't hammer SERVER_START_CMD (and whatever cloud API it calls).
+const WATCHDOG_COOLDOWN_MS = Number(process.env.SERVER_WATCHDOG_COOLDOWN_MS) || 300_000;
 
 let _instance = null;
 let _chatMessageCallback = null;
@@ -82,6 +92,27 @@ export function start({ botId } = {}) {
     }
   });
 
+  // Watchdog: the control socket's own reconnect loop only ever retries the
+  // same SERVER_BASE_URL — it has no notion of "the server is gone for good
+  // and a replacement needs to be launched" (e.g. a reclaimed spot instance).
+  // If we're unreachable for a while during an active session, re-run
+  // SERVER_START_CMD via the same ensureServerReachable() used on /join.
+  let lastReadyAt = Date.now();
+  let lastRestartAttemptAt = 0;
+  fsm.on('change', (next) => {
+    if (next === State.READY) lastReadyAt = Date.now();
+  });
+  const watchdogTimer = setInterval(() => {
+    if (!_instance?.currentSessionId || fsm.is(State.READY)) return;
+    const now = Date.now();
+    if (now - lastReadyAt < WATCHDOG_THRESHOLD_MS) return;
+    if (now - lastRestartAttemptAt < WATCHDOG_COOLDOWN_MS) return;
+    lastRestartAttemptAt = now;
+    warn(`transport: unreachable for >${WATCHDOG_THRESHOLD_MS}ms during an active session — re-running SERVER_START_CMD`);
+    ensureServerReachable().catch((e) => warn('transport watchdog:', e.message));
+  }, 15_000);
+  watchdogTimer.unref?.();
+
   // Route server→bot commands from the control plane.
   control.on('serverCommand', (msg) => {
     switch (msg.type) {
@@ -117,7 +148,7 @@ export function start({ botId } = {}) {
 
   control.start();
 
-  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null };
+  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, watchdogTimer };
   return _instance;
 }
 
@@ -240,6 +271,7 @@ export function speakingEnd(userId) {
 
 export function stop() {
   if (!_instance) return;
+  try { clearInterval(_instance.watchdogTimer); } catch {}
   try { _instance.control.stop(); } catch {}
   try { _instance.uplink.close(); } catch {}
   try { _instance.downlink.close(); } catch {}

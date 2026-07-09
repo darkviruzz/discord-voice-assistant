@@ -82,6 +82,11 @@ web_modules/
 .env.*
 !.env.example
 
+# deploy secrets (never commit)
+deploy/server.env
+deploy/rclone.conf
+deploy/backups/
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

@@ -1,0 +1,19 @@
+# Applies to builds whose context is the repository root (apps/server).
+.git/
+**/node_modules/
+**/__pycache__/
+*.log
+**/.env
+**/.env.*
+!**/.env.example
+
+# Runtime / transient data — never bake into images.
+apps/server/uploads/
+apps/server/archive/
+apps/server/transcripts/
+apps/server/data/
+uploads/
+archive/
+
+# Deploy assets are mounted/used at runtime, not needed in the server image.
+deploy/

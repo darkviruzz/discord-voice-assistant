@@ -1,0 +1,55 @@
+# whisper.cpp HTTP server — CUDA build from source.
+#
+# The official ghcr.io/ggml-org/whisper.cpp:*-cuda images mainly ship the CLI;
+# the binary layout for `whisper-server` varies between tags. Building from
+# source guarantees the server binary at a known path so the stack runs on any
+# GPU instance without per-host tweaking. To use the official image instead,
+# see the commented `image:`/`command:` block in deploy/docker-compose.yml.
+
+# ── build stage ──────────────────────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG WHISPER_CPP_REF=master
+RUN git clone --depth 1 --branch "${WHISPER_CPP_REF}" \
+        https://github.com/ggml-org/whisper.cpp /src
+WORKDIR /src
+
+# Pin CUDA archs to the staging-plan GPUs, otherwise nvcc compiles for the full
+# default matrix (~50 min build, disk-heavy). Covers: 80=A100, 86=Ampere
+# consumer/A40, 89=RTX 4090, 90=H100/H200. Override via build-arg if needed.
+ARG CUDA_ARCHS=80;86;89;90
+
+# Static ggml/whisper libs → the only dynamic deps left are the CUDA runtime
+# libraries (provided by the runtime base image below) and libgomp (OpenMP,
+# installed explicitly in the runtime stage since it's not in the base image).
+RUN cmake -B build \
+        -DGGML_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DWHISPER_BUILD_SERVER=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build -j"$(nproc)" --config Release --target whisper-server
+
+# ── runtime stage ────────────────────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/bin/whisper-server /usr/local/bin/whisper-server
+
+ENV WHISPER_MODEL_FILE=ggml-medium-q5_0.bin \
+    WHISPER_LANGUAGE=de
+
+EXPOSE 8080
+
+# whisper.cpp serves its web UI on "/" (200/405 depending on build) → liveness.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
+    CMD curl -fsS -o /dev/null http://localhost:8080/ || exit 1
+
+# Model lives on the mounted /models volume. Language/model are overridable.
+CMD ["/bin/sh", "-c", "exec whisper-server --model /models/${WHISPER_MODEL_FILE} --host 0.0.0.0 --port 8080 --language ${WHISPER_LANGUAGE}"]

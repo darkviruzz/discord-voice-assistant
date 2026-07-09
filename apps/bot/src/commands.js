@@ -71,6 +71,22 @@ const commands = [
       },
     ],
   },
+  {
+    name: 'server',
+    description: 'Server-Verbindung verwalten',
+    options: [
+      {
+        name: 'restart',
+        description: 'Server neu starten (per SSH) und verbinden',
+        type: 1, // SUB_COMMAND
+      },
+      {
+        name: 'status',
+        description: 'Verbindungs- und Versionsstatus anzeigen',
+        type: 1, // SUB_COMMAND
+      },
+    ],
+  },
 ];
 
 async function main() {

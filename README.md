@@ -58,6 +58,34 @@ Konventionen:
 * Pausen >30 s erzeugen einen Header `## HH:MM — Pause (N min)`.
 * **Monolog-Unterbrechungen** werden chronologisch eingebettet — der Algorithmus dafür rendert bei Finalize aus Whisper-Token-Timestamps und Discord-Per-User-Spuren-Timestamps (Live-Log ist chronologisch unkorrigiert; das finale Transkript ist sauber).
 
+### Live-Transkript-Web-UI
+
+Read-only Browser-View des laufenden Transkripts — nützlich zum Debuggen und als Spieler-Begleit-Display. Läuft auf demselben Server-Port wie die übrigen Endpunkte (Default `7440`), keine eigene App, kein Build-Schritt, keine Fremdaufrufe (Roboto ist selbst gehostet).
+
+Aufruf im Browser: `http://<server>:7440/transcript/`
+
+* **Auth**: standardmäßig HTTP-Basic mit `greyhawk` / `greyhawk` (per `TRANSCRIPT_UI_*` änderbar, mit `TRANSCRIPT_UI_AUTH=off` im vertrauten LAN abschaltbar).
+* **Live-Update**: primär über Server-Sent Events (`GET /transcript/live`), automatischer Fallback auf Polling (`GET /transcript/snapshot/:id`), wenn SSE wiederholt scheitert.
+* **History**: beim Seitenaufruf wird das vollständige Transkript aus dem JSONL-Log rekonstruiert (überlebt Reloads mitten in der Session und das Wegfalten älterer Turns in die rollende Zusammenfassung). Die gefalteten Turns sind als Zusammenfassung einklappbar sichtbar.
+* **Session-Auswahl**: ohne `?sessionId=` wird die neueste aktive Session automatisch gewählt. Das Dropdown zeigt standardmäßig nur **aktive** Sessions; die Checkbox **„vergangene"** ergänzt die beendeten Sessions aus dem JSONL-Log. Sessions werden als lesbarer Zeitstempel (`YYYY-MM-DD HH:MM`, abgeleitet aus der Session-ID = Epoch-ms) angezeigt; die Roh-ID bleibt als Tooltip/in der URL.
+* **Voice-Status & Teilnehmer**: ein Pill im Header zeigt, ob der Bot im Voice-Channel ist (verbunden / allein / nicht verbunden) — unabhängig von der Datenverbindung (SSE/Polling). Ein Member-Popover im Header listet die aktuell anwesenden Sprecher (live über `presence`-Events).
+* **Wake-Word-/Stop-Markierung**: Zeilen, die Rabenauge ausgelöst haben, werden komplett hervorgehoben (gesamter an das LLM gesendeter Text + „→ Rabenauge"-Badge). Stop-Kommandos markieren nur das Stop-Token. Live nachgereicht über `annotation`-Events (Erkennung läuft erst nach dem Append).
+* **Darstellung (Blasen-Flow)**: Jede Äußerung ist EINE Sprechblase (Avatar-Initialen + Name + Uhrzeit oben, Text darunter) mit fester Akzentfarbe pro Sprecher (Tint/Border/Glow daraus berechnet, Rabenauge in Teal, Antworten als Markdown). Zeitlich überlappende Äußerungen teilen sich eine Zeile: die dominante Blase (meiste Wörter) bekommt mehr Breite, Rollentausch gleitet per FLIP-Animation mit leichtem Überschwingen. Blockhöhen wachsen weich; Autoscroll zieht exponentiell ans Ende nach (Hochscrollen pausiert ihn, ↓-Button springt zurück). Alle Farben/Zeiten als CSS-Variablen in `style.css`.
+* **Wort-für-Wort-Live-Rendering**: Beim Streaming-STT blenden neue Wörter von unscharf nach scharf ein; noch unbestätigte Hypothesen-Wörter sind gedimmt + kursiv und werden beim Bestätigen „fest" (Server-`stableWords`). Korrigiert die Erkennung ein Wort im unbestätigten Schwanz nachträglich, remountet es mit Blur-in; zurückgezogene Wörter verschwimmen hinaus. Ein blinkendes Caret zeigt die laufende Äußerung an.
+* **Unterbrecher-Blasen**: Wer einem laufenden Monolog (oder Rabenauges Antwort) dazwischenredet, erscheint als eigene Blase **neben** der unterbrochenen — vertikal verankert an der Wortzeile, an der die Unterbrechung passierte (`floatInto` vom Server: Wort-Zeitstempel bzw. TTS-Wiedergabeposition). Nichts wird geteilt oder verworfen — alle Äußerungen bleiben vollständig protokolliert (JSONL/Finalize unverändert). Wortgenaue **Wake-Word-** (Teal-Glow) und **Stop-Markierung** (rot) direkt im Text.
+* **Debug-Modus** (`?debug=1` oder Button): Millisekunden-Zeitstempel, Roh-Chunks mit Split-Tags (natural/forced/stream), STT-Diagnostik-Fußzeile pro Blase (`no_speech_prob`, Dauer, Anker), einklappbarer **Session-Header** aus `session_meta` (Channel, Start, Wake-Word, Stop-Phrases, LLM-/STT-/TTS-Modelle, Versionen, Clock-Offset). Alles aus dem JSONL → funktioniert live und für vergangene Sessions.
+* **Settings-Panel (⚙)**: Laufzeit-Konfiguration von Server UND Bot direkt aus der UI. Das Panel ist **vollständig dynamisch**: es rendert ausschließlich den Katalog aus `apps/server/src/configCatalog.js` (Label, Doku, Typ/Widget, Wirkungs-Badge, Persistenz-Status). **Neue Einstellungen entstehen ausschließlich durch einen Katalog-Eintrag** — Beschreibung in den Code, Panel zieht nach (bot-scope-Keys zusätzlich in die `BOT_KEYS`-Whitelist in `apps/bot/src/configOverrides.js`). Änderungen wirken dauerhaft (Override-Layer `config.overrides.json`) oder nur temporär; Bot-Werte werden über den Control-Kanal gepusht und lokal im Bot persistiert. Der Bot meldet nach jedem Connect/Update seine **Ist-Konfiguration** (`config_state`) zurück — das Panel zeigt echte Bot-Werte und markiert Drift zum gespeicherten Wunsch (⏳). **Secrets** (Namens-Blacklist: `TOKEN`/`SECRET`/`BEARER`/`PASS(WORD)`/`API_KEY`/`CREDENTIAL` …) verlassen nie einen Prozess: API liefert nur „gesetzt?", Schreiben ist gesperrt, der Bot-Report enthält sie nur als Boolean.
+
+Endpunkte (alle unter `/transcript`, hinter der Basic-Auth):
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /transcript/` | Statische UI (HTML/CSS/JS). |
+| `GET /transcript/live?sessionId=<id>` | SSE-Stream: `snapshot` (volle History), dann live `entry` / `presence` / `annotation` / `session_ended`. Ohne `sessionId` → neueste aktive Session. |
+| `GET /transcript/snapshot/:id` | JSON-Snapshot der vollen History (Polling-Fallback; funktioniert auch für bereits beendete Sessions direkt aus dem JSONL). |
+| `GET /transcript/sessions[?all=1]` | JSON-Liste der aktiven In-RAM-Sessions; mit `?all=1` zusätzlich die vergangenen Sessions aus dem Log-Verzeichnis. |
+| `GET/PUT /transcript/config` | Settings-Panel: Katalog + aktuelle Werte (inkl. Bot-Ist-Stand) lesen; Werte setzen/zurücksetzen (persistent oder temporär). |
+
 ## Audio-Archiv
 
 * **Während Aufnahme**: hohe Qualität (PCM 48 kHz / 16-bit WAV, ~1 GB/h pro Sprecher) — gibt Whisper bestmögliche Eingabe.
@@ -187,8 +215,24 @@ STOP_WITHOUT_WAKE_MAX_WORDS=5
 | `WHISPER_LANGUAGE` | `auto` | Sprache für Whisper. `de` für Deutsch, `en` für Englisch, `auto` für automatische Erkennung. `auto` ist etwas langsamer. |
 | `WHISPER_TEMPERATURE` | `0.2` | Sampling-Temperature für Whisper. Lokale `.env.example` nutzt konservativ `0.1`; Werte >0 liefern brauchbarere `no_speech_prob`-Werte als deterministisches `0`. |
 | `WHISPER_NO_SPEECH_THRESHOLD` | — | Der Live-Pfad verwirft aktuell nichts anhand von `no_speech_prob`; die Werte werden im JSONL gespeichert. Ein Threshold ist nur als späterer Finalize-/Offline-Filter vorgesehen. |
-| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks. Längere Utterances werden an Stille geteilt; wenn keine passende Stille gefunden wird, wird mit `OVERLAP=2s` forced gesplittet. |
-| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances. Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+| `STT_MAX_CHUNK_SECONDS` | `30` | Maximale Länge eines STT-Chunks im **Fallback-/Finalize-Pfad** (der Live-Pfad streamt ohne Chunk-Grenzen, s. u.). Längere Utterances werden an Stille geteilt; ohne passende Stille wird mit `OVERLAP=2s` forced gesplittet — die Overlap-Dopplung wird zeitbasiert über Wort-Zeitstempel entfernt. |
+| `STT_SILENCE_THRESH` | `300` | RMS-Schwellwert für Silence-Detection beim Aufteilen langer Utterances (Fallback-/Finalize-Pfad). Frames mit RMS < Schwellwert gelten als Stille. Muss ggf. je nach Mikrofon und Raumakustik angepasst werden — siehe Hinweis unten. |
+
+#### Streaming-STT (Live-Transkription während des Sprechens)
+
+Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster eines Sprechers wird jede Sekunde als Ganzes an whisper.cpp geschickt (voller Kontext, nie mitten im Wort geschnitten). Wörter, in denen zwei aufeinanderfolgende Hypothesen übereinstimmen, werden **bestätigt** (LocalAgreement-2) und erscheinen sofort im Live-Transkript; der Satzrest wird als noch korrigierbare Vorschau gedimmt angezeigt. Sobald die bestätigten Wörter `STT_STREAM_TRIM_SECONDS` Audio abdecken, wird das Fenster an der letzten bestätigten Satzgrenze **fixiert** und abgeschnitten — die GPU-Last pro Tick bleibt dadurch unabhängig von der Monolog-Länge (Fenster ≤ ~25 s). Am Äußerungsende wird nur noch das Restfenster einmal final transkribiert (statt der kompletten Äußerung); bestätigte Wörter werden dabei nie zurückgenommen.
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `STT_STREAMING` | `true` | Streaming-Transkription ein/aus. Aus = altes Verhalten (Transkript erst am Äußerungsende, Chunk-Pfad). |
+| `STT_STREAM_INTERVAL_MS` | `1000` | Tick-Intervall des Streaming-Loops. Kleiner = reaktiver, mehr GPU-Last (Neustart nötig). |
+| `STT_STREAM_MIN_WINDOW_MS` | `1000` | Mindest-Audio, bevor der Streamer das erste Mal transkribiert (sehr kurze Fenster liefern unbrauchbare Hypothesen). |
+| `STT_STREAM_TRIM_SECONDS` | `15` | Ab so vielen Sekunden bestätigten Audios wird das Fenster an der letzten Satzgrenze fixiert. |
+| `STT_STREAM_PROMPT` | `true` | Fixierten Text als Whisper-Decoder-Prompt mitgeben (konsistente Erkennung über die Fenstergrenze). |
+
+> **GPU-Portabilität (AMD heute, NVIDIA/Cloud später):** Der Server spricht nur die whisper.cpp-HTTP-API (`WHISPER_URL`). whisper.cpp gibt es mit identischer API als **Vulkan**-Build (AMD, aktuelles Setup) und als **CUDA/cuBLAS**-Build (NVIDIA, z. B. Cloud-Instanz mit H100) — beim Umzug wechselt nur das Binary bzw. die URL, am Server-Code ändert sich nichts. Gemessen auf der RX 6800 XT (Vulkan, medium-q5_0, warm): 10 s Audio ≈ 0,6 s, 30 s ≈ 1,8 s (16–24× Echtzeit) — genug Headroom für den 1-s-Tick.
+
+**End-to-End-Test:** `node tests/ui-sim.mjs` startet den Server auf Port 7441 (Auth aus) und speist `tests/Quantengravitation.m4a` (86 s vorgelesener Wikipedia-Text, Ground-Truth in `tests/transcript.txt`) in Echtzeit als Fake-Sprecher ein — das Wort-für-Wort-Streaming lässt sich unter `http://127.0.0.1:7441/transcript/?sessionId=1780000000001` live ansehen. Voraussetzung: whisper.cpp-Server auf `:8080` läuft, `ffmpeg` im PATH.
 
 #### LLM
 
@@ -239,6 +283,18 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `STOP_WITHOUT_WAKE_MAX_WORDS` | `5` | Maximale Wortzahl für Stop-Phrases ohne Wake-Word. Verhindert, dass normale Sätze mit Stop-Wörtern versehentlich die Wiedergabe abbrechen. |
 
 > **Silence-Detection kalibrieren**: Die Silence-Erkennung (`STT_SILENCE_THRESH`) muss möglicherweise je nach Mikrofon und Raumakustik angepasst werden. Bei langen Aufnahmen (`> STT_MAX_CHUNK_SECONDS`) loggt der Server mit `DEBUG=1` Details wie Gesamtdauer, Threshold, Chunk-Anzahl, Chunk-Dauern und Split-Typ (`natural-silence`, `forced-overlap`, `tail`). Erscheint bei langen Fragen kein sinnvoller Natural-Split, ist der Schwellwert oft zu niedrig (zu viel Hintergrundrauschen wird als Sprache gewertet) → `STT_SILENCE_THRESH` erhöhen (z. B. auf `500`–`800`).
+
+#### Live-Transkript-Web-UI
+
+Read-only Browser-View unter `http://<server>:<PORT>/transcript/` (siehe [Live-Transkript-Web-UI](#live-transkript-web-ui)).
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `TRANSCRIPT_UI_AUTH` | `basic` | `basic` = HTTP-Basic-Auth erforderlich. `off` (auch `none`/`false`/`0`) = ohne Auth erreichbar (nur für vertrautes LAN). |
+| `TRANSCRIPT_UI_USER` | `greyhawk` | Benutzername für die Basic-Auth. |
+| `TRANSCRIPT_UI_PASS` | `greyhawk` | Passwort für die Basic-Auth. |
+
+> Die UI nutzt denselben `PORT` wie der übrige Server und liest den vollständigen Verlauf aus `TRANSCRIPT_DIR` (siehe [Live-JSONL-Events](#live-jsonl-events)). Die rollende Zusammenfassung stammt aus dem RAM und ist nur für aktive Sessions verfügbar.
 
 ### Live-JSONL-Events
 

@@ -7,13 +7,16 @@ import { finalizeSession } from './finalize/index.js';
 import { loadSpeakerMap, setSpeakerMapping } from './speakerMap.js';
 import { sendTestTone } from './downlink.js';
 import { pickProtocolFor } from './auth.js';
-import { ensureSession, dropSession } from './state.js';
+import { ensureSession, dropSession, sessions } from './state.js';
+import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js';
 import { runPipeline, runTextPipeline } from './pipeline.js';
-import { rebuildLiveContext } from './rollingSummary.js';
+import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
+import { appendLive } from './liveContext.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
+import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
@@ -192,6 +195,10 @@ async function handleFinalize(ws, msg) {
       audioOk: result.audio?.ok ?? false,
       audioCount: result.audio?.files?.length ?? 0,
     });
+    // The session is done: drop the RAM state (snapshots rebuild from the
+    // JSONL) and tell the transcript UI to flip it from active to past.
+    dropSession(sessionId);
+    publishSessionEnded(sessionId);
   } catch (e) {
     warn('finalize: failed for', String(sessionId), '-', e.message);
     autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
@@ -242,6 +249,13 @@ export function initControlWSS({ bearer } = {}) {
             botConnections.add(ws);
             log('control: bot registered botId=', msg.botId, 'version=', msg.version);
             send(ws, { type: 'registered', serverParams: serverParams() });
+            // Desired State der Bot-Overrides (vom Settings-Panel verwaltet) an den
+            // frisch verbundenen Bot pushen, damit er die persistierten Werte
+            // übernimmt. persist=true → der Bot schreibt sie in seinen Override-Layer.
+            const botDesired = getBotOverrides();
+            if (Object.keys(botDesired).length > 0) {
+              send(ws, { type: 'config_update', cmdId: randomUUID(), persist: true, set: botDesired, reset: [] });
+            }
             return;
           }
           case 'session_start': {
@@ -283,6 +297,15 @@ export function initControlWSS({ bearer } = {}) {
             send(ws, { type: 'pong', t: msg.t, srvT: Date.now() });
             return;
           }
+          case 'config_state': {
+            // Ist-Konfiguration des Bots (nach Registrierung und nach jedem
+            // config_update). Nur cachen — das Settings-Panel liest sie über
+            // GET /transcript/config. Secrets kommen bereits gefiltert an
+            // (nur „gesetzt?"-Flags); setBotReported filtert defensiv erneut.
+            if (!registered) return;
+            setBotReported({ values: msg.values, secretsSet: msg.secretsSet });
+            return;
+          }
           case 'voice_state': {
             // Voice-channel presence signal. Logged for the timeline; the
             // server-side auto-finalize timer hooks into these transitions.
@@ -304,6 +327,16 @@ export function initControlWSS({ bearer } = {}) {
               logTranscriptEvent(msg.sessionId, 'voice_state', { state });
               autoTimer.notify(msg.sessionId, state);
             }
+            // Mirror onto the session so the transcript UI can show bot presence.
+            {
+              const sess = sessions.get(BigInt(msg.sessionId));
+              if (sess) {
+                sess.voice.state = state;
+                sess.voice.updatedAt = Date.now();
+                if (state === 'left') sess.voice.members.clear();
+                publishPresence(msg.sessionId);
+              }
+            }
             onVoiceState?.(BigInt(msg.sessionId), state);
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_state' });
             return;
@@ -316,11 +349,24 @@ export function initControlWSS({ bearer } = {}) {
               return;
             }
             if (msg.userId != null && !autoTimer.isFinalizing(msg.sessionId)) {
+              const memberState = msg.state === 'join' ? 'join' : 'leave';
               logTranscriptEvent(msg.sessionId, 'voice_member', {
                 userId: String(msg.userId),
                 displayName: typeof msg.displayName === 'string' ? msg.displayName : null,
-                state: msg.state === 'join' ? 'join' : 'leave',
+                state: memberState,
               });
+              // Mirror current membership onto the session for the transcript UI.
+              const sess = sessions.get(BigInt(msg.sessionId));
+              if (sess) {
+                const uid = String(msg.userId);
+                if (memberState === 'join') {
+                  sess.voice.members.set(uid, typeof msg.displayName === 'string' ? msg.displayName : null);
+                } else {
+                  sess.voice.members.delete(uid);
+                }
+                sess.voice.updatedAt = Date.now();
+                publishPresence(msg.sessionId);
+              }
             }
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'voice_member' });
             return;
@@ -372,7 +418,34 @@ export function initControlWSS({ bearer } = {}) {
             const text = typeof msg.text === 'string' && msg.text.trim()
               ? msg.text
               : defaultDebugTtsText();
-            streamTtsToSession(sid, text).catch((e) => warn('debug_tts failed:', e.message));
+            // This is Rabenauge speaking (e.g. the automatic join greeting), so
+            // record it in the transcript like any other reply: log it for the
+            // history/snapshot and append it to the live buffer for instant
+            // display. turnId ties the TTS lifecycle to the line (debug view).
+            const ttsTurnId = randomUUID();
+            logTranscriptEvent(sid, 'assistant_response', {
+              turnId: ttsTurnId,
+              userId: null,
+              userDisplayName: null,
+              source: 'auto',
+              query: null,
+              text,
+              speakerId: msg.speakerId ?? 0,
+              model: msg.model ?? null,
+              ttsRequested: true,
+            });
+            const greetSession = sessions.get(sid);
+            if (greetSession) {
+              const stored = appendLive(greetSession, {
+                label: process.env.WAKE_WORD ?? 'Rabenauge',
+                text,
+                startMs: Date.now(),
+                kind: 'assistant',
+              });
+              if (stored) publishEntry(sid, stored);
+              maybeFold(greetSession).catch((e) => warn('debug_tts fold error:', e.message));
+            }
+            streamTtsToSession(sid, text, { turnId: ttsTurnId }).catch((e) => warn('debug_tts failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'debug_tts' });
             return;
           }
@@ -433,6 +506,25 @@ export function initControlWSS({ bearer } = {}) {
             const eventType = msg.eventType === 'playback_resumed' ? 'playback_resumed' : 'playback_paused';
             const { type, cmdId, eventType: _eventType, ...fields } = msg;
             logTranscriptEvent(msg.sessionId, eventType, fields);
+            // Remember who interrupted the playing reply and where, so the
+            // interrupter's upcoming live entry can be floated into the
+            // assistant bubble at the right text position (consumed by the
+            // streaming tick in pipeline.js when that user's stream starts).
+            if (eventType === 'playback_paused' && msg.interruptedByUserId != null) {
+              const session = sessions.get(BigInt(msg.sessionId));
+              const lastAsst = session
+                ? [...(session.liveContext?.buffer ?? [])].reverse().find((e) => e.kind === 'assistant')
+                : null;
+              if (session && lastAsst) {
+                session.pendingInterrupt = {
+                  byUserId: String(msg.interruptedByUserId),
+                  hostStartMs: lastAsst.startMs,
+                  hostText: lastAsst.text,
+                  msPlayed: Number(msg.msPlayed) || 0,
+                  at: Date.now(),
+                };
+              }
+            }
             send(ws, { type: 'ack', cmdId, ok: true, op: eventType });
             return;
           }

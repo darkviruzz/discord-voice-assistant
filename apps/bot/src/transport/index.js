@@ -151,10 +151,78 @@ export function start({ botId } = {}) {
     }
   });
 
-  control.start();
-
-  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, watchdogTimer };
+  // NOTE: we do NOT auto-connect here. The control link is opened lazily via
+  // connect()/ensureConnected() (on /join or an on-demand /ask) and closed via
+  // disconnect() (on /leave) so an idle bot keeps no server link — no endless
+  // reconnect attempts and no periodic app-rtt pings while out of voice. The
+  // watchdog above is a no-op until currentSessionId is set (i.e. a session
+  // is actually active), so it stays dormant during this idle period too.
+  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, idleReleaseTimer: null, watchdogTimer };
   return _instance;
+}
+
+// Open the control link (idempotent — control.start() resets backoff and is a
+// no-op while already connecting/connected).
+export function connect() {
+  if (!_instance) return;
+  cancelIdleRelease();
+  // Only kick off a fresh connect from a clean stop; if we're already
+  // connecting/backing-off/ready, control is handling it (avoid a 2nd socket).
+  if (_instance.fsm.is(State.DISCONNECTED)) _instance.control.start();
+}
+
+// Close the control link and stop reconnecting (uplink/downlink close via the
+// FSM leaving READY). Used when the bot is no longer in a voice session.
+export function disconnect() {
+  if (!_instance) return;
+  cancelIdleRelease();
+  try { _instance.control.stop(); } catch (e) { warn('transport.disconnect:', e.message); }
+}
+
+export function isConnected() {
+  return !!_instance && _instance.fsm.is(State.READY);
+}
+
+export function serverVersion() {
+  return _instance?.control?.serverInfo?.version ?? null;
+}
+
+// Connect (if needed) and resolve once the control link is READY, or reject on
+// timeout. Used by /join and on-demand by /ask when no session is active.
+export function ensureConnected({ timeoutMs = 12000 } = {}) {
+  if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert (kein SERVER_BASE_URL)'));
+  if (_instance.fsm.is(State.READY)) return Promise.resolve();
+  connect();
+  return new Promise((resolve, reject) => {
+    const onChange = (next) => {
+      if (next === State.READY) { cleanup(); resolve(); }
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('Server nicht erreichbar (Timeout)')); }, timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    const cleanup = () => { clearTimeout(timer); _instance.fsm.off('change', onChange); };
+    _instance.fsm.on('change', onChange);
+  });
+}
+
+// Disconnect after a grace period IF no session is keeping the link alive.
+// `hasWork()` is supplied by the caller (index.js knows about active sessions)
+// and re-checked when the timer fires, so a /join during the grace window keeps
+// the connection. Calling connect()/disconnect() cancels a pending release.
+export function scheduleIdleRelease({ delayMs = 60000, hasWork = () => false } = {}) {
+  if (!_instance) return;
+  cancelIdleRelease();
+  _instance.idleReleaseTimer = setTimeout(() => {
+    _instance.idleReleaseTimer = null;
+    if (!hasWork()) disconnect();
+  }, delayMs);
+  if (typeof _instance.idleReleaseTimer.unref === 'function') _instance.idleReleaseTimer.unref();
+}
+
+export function cancelIdleRelease() {
+  if (_instance?.idleReleaseTimer) {
+    clearTimeout(_instance.idleReleaseTimer);
+    _instance.idleReleaseTimer = null;
+  }
 }
 
 export function sessionStart(info) {

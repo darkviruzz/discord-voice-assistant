@@ -1,5 +1,23 @@
 import { log, debug, warn } from './logger.js';
 
+// whisper.cpp puts newlines into the `text` field at its internal segment/token
+// boundaries. With word-level timestamps requested it splits down to token level
+// (like -ml 1) and, without split-on-word, some breaks land INSIDE a word
+// (tokens are sub-word pieces) — e.g. "Entwicklung befind\nliche". Naively
+// turning every \n into a space would leave "befind liche".
+//
+// Heuristic: whisper prefixes a leading space before a NEW word but not before a
+// mid-word token continuation. So a newline directly followed by a lowercase
+// letter (no space) is a mid-word split → join with no space; every other
+// newline is a real word/segment boundary → single space.
+export function cleanWhisperText(s) {
+  return String(s || '')
+    .replace(/(\p{L})\n(\p{Ll})/gu, '$1$2') // letter \n lowercase (no space) → join word
+    .replace(/\s*\n\s*/g, ' ')              // remaining newlines → single space
+    .replace(/[ \t]{2,}/g, ' ')             // collapse runs of spaces
+    .trim();
+}
+
 // Normalize Whisper word/token timestamps from whatever shape the server
 // returned into a flat [{ w, t0, t1 }] array, times in SECONDS relative to the
 // submitted audio. Handles:
@@ -12,9 +30,12 @@ function parseWords(data) {
   const push = (w) => {
     const t0 = Number(w.start ?? w.t0 ?? w.from);
     const t1 = Number(w.end ?? w.t1 ?? w.to);
-    const word = (w.word ?? w.text ?? w.w ?? '').trim();
+    const raw = String(w.word ?? w.text ?? w.w ?? '');
+    const word = raw.trim();
     if (!word || !Number.isFinite(t0)) return;
-    out.push({ w: word, t0, t1: Number.isFinite(t1) ? t1 : t0 });
+    // `raw` keeps whisper's leading-space convention (space = new word, none =
+    // sub-word continuation) so sttStreaming can rebuild words from tokens.
+    out.push({ w: word, t0, t1: Number.isFinite(t1) ? t1 : t0, raw });
   };
   if (Array.isArray(data.words)) data.words.forEach(push);
   if (out.length === 0 && Array.isArray(data.segments)) {
@@ -33,7 +54,7 @@ function parseWords(data) {
 //   - Requests `verbose_json` so segment-level `no_speech_prob` is available.
 //   - Does not filter by no_speech_prob in live mode. The values are persisted
 //     into JSONL so Finalize/offline tooling can decide what to discard later.
-export async function transcribe(wavBuffer) {
+export async function transcribe(wavBuffer, { prompt } = {}) {
   const base        = (process.env.WHISPER_URL ?? 'http://localhost:8080').replace(/\/+$/, '');
   const language    = process.env.WHISPER_LANGUAGE ?? 'auto';
   const temperature = Number(process.env.WHISPER_TEMPERATURE ?? 0.2);
@@ -43,6 +64,9 @@ export async function transcribe(wavBuffer) {
   if (language !== 'auto') form.append('language', language);
   form.append('response_format', 'verbose_json');
   form.append('temperature', String(temperature));
+  // Decoder context from already-locked streaming text — keeps wording stable
+  // across the window boundary (the model "knows" how the sentence began).
+  if (prompt) form.append('prompt', String(prompt).slice(-500));
   // Ask for word-level timestamps. Harmless if the server ignores it (older
   // whisper.cpp builds); parseWords() falls back to utterance-level timing.
   if ((process.env.WHISPER_WORD_TIMESTAMPS ?? 'true') !== 'false') {
@@ -61,7 +85,7 @@ export async function transcribe(wavBuffer) {
   }
 
   const data = await res.json();
-  const text = (data.text ?? data.transcription ?? '').trim();
+  const text = cleanWhisperText(data.text ?? data.transcription ?? '');
 
   // Keep likely-noise transcripts. Store diagnostics for later filtering.
   const segments = Array.isArray(data.segments) ? data.segments : [];

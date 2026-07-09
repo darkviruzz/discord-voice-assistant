@@ -15,10 +15,13 @@ export class UtteranceRecorder {
     this.user       = user;      // { id: string, username: string }
     this.silenceMs  = options.silenceMs  ?? 1000;
     this.onChunkDone = options.onChunkDone ?? (() => {});
+    // Set once subscribe() runs — lets dispose() tear an in-flight chunk down.
+    this._endEarly  = null;
+    this._settled   = false;
   }
 
   subscribe() {
-    const { id: userId } = this.user;
+    const { id: userId, username } = this.user;
     const sessionId = BigInt(this.session.startedAt).toString(); // wire format
 
     const opusStream = this.receiver.subscribe(userId, {
@@ -44,41 +47,78 @@ export class UtteranceRecorder {
     let totalSamples = 0;
     decoder.on('data', (pcm) => { totalSamples += pcm.length / 2; });
 
-    return new Promise((resolve, reject) => {
-      function cleanup(err) {
-        try { opusStream.destroy(); } catch {}
-        try { decoder.destroy(); } catch {}
-        try { wavWriter.destroy(); } catch {}
-        if (err) reject(err);
-      }
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (rec) => {
+        if (settled) return;
+        settled = true;
+        this._settled = true;
+        resolve(rec);
+      };
 
-      opusStream.on('error', (e) => { warn('opusStream error:', e.message); cleanup(e); });
-      decoder.on('error',    (e) => { warn('decoder error:',    e.message); cleanup(e); });
-      wavWriter.on('error',  (e) => { warn('wavWriter error:',  e.message); cleanup(e); });
-
-      opusStream.pipe(decoder).pipe(wavWriter);
-
-      wavWriter.on('finish', () => {
+      // Normal completion: WAV fully flushed → emit the chunk + utterance_end.
+      const finalizeChunk = () => {
         const durationMs = Math.round((totalSamples / 48000) * 1000);
+        if (durationMs <= 0) { settle(null); return; }  // nothing decoded (e.g. all-corrupt) → drop
         const rec = {
-          userId:     this.user.id,
-          username:   this.user.username,
-          startMs:    relStartMs,
+          userId:   this.user.id,
+          username: this.user.username,
+          startMs:  relStartMs,
           durationMs,
           file,
         };
-        this.onChunkDone(rec);
+        try { this.onChunkDone(rec); } catch (e) { warn('onChunkDone failed:', e.message); }
         sendUtteranceEnd({
           sessionId,
           userId,
           durationMs,
           startTsMs: startedAt,
           endTsMs: startedAt + durationMs,
-          userDisplayName: this.user.username,
+          userDisplayName: username,
         });
         debug('recorder: utterance_end sent userId=', userId, 'durationMs=', durationMs);
-        resolve(rec);
+        settle(rec);
+      };
+
+      // Stop the chunk early without crashing: a single corrupt Opus packet
+      // (decoder throws) or a voice reconnect (stale decryption key) must NOT
+      // kill the process. Detach the pipeline and flush the audio captured so
+      // far; the next `speaking.start` opens a fresh recorder with the new key.
+      const endEarly = (why) => {
+        if (settled) return;
+        debug('recorder: ending chunk early userId=', userId, 'reason=', why);
+        try { opusStream.unpipe(decoder); } catch {}
+        try { decoder.unpipe(wavWriter); } catch {}
+        try { opusStream.destroy(); } catch {}
+        try { decoder.destroy(); } catch {}
+        if (wavWriter.writable && !wavWriter.writableEnded) {
+          try { wavWriter.end(); } catch { finalizeChunk(); }  // end() → 'finish' → finalizeChunk
+        } else {
+          finalizeChunk();
+        }
+      };
+      this._endEarly = endEarly;
+
+      // Errors are non-fatal: log + end the chunk gracefully, never reject.
+      opusStream.on('error', (e) => { warn('opusStream error:', e.message); endEarly('opus-error'); });
+      decoder.on('error',    (e) => { warn('decoder error:',    e.message); endEarly('decoder-error'); });
+      wavWriter.on('error',  (e) => {
+        warn('wavWriter error:', e.message);
+        try { opusStream.destroy(); } catch {}
+        try { decoder.destroy(); } catch {}
+        settle(null);
       });
+
+      opusStream.pipe(decoder).pipe(wavWriter);
+
+      wavWriter.on('finish', finalizeChunk);
     });
+  }
+
+  // Tear down an in-flight recording from the outside (e.g. the voice
+  // connection left READY → its decryption context is now stale). Flushes the
+  // partial WAV and settles the subscribe() promise. Safe to call repeatedly.
+  dispose() {
+    if (this._endEarly) this._endEarly('dispose');
   }
 }

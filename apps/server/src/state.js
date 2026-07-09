@@ -15,6 +15,17 @@ export function ensureSession(sessionId) {
       guildId: null,
       guildName: null,
       channelName: null,
+      // Live voice-channel presence, updated from voice_state / voice_member
+      // control events. Surfaced read-only by the transcript web UI so it can
+      // show whether the bot is actually in voice and who is currently present
+      // (independent of the SSE transport being connected).
+      //   state   — last voice_state: 'joined'|'occupied'|'alone'|'left'|null
+      //   members — Map<userId(string), displayName> of humans currently in voice
+      voice: {
+        state: null,
+        members: new Map(),
+        updatedAt: 0,
+      },
       // Live-transcript context fed to the LLM as system blocks. Pure in-RAM,
       // rebuilt from the JSONL on resume (see rollingSummary.rebuildLiveContext).
       liveContext: {

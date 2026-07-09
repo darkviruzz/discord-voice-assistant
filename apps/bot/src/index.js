@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './bootConfig.js'; // MUSS zuerst stehen: dotenv + Bot-Override-Layer vor allen anderen Imports
 import { Client, GatewayIntentBits, Partials, MessageFlags, ActivityType } from 'discord.js';
 import {
   joinVoiceChannel,
@@ -15,6 +15,20 @@ import { ensureServerReachable } from './serverAutoStart.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import * as transport from './transport/index.js';
 
+// Last-resort crash safety: a single corrupt audio packet or stray async error
+// must never tear down a live recording. Unhandled promise rejections (the
+// class that crashed the bot on a corrupt Opus frame) are logged with their
+// full stack and the process keeps running — errors stay visible, just not
+// fatal. A genuinely-uncaught synchronous exception may leave undefined state,
+// so it is logged and we exit cleanly for a fresh systemd restart.
+process.on('unhandledRejection', (reason) => {
+  error('unhandledRejection:', reason);
+});
+process.on('uncaughtException', (e) => {
+  error('uncaughtException:', e);
+  process.exit(1);
+});
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -26,12 +40,83 @@ const client = new Client({
 });
 
 const sessions = new SessionManager();
+// userId -> UtteranceRecorder (in-flight chunk); lets us dispose() recorders
+// when the voice connection leaves READY (their decryption context goes stale).
 const activeRecordings = new Map();
 let _textChannel = null;
 // Discord ID of the voice channel the bot is currently joined to.
 // When /ask or an @-mention is sent from this same channel's text chat,
 // the request shares conversationHistory with the voice session.
 let _activeVoiceChannelId = null;
+// Who issued the current /join — used to address server-outage notifications
+// (ephemeral while the interaction token is fresh, else a channel mention).
+let _sessionOwner = null;        // { interaction, userId }
+// De-dupes the server-outage flow so the warning + auto-restart fire once per
+// outage, and the recovery message fires once.
+const _outage = { active: false, autoRestartTried: false };
+
+// True while the bot is actively in a voice channel with an open session — the
+// control link is kept open only in this state (idle bots hold no server link).
+function hasActiveSession() { return !!(sessions.active && _activeVoiceChannelId); }
+
+// Release the on-demand server link after a grace period, unless a session is
+// keeping it alive. Re-checked when the timer fires, so a /join cancels it.
+function maybeScheduleIdleRelease() {
+  if (!hasActiveSession()) transport.scheduleIdleRelease({ hasWork: hasActiveSession });
+}
+
+// Notify the /join initiator about a server-link event. Prefers an ephemeral
+// follow-up (only valid while the interaction token is fresh, ~15 min); falls
+// back to a public message in the bound text channel that @-mentions them.
+async function notifyOwner(content) {
+  const owner = _sessionOwner;
+  if (owner?.interaction) {
+    const created = owner.interaction.createdTimestamp ?? 0;
+    if (Date.now() - created < 14 * 60_000) {
+      try { await owner.interaction.followUp({ content, flags: MessageFlags.Ephemeral }); return; }
+      catch (e) { debug('notifyOwner ephemeral failed:', e.message); }
+    }
+  }
+  if (_textChannel?.send) {
+    const mention = owner?.userId ? `<@${owner.userId}> ` : '';
+    try { await _textChannel.send(`${mention}${content}`); }
+    catch (e) { debug('notifyOwner channel send failed:', e.message); }
+  }
+}
+
+// Reacts to control-link up/down transitions. Only meaningful during a session:
+// on loss → warn the owner + one automatic SSH restart attempt; on recovery →
+// confirm. Local recording keeps running regardless (WAVs are written locally).
+async function handleServerLink(info) {
+  if (!info.connected) {
+    if (!hasActiveSession() || _outage.active) return;   // idle/expected, or already handling
+    _outage.active = true;
+    await notifyOwner('⚠️ Verbindung zum Server verloren. Die Aufnahme läuft lokal weiter. Ich versuche, den Server neu zu starten …');
+    if (!_outage.autoRestartTried) {
+      _outage.autoRestartTried = true;
+      let result = 'timeout';
+      try { result = await ensureServerReachable({}); }
+      catch (e) { warn('outage auto-restart failed:', e.message); }
+      // On success the control client (still reconnecting during the session)
+      // comes back → the connected:true branch posts the recovery message.
+      if (result === 'timeout' || result === 'no-cmd' || result === 'no-base-url') {
+        await notifyOwner('❌ Automatischer Server-Neustart fehlgeschlagen. Die Aufnahme läuft lokal weiter. Mit `/server restart` erneut versuchen.');
+      }
+    }
+  } else if (_outage.active) {
+    _outage.active = false;
+    _outage.autoRestartTried = false;   // a future outage gets a fresh auto-restart
+    await notifyOwner('🟢 Server wieder verbunden — Live-Transkription aktiv.');
+  }
+}
+
+// Dispose all in-flight recorders (e.g. voice reconnect / leave / detach).
+function disposeAllRecordings(reason) {
+  if (!activeRecordings.size) return;
+  debug('disposing', activeRecordings.size, 'recorder(s) —', reason);
+  for (const rec of activeRecordings.values()) { try { rec.dispose(); } catch {} }
+  activeRecordings.clear();
+}
 
 // Build the Custom-Status text shown in the bot's Discord profile.
 // With server connected: "1.0.1-d5b717a (server:1.0.1-d5b717a)"
@@ -92,6 +177,7 @@ client.once('clientReady', async () => {
 
   transport.onServerInfo((info) => {
     setBotStatus(info.connected ? info.version : null);
+    handleServerLink(info).catch((e) => warn('server-link handler:', e.message));
   });
 
   transport.onFinalizeRequest((req) => { handleAutoFinalize(req).catch((e) => warn('auto-finalize:', e.message)); });
@@ -115,6 +201,7 @@ client.once('clientReady', async () => {
 
 // Detach the active in-memory session and tear down its voice connection.
 function detachActiveSession() {
+  disposeAllRecordings('detach');
   // Tell the server the bot left voice (stops clock_sync logging).
   const wid = sessions.wireSessionId();
   if (wid) transport.voiceState({ sessionId: wid, state: 'left' });
@@ -124,6 +211,11 @@ function detachActiveSession() {
   if (conn) { try { conn.destroy(); } catch {} }
   sessions.active = null;
   _activeVoiceChannelId = null;
+  _outage.active = false;
+  _outage.autoRestartTried = false;
+  // Session is over → drop the server link after a short grace (flushes the
+  // 'left' above and survives an immediate re-/join).
+  maybeScheduleIdleRelease();
 }
 
 // Shared finalize flow for both manual (/finalize run) and server-initiated
@@ -226,6 +318,18 @@ client.on('interactionCreate', async (i) => {
       }
       const tts = i.options.getBoolean('tts') ?? false;
       const member = i.member;
+
+      // The control link is only kept open during a voice session, so open it
+      // on demand here. May take a moment → defer first.
+      if (!transport.isConnected()) {
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+        try { await transport.ensureConnected({ timeoutMs: 12000 }); }
+        catch {
+          maybeScheduleIdleRelease();
+          return i.editReply('Server nicht erreichbar. Mit `/join` starten oder `/server restart`.');
+        }
+      }
+
       const sent = askServer({
         question,
         tts,
@@ -234,14 +338,61 @@ client.on('interactionCreate', async (i) => {
         userDisplayName: displayNameFor(member, i.user),
         source: 'slash',
       });
-      if (!sent) {
-        return i.reply({ content: 'Server ist noch nicht verbunden. Bitte gleich erneut versuchen oder /join nutzen.', flags: MessageFlags.Ephemeral });
+      // No active voice session → drop the link again after a short idle grace.
+      maybeScheduleIdleRelease();
+      const content = !sent
+        ? 'Server ist noch nicht verbunden. Bitte gleich erneut versuchen oder /join nutzen.'
+        : (tts ? 'Frage gesendet. Antwort wird auch vorgelesen.' : 'Frage gesendet.');
+      return i.deferred ? i.editReply(content) : i.reply({ content, flags: MessageFlags.Ephemeral });
+    }
+
+    if (i.commandName === 'server') {
+      const sub = i.options.getSubcommand();
+      if (sub === 'status') {
+        const connected = transport.isConnected();
+        const ver = transport.serverVersion();
+        return i.reply({
+          content: connected ? `🟢 Server verbunden${ver ? ` (v${ver})` : ''}.` : '🔴 Keine Server-Verbindung.',
+          flags: MessageFlags.Ephemeral,
+        });
       }
-      return i.reply({ content: tts ? 'Frage gesendet. Antwort wird auch vorgelesen.' : 'Frage gesendet.', flags: MessageFlags.Ephemeral });
+      if (sub === 'restart') {
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+        let result = 'timeout';
+        try {
+          result = await ensureServerReachable({
+            onProgress: ({ phase, elapsedMs, deadlineMs }) => {
+              const msg = phase === 'starting'
+                ? '⏳ Starte Server per SSH …'
+                : `⏳ Warte bis Server bereit ist (${Math.round(elapsedMs / 1000)}s/${Math.round(deadlineMs / 1000)}s) …`;
+              i.editReply({ content: msg }).catch(() => {});
+            },
+          });
+        } catch (e) { warn('/server restart:', e.message); }
+
+        if (result === 'started' || result === 'already-online') {
+          _outage.active = false;
+          _outage.autoRestartTried = false;
+          try { await transport.ensureConnected({ timeoutMs: 12000 }); } catch { /* will reconnect */ }
+          maybeScheduleIdleRelease();
+          return i.editReply(transport.isConnected()
+            ? '🟢 Server läuft und ist verbunden.'
+            : '🟢 Server gestartet — Verbindung wird aufgebaut.');
+        }
+        return i.editReply(result === 'no-cmd' || result === 'no-base-url'
+          ? '❌ Kein Auto-Start konfiguriert (SERVER_START_CMD fehlt).'
+          : '❌ Server-Start fehlgeschlagen (Timeout).');
+      }
+      return;
     }
 
     if (i.commandName === 'join') {
       _textChannel = i.channel;
+      // Remember who started the session (for outage notifications) and reset
+      // any stale outage state from a previous session.
+      _sessionOwner = { interaction: i, userId: i.user.id };
+      _outage.active = false;
+      _outage.autoRestartTried = false;
       const member = await i.guild.members.fetch(i.user.id);
       const channel = member.voice.channel;
       if (!channel) return i.reply({ content: 'Du bist in keinem Voice-Channel.', flags: MessageFlags.Ephemeral });
@@ -299,6 +450,12 @@ client.on('interactionCreate', async (i) => {
         renderStatus();
       }).catch((err) => warn('join: ensureServerReachable failed:', err.message));
 
+      // Open the control link for this session (lazy — closed again on /leave).
+      // Don't block the join on it: if it isn't ready in time we still join and
+      // record locally; the control client keeps reconnecting during the session.
+      try { await transport.ensureConnected({ timeoutMs: 12000 }); }
+      catch (e) { debug('join: control link not ready yet:', e.message); }
+
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: channel.guild.id,
@@ -327,6 +484,12 @@ client.on('interactionCreate', async (i) => {
         debug('voice:', oldState.status, '->', newState.status);
         if (newState.status === VoiceConnectionStatus.Ready) {
           log('voice: ready — receiver active');
+        } else if (oldState.status === VoiceConnectionStatus.Ready) {
+          // Left READY (voice reconnect / move / disconnect): the decryption
+          // context of any in-flight receive stream is now stale and would
+          // yield corrupt Opus. Tear the recorders down; fresh speaking.start
+          // events after READY re-subscribe with the new secret key.
+          disposeAllRecordings('voice left READY');
         }
       });
 
@@ -385,6 +548,13 @@ client.on('interactionCreate', async (i) => {
       receiver.speaking.on('start', (userId) => {
         debug('speaking: start userId=', userId);
         if (userId === client.user.id) return; // bot's own voice, ignore
+        // Only subscribe once the voice connection is READY. Packets received
+        // before the secret key is established (e.g. speaking events that fire
+        // during 'connecting') decrypt to garbage → corrupt Opus → crash.
+        if (connection.state.status !== VoiceConnectionStatus.Ready) {
+          debug('speaking: ignoring start (voice not ready) for', userId);
+          return;
+        }
         transport.speakingStart(userId);
         if (activeRecordings.has(userId)) {
           debug('already recording, skip start for', userId);
@@ -404,9 +574,12 @@ client.on('interactionCreate', async (i) => {
             debug('chunk saved:', u.file, u.durationMs + 'ms');
           }
         });
-        const p = rec.subscribe()
-          .finally(() => activeRecordings.delete(userId));
-        activeRecordings.set(userId, p);
+        activeRecordings.set(userId, rec);
+        // subscribe() never rejects (errors end the chunk gracefully); .catch is
+        // a belt-and-suspenders guard so a stray rejection can never crash.
+        rec.subscribe()
+          .catch((e) => warn('recorder failed for', userId, e.message))
+          .finally(() => { if (activeRecordings.get(userId) === rec) activeRecordings.delete(userId); });
       });
 
       receiver.speaking.on('end', (userId) => {
@@ -436,6 +609,7 @@ client.on('interactionCreate', async (i) => {
     if (i.commandName === 'leave') {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
+      disposeAllRecordings('leave');
       transport.clearVoiceConnection();
       // Leaving voice does NOT end the session. Recording resumes on the next
       // /join within the idle window; finalize (manual /finalize or the
@@ -444,6 +618,11 @@ client.on('interactionCreate', async (i) => {
       if (wireId) transport.voiceState({ sessionId: wireId, state: 'left' });
       sessions.touch();
       _activeVoiceChannelId = null;
+      _outage.active = false;
+      _outage.autoRestartTried = false;
+      // Idle now (no voice session) → drop the server link after a short grace
+      // (lets the 'left' above flush and survives an immediate re-/join).
+      maybeScheduleIdleRelease();
       await i.reply({
         content: 'Voice-Channel verlassen. Session bleibt offen – mit `/join` fortsetzen oder via `/finalize` abschließen (sonst automatisch nach Inaktivität).',
         flags: MessageFlags.Ephemeral,
@@ -606,6 +785,15 @@ client.on('messageCreate', async (message) => {
     if (!question) return;
 
     _textChannel = message.channel;
+    // Control link is opened lazily — establish it on demand for this query.
+    if (!transport.isConnected()) {
+      try { await transport.ensureConnected({ timeoutMs: 12000 }); }
+      catch {
+        maybeScheduleIdleRelease();
+        await message.reply('Server nicht erreichbar. Mit `/join` starten oder `/server restart`.');
+        return;
+      }
+    }
     const sent = askServer({
       question,
       tts: false,
@@ -614,6 +802,7 @@ client.on('messageCreate', async (message) => {
       userDisplayName: displayNameFor(message.member, message.author),
       source: 'mention',
     });
+    maybeScheduleIdleRelease();
     if (!sent) {
       await message.reply('Server ist noch nicht verbunden. Bitte gleich erneut versuchen oder /join nutzen.');
     }

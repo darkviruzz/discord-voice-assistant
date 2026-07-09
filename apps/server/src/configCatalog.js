@@ -599,6 +599,33 @@ export const CATALOG = [
       + 'der Server per TCP-Probe nicht erreichbar ist, um ihn zu starten. Wird pro /join '
       + 'gelesen — Änderung sofort aktiv.',
   },
+  {
+    scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_START_TIMEOUT_MS',
+    label: 'Server-Autostart: Wartezeit auf Erreichbarkeit (ms)', type: 'number',
+    def: '300000', applyMode: 'live',
+    desc: 'Wie lange (ms) nach SERVER_START_CMD auf TCP-Erreichbarkeit des Servers '
+      + 'gewartet wird, bevor der Start als fehlgeschlagen gilt. Cloud-Kaltstarts '
+      + '(Instanz-Provisionierung + Image-Pull) dauern deutlich länger als ein lokaler '
+      + 'Start (Code-Fallback ohne Wert: 30000). Wird pro /join gelesen — sofort aktiv.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_STOP_CMD',
+    label: 'Server-Auto-Stop-Kommando', type: 'string', def: '', applyMode: 'live',
+    desc: 'Optionales Shell-Kommando (z. B. SSH), das der Bot nach einer Leerlaufzeit '
+      + 'ohne aktive Session ausführt, um den Cloud-GPU-Server herunterzufahren bzw. die '
+      + 'Instanz zu zerstören (Verda-Abrechnung endet). Gegenstück zu SERVER_START_CMD. '
+      + 'Ein /join und der Beginn eines Finalize brechen einen anstehenden Stopp ab. '
+      + 'Leer = aus. Wird beim Planen des Stopps gelesen — Änderung sofort aktiv.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_STOP_DELAY_MS',
+    label: 'Server-Auto-Stop: Leerlaufzeit (ms)', type: 'number', def: '900000',
+    applyMode: 'live',
+    desc: 'Leerlaufzeit (ms) ohne aktive Session, nach der SERVER_STOP_CMD ausgeführt '
+      + 'wird. Beim Ablauf wird erneut geprüft, ob wieder eine Session läuft — nur bei '
+      + 'weiterhin Leerlauf wird gestoppt. Default 900000 (15 Minuten). Wird beim Planen '
+      + 'des Stopps gelesen — Änderung sofort aktiv.',
+  },
 
   // ======================= BOT: Daten & Session =============================
   {

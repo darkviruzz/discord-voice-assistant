@@ -12,6 +12,7 @@ import { UtteranceRecorder } from './recorder.js';
 import { buildManifest, writeManifest, uploadSession, applyRetention } from './finalize.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
+import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import * as transport from './transport/index.js';
 
@@ -61,8 +62,14 @@ function hasActiveSession() { return !!(sessions.active && _activeVoiceChannelId
 
 // Release the on-demand server link after a grace period, unless a session is
 // keeping it alive. Re-checked when the timer fires, so a /join cancels it.
+// While idle we also arm the cloud-server idle auto-stop (SERVER_STOP_CMD) —
+// a no-op unless that command is configured — so an idle cloud GPU instance is
+// eventually shut down; a /join or a starting finalize cancels it.
 function maybeScheduleIdleRelease() {
-  if (!hasActiveSession()) transport.scheduleIdleRelease({ hasWork: hasActiveSession });
+  if (!hasActiveSession()) {
+    transport.scheduleIdleRelease({ hasWork: hasActiveSession });
+    scheduleServerStop({ hasWork: hasActiveSession });
+  }
 }
 
 // Notify the /join initiator about a server-link event. Prefers an ephemeral
@@ -223,6 +230,10 @@ function detachActiveSession() {
 // status + checksum-gated retention → detach if active. Throws on failure
 // (status reverted so it can be retried).
 async function performFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
+  // Finalize needs the server alive (upload + STT + transcript build). Cancel
+  // any pending idle auto-stop so it can't fire mid-finalize — this also covers
+  // a finalize started after /leave, when the stop was already armed.
+  cancelServerStop();
   const prevStatus = session.status;
   session.status = SessionStatus.FINALIZING;
   SessionManager.save(session);
@@ -275,6 +286,12 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     session.status = prevStatus;
     SessionManager.save(session);
     throw e;
+  } finally {
+    // Finalize is done (success or failure) → re-arm the idle auto-stop. A
+    // finalize started after /leave (session already detached, so nothing else
+    // re-arms it) would otherwise leave the cloud server running indefinitely.
+    // The hasWork re-check at fire time skips the stop if a session is live.
+    scheduleServerStop({ hasWork: hasActiveSession });
   }
 }
 
@@ -387,6 +404,10 @@ client.on('interactionCreate', async (i) => {
     }
 
     if (i.commandName === 'join') {
+      // A (re-)join means the server is wanted → cancel any pending idle
+      // auto-stop before the background ensureServerReachable kicks off, so a
+      // re-join within the stop window keeps the server alive.
+      cancelServerStop();
       _textChannel = i.channel;
       // Remember who started the session (for outage notifications) and reset
       // any stale outage state from a previous session.

@@ -456,6 +456,39 @@ SERVER_START_TIMEOUT_MS=300000    # cold boot: provisioning + startup script + i
 > confirm with `--dry-run` and a real `GET /v1/instance-types` call before
 > relying on this unattended.
 
+#### Bot-triggered shutdown (`SERVER_STOP_CMD`)
+
+The counterpart to the above: `deploy/scripts/cloud-stop.sh` is built to be
+`SERVER_STOP_CMD` — once a session ends, the bot waits `SERVER_STOP_DELAY_MS`
+of idle time and then runs this command to tear the instance back down, so a
+finished session doesn't keep billing until someone remembers to destroy it
+by hand. Idempotent like `cloud-start.sh`: it finds every Verda instance named
+`VERDA_HOSTNAME` in a running/provisioning/ordered state and destroys each one
+it finds; if none match, it logs that and exits 0, so it's safe to call
+speculatively.
+
+```ini
+SERVER_STOP_CMD=/path/to/deploy/scripts/cloud-stop.sh
+SERVER_STOP_DELAY_MS=900000       # default: 15 min idle after session end
+```
+
+The bot cancels the pending stop if a new `/join` comes in, or if a finalize
+is still in flight, during that delay window — so a quick reconnect or a slow
+transcript upload never gets its server destroyed out from under it. Test
+with `cloud-stop.sh --dry-run` first — it reports which instance(s) it would
+destroy without calling the delete API.
+
+> **This permanently destroys the instance, not just stops it.** Verda bills
+> for the instance and its disk regardless of power state, so per "Destroy,
+> don't just stop" above, `cloud-stop.sh` deletes it outright — there is no
+> paused state to resume, and the next `/join` cold-boots a brand new instance
+> via `cloud-start.sh`. Data safety for that destruction: session transcript
+> events already stream to the bot host live during the session (not just at
+> the end), an upcoming automatic archive pull-back after finalize is meant to
+> bring the full audio/transcript bundle back too, and `deploy/scripts/stop.sh
+> --backup` remains available as a manual pre-destroy fallback for anything
+> else left on the volumes.
+
 ### Option B — Tailscale (lighter)
 
 ```bash

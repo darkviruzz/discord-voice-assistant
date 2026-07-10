@@ -1,17 +1,18 @@
-// Campaign context (Variante A — static file).
+// Campaign context — semantic RAG lookup with a static-file fallback.
 //
-// Reads a single hand-/Cowork-maintained file (CAMPAIGN.md) from the Obsidian
-// vault and returns it as a compact text block to prepend as a `system` message
-// for both the answer LLM and the rolling summarizer (so proper names are known
-// to be "game-relevant"). Cached with an mtime check so edits take effect
-// without a server restart.
+// When RAG_URL is set, `query` is sent to the Python RAG service (apps/rag/),
+// which returns the most relevant vault chunks for the current wake-word text.
+// When RAG is unset/unreachable/empty, this degrades to Variante A: a single
+// hand-/Cowork-maintained file (CAMPAIGN.md) read from the Obsidian vault,
+// cached with an mtime check so edits take effect without a server restart.
 //
-// The signature takes an optional `query` so this can later be swapped for a
-// semantic RAG lookup (Phase 4) without changing callers.
+// The result is prepended as a `system` block for both the answer LLM and the
+// rolling summarizer (so proper names are known to be "game-relevant").
 
 import fs from 'fs';
 import path from 'path';
 import { warn, debug } from './logger.js';
+import { queryRag, ragEnabled } from './ragClient.js';
 
 let cache = { path: null, mtimeMs: 0, content: '' };
 
@@ -40,10 +41,9 @@ function truncate(text, limit) {
   return (lastSp >= limit * 0.6 ? head.slice(0, lastSp) : head).trimEnd();
 }
 
-// Returns the campaign-context text, or '' when unavailable/disabled.
-// `query` is currently ignored (RAG hook for later).
-export function getCampaignContext(query = null) {
-  if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return '';
+// Synchronous read of the static CAMPAIGN.md (the fallback path). Returns the
+// cached/truncated file content, or '' when unavailable/disabled.
+function readCampaignFile() {
   const fp = contextFilePath();
   if (!fp) return '';
   let stat;
@@ -65,6 +65,21 @@ export function getCampaignContext(query = null) {
     warn('campaignContext: read failed:', e.message);
     return '';
   }
+}
+
+// Returns the campaign-context text for `query`, or '' when unavailable/disabled.
+//
+// Async because the RAG path is an HTTP call. When RAG_URL is set and the query
+// is non-empty, a semantic vault lookup is preferred; an empty/failed RAG result
+// transparently falls back to the static CAMPAIGN.md (existing behaviour).
+export async function getCampaignContext(query = null) {
+  if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return '';
+  if (ragEnabled() && typeof query === 'string' && query.trim()) {
+    const rag = await queryRag(query);
+    if (rag) return rag;
+    // RAG unreachable/empty → fall through to the static file.
+  }
+  return readCampaignFile();
 }
 
 // Test/diagnostic hook.

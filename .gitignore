@@ -10,6 +10,9 @@ archive/
 __pycache__/
 *.pyc
 
+# RAG: persistent ChromaDB store (rebuilt from the vault on demand)
+apps/rag/chroma/
+
 # Logs
 logs
 *.log

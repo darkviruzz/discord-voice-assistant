@@ -199,7 +199,10 @@ client.once('clientReady', async () => {
     const speaker = msg.userDisplayName || 'Spieler';
     const assistant = msg.assistantName || 'Rabenauge';
     let text;
-    if (msg.isStop) {
+    if (msg.briefing) {
+      // Session-start vault briefing — assistant-only, no player turn.
+      text = `📖 **Briefing** — ${msg.briefing}`;
+    } else if (msg.isStop) {
       text = `**[${speaker}]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
     } else {
       text = `**[${speaker}]** ${msg.question}\n**[${assistant}]** ${msg.answer ?? ''}`;

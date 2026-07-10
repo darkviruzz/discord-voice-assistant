@@ -134,23 +134,24 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
 
 Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
-- [ ] **`feature/rag-service`** — neuer Python-Dienst `apps/rag/` (FastAPI + ChromaDB + Ollama-Embeddings).
-  - Vault-Scanner: parst `.md` + Frontmatter, chunked nach `##`-Sections
+- [x] **`feature/rag-service`** — neuer Python-Dienst `apps/rag/` (FastAPI + ChromaDB + Ollama-Embeddings).
+  - Vault-Scanner: parst `.md` + Frontmatter, chunked nach `##`-Sections (`apps/rag/server.py`)
   - Embeddings via Ollama (`nomic-embed-text`) — kein zusätzlicher Service nötig
-  - Filewatcher für Re-Index
+  - Filewatcher (`watchdog`) für debounced Re-Index einzelner Notes
   - Endpunkte: `POST /query`, `POST /index`, `GET /health`
-  - Voraussetzungen: `ollama pull nomic-embed-text`, `VAULT_PATH`, `CHROMA_DIR`
+  - Env: `VAULT_PATH`, `CHROMA_DIR`, `OLLAMA_URL`, `EMBED_MODEL`, `RAG_PORT`; Start/Stop via `scripts/Start-VoiceAssistant.ps1`
+  - Voraussetzungen: `ollama pull nomic-embed-text`, eigenes venv in `apps/rag/`
 
-- [ ] **`feature/obsidian-session-start`** — Briefing beim `/join`.
-  - Server bekommt `session_start`-Event → RAG-Query mit letztem Session-Summary als Suchkontext
-  - Top-K Chunks → LLM erzeugt Briefing („Wo wir letztes Mal aufgehört haben …")
-  - Als `role: system`-Message am Anfang der `conversationHistory`
-  - Optional: Discord-Text-Nachricht mit dem Briefing
+- [x] **`feature/obsidian-per-query`** — Vault-Kontext bei jedem Wake-Word-Call.
+  - `apps/server/src/ragClient.js`: `queryRag(query, topK)` über native `fetch`, fail-soft mit Timeout (`RAG_TIMEOUT_MS`, Default 800ms)
+  - `getCampaignContext(query)` ist jetzt async: bei gesetztem `RAG_URL` semantische Suche, sonst/bei Fehler Fallback auf `CAMPAIGN.md`
+  - `buildSystemBlocks()` awaitet den Lookup; Top-K Chunks als `role: system`-Präambel (nicht in History persistiert)
 
-- [ ] **`feature/obsidian-per-query`** — Vault-Kontext bei jedem Wake-Word-Call.
-  - Async RAG-Query parallel zu STT/LLM
-  - Score-Threshold konfigurierbar
-  - Top-3 Chunks als `role: system`-Präambel (nicht in History persistiert)
+- [x] **`feature/obsidian-session-start`** — Briefing beim `/join`.
+  - `apps/server/src/sessionBriefing.js`: nach dem Live-Context-Rebuild RAG-Query mit der rekonstruierten rollenden Zusammenfassung als Suchtext
+  - Vault-Chunks als `role: system`-Message am Anfang der `conversationHistory`
+  - Optional (`RAG_BRIEFING_POST_CHAT`): LLM erzeugt kurzes Briefing → Discord-Text-Nachricht (Bot rendert `briefing`-`chat_message`)
+  - Durchgängig best-effort: No-op wenn RAG aus, kein Summary vorhanden oder ein Call fehlschlägt
 
 - [ ] **`feature/obsidian-write-notes`** *(später)* — automatische Session-Notes.
   - Format und Vault-Pfad noch offen

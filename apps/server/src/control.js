@@ -12,6 +12,7 @@ import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
+import { maybeSessionBriefing } from './sessionBriefing.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -277,8 +278,12 @@ export function initControlWSS({ bearer } = {}) {
             log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId, msg.resume ? '(resume)' : '(new)');
             // Rebuild the live-transcript context from the JSONL (resume, or any
             // start where the buffer is still empty). Fire-and-forget — must not
-            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off.
-            rebuildLiveContext(startedSession, activeSessionId).catch((e) => warn('live-context rebuild failed:', e.message));
+            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. Once the
+            // rolling summary is reconstructed, use it to pull a vault briefing
+            // (Phase 4); also best-effort, never blocks the ack.
+            rebuildLiveContext(startedSession, activeSessionId)
+              .then(() => maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId }))
+              .catch((e) => warn('live-context rebuild/briefing failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

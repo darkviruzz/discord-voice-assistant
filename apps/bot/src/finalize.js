@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { log, warn, debug } from './logger.js';
+import { httpBaseUrl } from './transport/index.js';
 
 // Build the finalize manifest the server needs: per-utterance WAV basenames
 // with checksums + absolute-on-bot-clock timing derived from the session.
@@ -79,25 +80,78 @@ export function writeManifest(session, manifest) {
   return fp;
 }
 
-// Upload the session's WAVs to the server via a user-configured command
-// template (FINALIZE_UPLOAD_CMD). Placeholders: {src} = local chunks dir,
-// {sessionId}. The command must land the WAVs at
-// <server FINALIZE_UPLOAD_DIR>/<sessionId>/<basename>.wav.
-// When unset, upload is skipped (bot+server share a filesystem, or the WAVs
-// were placed there by other means) and finalize proceeds.
+// Upload the session's WAVs (+ manifest.json) to the server so finalize can
+// re-STT and archive them. Three modes, in priority order:
+//
+//   1. FINALIZE_UPLOAD_CMD set → run that command template (legacy LAN/Windows
+//      profile, e.g. scp/SSH). Placeholders: {src} = local chunks dir,
+//      {sessionId}. Must land the files at <server FINALIZE_UPLOAD_DIR>/
+//      <sessionId>/<basename>. UNCHANGED from before.
+//   2. Otherwise, if a server base URL is configured (SERVER_BASE_URL, via
+//      httpBaseUrl()) → HTTP upload straight over the existing connection: one
+//      PUT /finalize/upload/<sessionId>/<basename> per file. This is the new
+//      default and the only transport that works for the WireGuard-only cloud
+//      instance (no scp target).
+//   3. No command and no base URL → skip (bot+server share a filesystem, or a
+//      local no-server setup); finalize proceeds assuming the WAVs are already
+//      there. Preserves the original skip behaviour.
 export async function uploadSession(session) {
   const tmpl = process.env.FINALIZE_UPLOAD_CMD;
   const src = sourceChunksDir(session);
   const sessionId = String(session.startedAt);
-  if (!tmpl || !tmpl.trim()) {
-    warn('finalize: FINALIZE_UPLOAD_CMD not set — skipping upload (assuming server already has the WAVs)');
+
+  // Mode 1: legacy command template — path preserved verbatim.
+  if (tmpl && tmpl.trim()) {
+    const cmd = tmpl.replaceAll('{src}', src).replaceAll('{sessionId}', sessionId);
+    debug('finalize: upload cmd:', cmd);
+    await runShell(cmd);
+    log('finalize: uploaded WAVs for session', sessionId);
+    return { uploaded: true, skipped: false, method: 'cmd' };
+  }
+
+  // Mode 3: nothing configured → skip (unchanged from the original behaviour).
+  const base = httpBaseUrl();
+  if (!base) {
+    warn('finalize: no FINALIZE_UPLOAD_CMD and no SERVER_BASE_URL — skipping upload (assuming server already has the WAVs)');
     return { uploaded: false, skipped: true };
   }
-  const cmd = tmpl.replaceAll('{src}', src).replaceAll('{sessionId}', sessionId);
-  debug('finalize: upload cmd:', cmd);
-  await runShell(cmd);
-  log('finalize: uploaded WAVs for session', sessionId);
-  return { uploaded: true, skipped: false };
+
+  // Mode 2 (new default): HTTP upload. Same source dir the scp path uses; upload
+  // the WAVs plus the manifest the server reads (<uploadDir>/manifest.json).
+  const bearer = process.env.CONTROL_BEARER || '';
+  const files = fs.readdirSync(src).filter((f) => f.endsWith('.wav') || f === 'manifest.json');
+  if (files.length === 0) {
+    warn('finalize: no WAVs/manifest to upload in', src, '— skipping');
+    return { uploaded: false, skipped: true };
+  }
+
+  // Sequential — no parallel storm over the tunnel. Content-Length is sent so
+  // the server can bound the write; duplex:'half' is mandatory for a stream
+  // body under Node 22 undici (it throws otherwise).
+  let bytes = 0;
+  for (const name of files) {
+    const fp = path.join(src, name);
+    const { size } = fs.statSync(fp);
+    const url = `${base}/finalize/upload/${sessionId}/${encodeURIComponent(name)}`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(size),
+      },
+      body: fs.createReadStream(fp),
+      duplex: 'half',
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`finalize upload of ${name} failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+    }
+    bytes += size;
+    debug('finalize: uploaded', name, `(${size}B)`);
+  }
+  log('finalize: uploaded', files.length, 'file(s),', bytes, 'bytes for session', sessionId, 'via HTTP');
+  return { uploaded: true, skipped: false, method: 'http', files: files.length, bytes };
 }
 
 function runShell(cmd) {

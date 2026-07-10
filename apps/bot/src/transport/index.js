@@ -55,6 +55,22 @@ function deriveBaseUrl() {
   return null;
 }
 
+// Base URL for plain HTTP calls to the server (finalize upload). Reuses the
+// same source as the ws transport (deriveBaseUrl: SERVER_BASE_URL, else the
+// CONTROL_WS_URL fallback) and rewrites the ws/wss scheme to http/https so a
+// single config drives both the socket and the upload. Trailing slashes are
+// stripped; returns null when no server is configured (caller then skips the
+// upload — the local no-server profile). Scheme normalization mirrors
+// parseHostPort() in serverAutoStart.js.
+export function httpBaseUrl() {
+  const base = deriveBaseUrl();
+  if (!base) return null;
+  return base
+    .replace(/^wss:/i, 'https:')
+    .replace(/^ws:/i, 'http:')
+    .replace(/\/+$/, '');
+}
+
 export function start({ botId, isSessionActive } = {}) {
   if (_instance) return _instance;
   if (isSessionActive) _isSessionActive = isSessionActive;

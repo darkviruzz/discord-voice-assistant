@@ -9,6 +9,7 @@ import { initControlWSS } from './control.js';
 import { checkBearer } from './auth.js';
 import { getVersion } from './version.js';
 import { registerDebugTtsRoute } from './debugTts.js';
+import { registerFinalizeHttpRoutes } from './finalizeHttp.js';
 import { registerTranscriptRoutes } from './transcriptApi.js';
 import { registerConfigRoutes } from './configApi.js';
 
@@ -18,6 +19,7 @@ const app = express();
 app.use(express.json({ limit: '32kb' }));
 app.get('/health', (_req, res) => res.json({ ok: true, t: Date.now() }));
 registerDebugTtsRoute(app);
+registerFinalizeHttpRoutes(app); // PUT /finalize/upload/:sessionId/:filename — bot streams session WAVs (bearer from CONTROL_BEARER)
 registerTranscriptRoutes(app); // mountet u.a. app.use('/transcript', auth) — vor den Config-Routen
 registerConfigRoutes(app);     // /transcript/config (GET/PUT), teilt sich die Transkript-Auth
 app.post('/shutdown', (_req, res) => {

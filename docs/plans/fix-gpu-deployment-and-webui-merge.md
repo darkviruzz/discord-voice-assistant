@@ -1,9 +1,33 @@
 # Plan: fix GPU-Deployment dependencies and prepare live transcript web-UI merge
 
-Ausführungsplan für Folge-Sessions (Sonnet/Opus). Kontext: Cloud-GPU-Deployment
-(Verda, ephemere Instanzen, WireGuard-Tunnel zu Proxmox) funktioniert end-to-end;
-`finalize` ist auf der Cloud-Instanz kaputt (2 Root Causes, unten). Branch
-`claude/gpu-cloud-deployment-msrcy3` = PR #11, konfliktfrei gegen `main`.
+> **Status 2026-07-10:** Phase A ist erledigt (PR #11 gemergt, v2.0.0 getaggt
+> und Images published) bzw. durch **PR #12** (`feat/unified-deploy`) ersetzt:
+> va-CLI, Slots prod/test, dynamische Startup-Script-Registrierung pro Launch,
+> Env-Layering mit Secrets in `~/.config/va/deploy.env` — verbindlicher
+> Kontrakt in `docs/deploy-architecture.md`. `VERDA_STARTUP_SCRIPT_ID` und die
+> manuelle Regeneration existieren nicht mehr. Offen sind: die
+> **Rollout-Checkliste** unten (User, bot-host), **Phase B** (Finalize-
+> Dataflow — DAS ist der Grund, warum das fertige Transkript/Archiv nach dem
+> Server-Shutdown noch NICHT auf dem Bot liegt) und **Phase D**.
+
+## Ausführungskontext für Folge-Sessions (WICHTIG zuerst lesen)
+
+Die weitere Umsetzung passiert voraussichtlich in einer **Cloud-Instanz von
+Claude Code** (arbeitet auf einem frischen Clone dieses Repos). Für die gilt:
+
+- **Kein Zugriff** auf LAN/bot-host (192.168.20.21), Proxmox, den
+  WireGuard-Tunnel oder laufende Verda-Instanzen. SSH-Schlüssel und
+  `~/.config/va/deploy.env` existieren dort nicht und dürfen dort auch
+  **nicht hinterlegt werden** (keine Secrets in Cloud-Sandboxes).
+- Was dort GEHT: gesamte Phase B/D-Implementierung (reiner Repo-Code),
+  `npm test` (117 Tests), `node --check`, `bash -n`,
+  `cloud-start.sh --dry-run` (arbeitet offline, Secrets via Dummy-Datei —
+  Muster: `VA_DEPLOY_ENV=/tmp/dummy.env` mit erfundenen Werten), Docker-Builds
+  falls die Umgebung Docker hat.
+- Was dort NICHT geht und als expliziter Rest für User/lokale Session zu
+  hinterlassen ist: alles in der Verifikations-Matrix mit „bot-host/lokal".
+- Branch-Konvention: neuer Branch **von `main` NACH dem Merge von PR #12**.
+  Vorher lohnt kein Start (Phase B baut auf dem neuen Deploy-Weg auf).
 
 **Arbeitsteilung:** Schritte ohne Markierung = Sonnet reicht.
 `[OPUS]` = fehleranfällig/architektonisch → stärkeres Modell nehmen.
@@ -19,9 +43,12 @@ Ausführungsplan für Folge-Sessions (Sonnet/Opus). Kontext: Cloud-GPU-Deploymen
 | Proxmox | `pve-jn`, WG `10.10.0.1`, wg0.conf-Peer für Instanz-Pubkey `PgXopBtYrEHctHqF99+5vBoXIWPFkgwOI2slHdjWnVo=` |
 | GPU-Instanz | immer `10.10.0.2` (Tunnel-IP fix), Hostname `va-gpu`, Server-Port 7440 |
 | SSH zur Instanz | `ssh -i ~/.ssh/verda-a6000 root@<öffentliche-IP>` (Windows-Host); auf bot-host: `~/.ssh/id_verda` |
-| CONTROL_BEARER | `a453a09f3ef52838f116bd0cb1353162435b5e7808ea064c824a61a1c9e488ae` (deploy/.env auf Instanz + apps/bot/.env auf Bot) |
-| Verda-Config | `/etc/discord-bot-verda.env`: CLIENT_ID/SECRET, SSH_KEY_ID, STARTUP_SCRIPT_ID, LOCATION_PREFIX=FIN, OS_IMAGE=`ubuntu-22.04-cuda-12.4-docker` (NIE bare ubuntu-22.04 — kein Docker/CUDA!), MAX_HOURLY, ALLOW_SPOT |
-| Startup-Script | registriert bei Verda via `POST /v1/scripts`; generiert von `deploy/scripts/gen-verda-startup.sh`; WG-Privatekey liegt auf bot-host `/root/boot_private.key` — bei Regenerierung WIEDERVERWENDEN, sonst muss Proxmox-Peer geändert werden |
+| CONTROL_BEARER | (secret — liegt in deploy/.env auf der Instanz + apps/bot/.env auf dem Bot; stand bis 2026-07-09 hier im Klartext → **vor Repo-public rotieren**) |
+| Verda-Config | Ziel-Zustand: `~/.config/va/deploy.env` auf dem bot-host (Schema in `docs/deploy-architecture.md`); Alt-Bestand `/etc/discord-bot-verda.env` (systemd-EnvironmentFile) gewinnt als Prozess-Env weiterhin über die Datei — beides koexistiert. `VERDA_STARTUP_SCRIPT_ID` ist obsolet (wird ignoriert). OS_IMAGE=`ubuntu-22.04-cuda-12.4-docker` (NIE bare ubuntu-22.04 — kein Docker/CUDA!) |
+| Startup-Script | seit PR #12 **dynamisch pro Launch**: `cloud-start.sh` generiert + registriert via `POST /v1/scripts` (`va-<slot>-<slug>-<epoch>`) und räumt alte auf. WG-Privatekey = `VA_WG_KEY_PROD` in deploy.env (Wert stammt aus `/root/boot_private.key`) — NIE rotieren ohne Proxmox-Peer-Update |
+| Slots | prod = `va-gpu`/10.10.0.2, test = `va-gpu-test`/10.10.0.3 (eigener Key `VA_WG_KEY_TEST`, Proxmox-Peer einmalig nötig); parallel betreibbar; exakter Hostname-Match überall |
+| va-CLI | `deploy/va`: `local up/down/status/logs`, `remote up/down/status/logs/ssh --slot --ref`, `bot update/switch/status/logs`, `env show` (maskiert) |
+| Bot-Host-Stand (2026-07-10) | Checkout ist noch `feature/streaming-stt @ 959785a` (v1.6.0!) — hat WEDER transcriptWriter (Live-JSONL-Empfang) NOCH SERVER_STOP_CMD/Watchdog NOCH das neue cloud-start. **Erster Rollout-Schritt = auf main bringen** |
 | Route Bot→Tunnel | systemd-Unit `va-tunnel-route.service` auf bot-host (`ip route replace 10.10.0.0/24 via 192.168.20.4`) |
 | Web-UI | nur auf `main` (`/transcript`, Basic-Auth greyhawk/greyhawk, configApi.js Live-Settings) — NICHT auf PR-#11-Branch |
 
@@ -37,39 +64,74 @@ Ausführungsplan für Folge-Sessions (Sonnet/Opus). Kontext: Cloud-GPU-Deploymen
 
 ---
 
-## Phase A — Merge & Release v2.0.0 (User führt Merge selbst aus)
+## Phase A — ERLEDIGT (bzw. durch PR #12 ersetzt)
 
-1. User merged PR #11 (`gh pr merge 11 --merge`).
-2. `git checkout main && git pull`.
-3. Version-Bump auf `2.0.0` in GENAU 3 Dateien (Muster = Commit 959785a):
-   `apps/bot/package.json`, `apps/server/package.json`, `package-lock.json`
-   (dort 2 Stellen: unter `"apps/bot"` und `"apps/server"`).
-   Commit: `chore: release 2.0.0 — cloud GPU deployment` + Co-Authored-By-Zeile.
-4. `git tag v2.0.0 && git push origin main v2.0.0` → CI (`build-images.yml`,
-   Trigger `tags: v*`) published `va-server|va-piper|va-whisper:v2.0.0` nach GHCR.
-   Prüfen: `gh run list --limit 3` (dauert ~5 min dank Cache, NICHT 1.5h).
-5. Startup-Script regenerieren — auf **bot-host**:
-   ```
-   cd ~/discord-voice-assistant && git checkout main && git pull
-   WG_PRIVATE_KEY="$(sudo cat /root/boot_private.key)" \
-   WG_HOME_PUBKEY="qvQpI+2Q8osKihzsBFhos5YgweclBx6Mb4S3NgAc7Ck=" \
-   WG_ENDPOINT="a6x298v3ofbem8xx.myfritz.net:51820" \
-   GH_USER="darkviruzz" GH_PAT="<aktueller PAT>" \
-   CONTROL_BEARER="<siehe Tabelle>" \
-   GIT_BRANCH="main" IMAGE_TAG="v2.0.0" \
-   ./deploy/scripts/gen-verda-startup.sh > /root/verda-startup-v2.sh
-   ```
-   Dann via Verda-API neues Script registrieren (`POST /v1/scripts`, Body
-   `{name, script}`), neue ID in `/etc/discord-bot-verda.env` als
-   `VERDA_STARTUP_SCRIPT_ID` eintragen, altes Script per DELETE aufräumen,
-   `/root/verda-startup-v2.sh` löschen. **PAT niemals in Chat/Logs ausgeben.**
-6. Erst DANACH Feature-Branch löschen.
-7. Web-UI-Erreichbarkeit (schon dokumentiert in deploy/README.md "Web UI access"):
-   nginx-Reverse-Proxy auf bot-host 192.168.20.21:7440 → 10.10.0.2:7440 einrichten
-   (Config steht wörtlich im README; SSE braucht `proxy_buffering off`).
-   Vor jeder späteren Cloudflared-Veröffentlichung: `TRANSCRIPT_UI_USER/_PASS` ändern!
+Schritte 1–4 sind durch: PR #11 gemergt, Version 2.0.0 (`ecafcb3`),
+`v2.0.0`-Images published. Schritt 5 (Startup-Script-Regeneration) ist
+**ersatzlos entfallen** — PR #12 registriert Scripts dynamisch pro Launch.
+
+## Rollout-Checkliste (User, nach Merge von PR #12 — Reihenfolge einhalten!)
+
+R1. **PR #12 mergen** (`feat/unified-deploy`).
+R2. **bot-host auf main bringen** (der Checkout ist noch
+    `feature/streaming-stt`! Erster Wechsel manuell, danach gibt es `va bot`):
+    ```bash
+    cd ~/discord-voice-assistant && git fetch origin \
+      && git checkout main && git pull --ff-only \
+      && npm ci --omit=dev && sudo systemctl restart discord-bot
+    ```
+R3. **`~/.config/va/deploy.env` anlegen** (einmalig, als root auf bot-host —
+    zieht die Werte aus dem Alt-Bestand zusammen, nichts landet im Chat):
+    ```bash
+    sudo bash -c '
+    umask 077; mkdir -p ~discordbot/.config/va
+    {
+      grep -E "^(VERDA_CLIENT_ID|VERDA_CLIENT_SECRET|VERDA_SSH_KEY_ID|VERDA_LOCATION_PREFIX|VERDA_OS_IMAGE|VERDA_MAX_HOURLY|VERDA_ALLOW_SPOT|VERDA_MIN_VRAM_GB|VERDA_OS_VOLUME_SIZE_GB)=" /etc/discord-bot-verda.env
+      echo "VA_WG_KEY_PROD=$(cat /root/boot_private.key)"
+      echo "WG_HOME_PUBKEY=qvQpI+2Q8osKihzsBFhos5YgweclBx6Mb4S3NgAc7Ck="
+      echo "WG_ENDPOINT=a6x298v3ofbem8xx.myfritz.net:51820"
+      grep -E "^CONTROL_BEARER=" ~discordbot/discord-voice-assistant/apps/bot/.env
+    } > ~discordbot/.config/va/deploy.env
+    chown -R discordbot:discordbot ~discordbot/.config/va
+    chmod 600 ~discordbot/.config/va/deploy.env
+    '
+    ```
+    Check danach als discordbot: `./deploy/va env show` (Werte maskiert) und
+    `./deploy/va remote up --dry-run` (druckt redactetes Startup-Script).
+R4. **GHCR-Packages public** stellen (GitHub → Packages → `va-server`,
+    `va-piper`, `va-whisper` → Change visibility). Alternativ (falls privat
+    bleiben soll): `GH_USER`/`GH_PAT` (read:packages) in die deploy.env.
+R5. **Erster echter Deploy** = einfach `/join` in Discord (Bot ruft
+    `SERVER_START_CMD` → neues cloud-start) — oder manuell:
+    `./deploy/va remote up` bzw. `--slot test --ref <branch>` für Branch-Tests.
+    Dabei Phase-D-Punkt 2 abhaken (Server-Log muss v2.0.0 zeigen).
+R6. **Erst NACH erfolgreichem R5**: altes Startup-Script im Verda-Dashboard
+    löschen und Branch `claude/gpu-cloud-deployment-msrcy3` löschen. (Vorher
+    NICHT — bis zur Migration ist das alte Dashboard-Script der einzige
+    funktionierende /join-Pfad, und es klont genau diesen Branch.)
+R7. **Web-UI-Reverse-Proxy** (unverändert offen, nur von LAN/bot-host machbar):
+    nginx auf bot-host `192.168.20.21:7440 → 10.10.0.2:7440` (Config wörtlich
+    in deploy/README.md „Web UI access"; SSE braucht `proxy_buffering off`).
+    Vor jeder Cloudflared-Veröffentlichung: `TRANSCRIPT_UI_USER/_PASS` ändern!
+R8. **Vor Repo-public** (unabhängig vom Rest): `CONTROL_BEARER` rotieren
+    (`openssl rand -hex 32`; eintragen in apps/bot/.env + deploy.env auf
+    bot-host + apps/server/.env auf dem Windows-Rechner — Instanzen bekommen
+    ihn ab dann automatisch), `verda-test/soft-love-smashes-fin-01.ppk` lokal
+    löschen (privater Key!), Lizenz-Entscheidung.
 
 ## Phase B — Neuer Branch `fix/finalize-cloud-dataflow` von main
+
+**Warum:** `/leave` funktioniert; Live-Transkript-Events (JSONL) streamen nach
+dem Bot-Update (R2) live nach `~/transcripts` auf den Bot-Host und überleben
+das Instanz-Zerstören. Aber `finalize` ist auf der Cloud-Instanz **kaputt**
+(C1: Volume-Rechte, C2: kein Upload-Weg), und selbst wenn es liefe, bliebe
+das Ergebnis (transcript.md, Audio-Archiv, speaker-map) auf der ephemeren
+Instanz liegen und stirbt mit ihr (C3 fehlt). `stop.sh --backup` ist bis
+dahin der einzige manuelle Rettungsweg.
+
+**Cloud-Session-tauglich:** komplett (reiner Repo-Code: apps/server,
+apps/bot, Dockerfile). Verifikation per `npm test` + Syntax-Checks dort;
+die Live-Verifikation (unten) bleibt für User/lokale Session.
 
 ### C1. [OPUS] Volume-Ownership-Fix (Root Cause aller EACCES)
 
@@ -137,25 +199,39 @@ Bot, `apps/bot/src/finalize.js` `uploadSession()`:
 
 ## Phase D — Offene, separate Bugs (nicht Teil des Dataflow-Umbaus)
 
-1. **TTS-Playback bricht ab** [OPUS]: Bot-Log zeigt
+1. **TTS-Playback bricht ab** [OPUS]: Bot-Log zeigte
    `tts-playback: start` → sofort `stopped`, für BEIDE Requests, obwohl Server
    `debug-tts: done frames=71` meldet. Keine Audio-Ausgabe im Channel. Verdacht:
    Playback/Barge-in-Logik in `apps/bot/src/audio/`-Pfad (FIFO-Playback,
    downlink.js) — reproduzieren mit `/join` + „Hey Rabenauge", dann
-   downlink.js/ttsStream-Logs beidseitig vergleichen. Erst NACH dem main-Merge
-   angehen (Streaming-Rewrite von main könnte den Bug schon ändern/beheben).
+   downlink.js/ttsStream-Logs beidseitig vergleichen. ACHTUNG: Beobachtung
+   stammt vom ALTEN Bot-Stand (v1.6.0/Streaming-Branch, läuft dort bis R2);
+   erst nach R2+R5 auf main reproduzieren — der gemergte Streaming-Rewrite
+   kann den Bug verändert/behoben haben. Erst Repro, dann Code anfassen.
 2. **Server-Version im Cloud-Image alt**: Log zeigte `server v1.4.1` obwohl
    Branch-Image — nach v2.0.0-Tag verifizieren, dass Instanz `v2.0.0` loggt.
 3. **Rabenauge-Kontext**: CAMPAIGN_REMOTE ist leer → Campaign-Volume leer →
    LLM ohne Kampagnen-Kontext. rclone-Setup (README „Campaign data") einrichten,
    wenn gewünscht.
 
-## Verifikation (nach Phase B/C, echte Instanz)
+## Verifikations-Matrix (nach Phase B — WO läuft was)
 
-1. `docker compose -p va exec server ls -la /data` → alles `app app`.
-2. Session aufnehmen, `/finalize run` → Server-Log: PUTs kommen an, keine EACCES,
-   `finalize_result ok:true`, 0 missing/mismatched.
-3. Bot-Host: `~/archive/<archiveName>/` enthält transcript.md, manifest.json,
+**Cloud-Claude-Code-Session** (kann sie selbst):
+1. `npm test` grün (vorher 117/117), `node --check` auf allen geänderten
+   JS-Dateien, `bash -n` auf Shell-Dateien.
+2. `docker build -f apps/server/Dockerfile .` (falls Docker verfügbar) —
+   Entrypoint/USER-Änderung aus C1 baut sauber.
+3. Upload-/Manifest-Routen per Unit-Test o. lokalem Server-Start + curl
+   (kein GPU nötig: die finalizeHttp-Routen sind reine Datei-/HTTP-Logik).
+
+**User / lokale Session mit LAN-Zugriff (echte Instanz, `--slot test` nehmen!):**
+4. `./deploy/va remote up --slot test --ref fix/finalize-cloud-dataflow`, dann
+   `docker compose -p va exec server ls -la /data` → alles `app app`.
+5. Session aufnehmen, `/finalize run` → Server-Log: PUTs kommen an, keine
+   EACCES, `finalize_result ok:true`, 0 missing/mismatched.
+6. Bot-Host: `~/archive/<archiveName>/` enthält transcript.md, manifest.json,
    speaker-map.json, audio/* — ohne stop.sh.
-4. `~/transcripts/session_*.jsonl` wächst live während der Session (Regression-Check).
-5. LAN-Profil-Regression: mit gesetztem FINALIZE_UPLOAD_CMD bleibt Verhalten alt.
+7. `~/transcripts/session_*.jsonl` wächst live während der Session
+   (Regression-Check fürs Live-Streaming).
+8. LAN-Profil-Regression: mit gesetztem FINALIZE_UPLOAD_CMD bleibt Verhalten alt.
+9. Aufräumen: `./deploy/va remote down --slot test`.

@@ -55,6 +55,32 @@ the cloud you let `start.sh`/`stop.sh` pull/push via rclone.
 
 ---
 
+## The `va` CLI (one entry point for every deploy)
+
+`deploy/va` wraps all of the above behind one command
+(contract: `docs/deploy-architecture.md`):
+
+```bash
+va local  up|down|status|logs   [--profile cuda|windows-native] [--ref R]
+va remote up|down|status|logs|ssh [--slot prod|test] [--ref R] [--image-tag T] [--dry-run]
+va bot    update|switch R|status|logs      # run ON the bot host
+va env    show [--profile P] [--slot S]    # effective layered env, secrets masked
+```
+
+- **`va local up`** — this machine. `cuda` merges the env layers into
+  `deploy/.env` and runs `start.sh` (same path the instance takes);
+  `windows-native` (auto-picked on Windows) delegates to `deploy/va.ps1`,
+  which wraps `scripts/Start-VoiceAssistant.ps1`.
+- **`va remote up --slot test --ref feat/x`** — boots a parallel test
+  instance with that branch; prod keeps running. `va remote down --slot test`
+  destroys it again.
+- **`va bot switch feat/x`** — checkout + `npm ci` + restart on the bot host.
+  Works because all secrets/host config live OUTSIDE the worktree in
+  `~/.config/va/deploy.env` (layering: flags/process env → deploy.env →
+  `deploy/env/<profile>.env` → `deploy/.env.example`).
+
+---
+
 ## Choosing a provider
 
 Two design goals drive the choice: **portability** (what you debug on a cheap
@@ -356,35 +382,34 @@ wg genkey | tee privatekey | wg pubkey > publickey
 > The instance dials **out** to the home endpoint (`PersistentKeepalive`), so no
 > inbound port on the cloud provider is required.
 
-#### Zero-touch: Verda startup script
+#### Zero-touch: Verda startup script (dynamic, per launch)
 
 Verda instances support a "startup script" that runs automatically on first
-boot (`verda startup-script add` or via the dashboard). `deploy/scripts/gen-verda-startup.sh`
-generates one that brings up the WireGuard tunnel, clones the repo, writes
-`deploy/.env`, logs into GHCR, and runs `start.sh` — so a fresh instance is
-fully healthy by the time you SSH in, no manual setup at all.
+boot. You do **not** manage these by hand anymore: `cloud-start.sh` generates
+one per launch (via `deploy/scripts/gen-verda-startup.sh`), registers it
+through `POST /v1/scripts` as `va-<slot>-<slug>-<epoch>`, boots the instance
+with it, and afterwards deletes older `va-<slot>-*` scripts. The script brings
+up the WireGuard tunnel, clones the requested git ref, writes `deploy/.env`
+(with the matching image tag), and runs `start.sh` — a fresh instance is fully
+healthy by the time you could SSH in.
 
-The generator itself holds no secrets (safe to commit); it reads them from
-env vars and bakes them into its *output*, which you must **not** commit:
+Because registration happens per launch, deploying a branch or a new release
+needs **no dashboard visit and no re-registration ritual** — the old
+`VERDA_STARTUP_SCRIPT_ID` config knob is gone entirely. Inputs come from the
+per-host env file `~/.config/va/deploy.env` (see the launch section below).
 
-```bash
-WG_PRIVATE_KEY=...      # reuse the SAME key across instances — see below
-WG_HOME_PUBKEY=...      # Proxmox's public key (from `wg show` on the instance)
-WG_ENDPOINT=yourdomain.myfritz.net:51820 \
-GH_USER=... GH_PAT=...  # read:packages + repo scope, give it a real expiry
-CONTROL_BEARER=...      # must match apps/bot/.env
-IMAGE_TAG=...           \
-./deploy/scripts/gen-verda-startup.sh > verda-startup.sh
-```
-
-Paste `verda-startup.sh`'s content into Verda's startup-script field. Reuse
-the **same** `WG_PRIVATE_KEY` on every regeneration — that's what lets
-Proxmox's peer entry stay untouched forever; only its matching public key
-needs to be registered on Proxmox once (see "Bot side" below).
+Reuse the **same** WireGuard key per slot forever (`VA_WG_KEY_PROD` /
+`VA_WG_KEY_TEST`) — that's what lets Proxmox's peer entries stay untouched;
+only each slot's public key is registered on Proxmox once (see "Bot side").
 
 > **Security note:** Verda's startup scripts are stored as plain text (no
 > encrypted secret store) — same trust tier as the SSH key already living
-> there. Rotate `GH_PAT` periodically and scope it to `read:packages` only.
+> there. With the repo and GHCR packages public, no `GH_PAT` is baked in at
+> all (anonymous clone + pull); only the WireGuard key and `CONTROL_BEARER`
+> remain in that store, and both are rotatable without touching the repo.
+> Inspect what gets baked with `cloud-start.sh --dry-run` — it prints the
+> generated script with every secret value replaced by `«redacted»` and makes
+> no API calls.
 
 #### Bot-triggered launch (`SERVER_START_CMD`)
 
@@ -396,29 +421,52 @@ elapses. `deploy/scripts/cloud-start.sh` is built to be that command for the
 Verda path — it launches a fresh instance via the Verda Cloud API, so the bot
 can bring its own server up with no manual step.
 
-One-time setup (needs the `verda` CLI, authenticated via `verda auth login`
-with Cloud API credentials from console.verda.com under **Keys**):
-
-```bash
-verda ssh-key add                # your existing pubkey -> note the returned ID
-verda startup-script add          # paste gen-verda-startup.sh's output -> note the returned ID
-```
-
-Then configure `cloud-start.sh` (env vars — put in e.g. `deploy/verda.env` on
-Proxmox and source it, or export in the bot's systemd unit environment):
+Configuration lives in the per-host deploy env file `~/.config/va/deploy.env`
+(chmod 0600, **outside the worktree** so branch switches never touch it;
+override the path with `VA_DEPLOY_ENV`). Process/systemd env always wins over
+the file — the file only fills gaps, so the same script works under the bot's
+systemd unit and standalone over SSH. Full schema in
+`docs/deploy-architecture.md`; the essentials:
 
 ```ini
+# Verda API (console.verda.com -> Keys)
 VERDA_CLIENT_ID=...
 VERDA_CLIENT_SECRET=...
-VERDA_SSH_KEY_ID=...              # from `verda ssh-key add`
-VERDA_STARTUP_SCRIPT_ID=...       # from `verda startup-script add`
-VERDA_LOCATION_PREFIX=FIN         # only consider locations starting with this (FIN-01/02/03 all match)
-VERDA_HOSTNAME=va-gpu             # identity used for the idempotency check
-VERDA_OS_IMAGE=ubuntu-22.04-cuda-12.4-docker  # a bare "ubuntu-22.04" has no CUDA/docker preinstalled and fails at `docker login` (confirmed in testing)
-VERDA_OS_VOLUME_SIZE_GB=100
-VERDA_MIN_VRAM_GB=24
-VERDA_MAX_HOURLY=1.00             # refuses to launch above this — no silent overspend
-VERDA_ALLOW_SPOT=false            # true = rank by spot_price instead of on-demand price
+VERDA_SSH_KEY_ID=...              # one-time: register your pubkey, note the ID
+# Fixed per-slot WireGuard identities (NEVER rotate without updating the Proxmox peer)
+VA_WG_KEY_PROD=...                # legacy fallback name: WG_PRIVATE_KEY
+VA_WG_KEY_TEST=...                # only needed once you use --slot test
+WG_HOME_PUBKEY=...
+WG_ENDPOINT=yourdomain.myfritz.net:51820
+CONTROL_BEARER=...                # must match apps/bot/.env
+# Optional knobs (defaults shown):
+#VERDA_LOCATION_PREFIX=FIN        # only locations starting with this (FIN-01/02/03 all match)
+#VERDA_OS_IMAGE=ubuntu-22.04-cuda-12.4-docker  # bare "ubuntu-22.04" has no CUDA/docker and fails mid-bootstrap
+#VERDA_OS_VOLUME_SIZE_GB=100
+#VERDA_MIN_VRAM_GB=24
+#VERDA_MAX_HOURLY=1.00            # refuses to launch above this — no silent overspend
+#VERDA_ALLOW_SPOT=false           # true = rank by spot_price instead of on-demand price
+```
+
+**Slots** — a slot is a fixed remote identity; prod and test can run in
+parallel (test a feature branch while the group plays on prod):
+
+| Slot | Hostname | Tunnel IP | WG key |
+|---|---|---|---|
+| `prod` (default) | `va-gpu` | `10.10.0.2` | `VA_WG_KEY_PROD` |
+| `test` | `va-gpu-test` | `10.10.0.3` | `VA_WG_KEY_TEST` |
+
+**Refs** — any git ref is deployable; the image tag is derived automatically
+(`main` → `latest`, `vX.Y.Z` → itself, branch → `branch-<slug>`, matching what
+CI publishes; override with `--image-tag`):
+
+```bash
+./deploy/scripts/cloud-start.sh                                  # prod, main, latest
+./deploy/scripts/cloud-start.sh --slot test --ref feat/my-branch # parallel branch test
+# or, same thing through the CLI wrapper:
+./deploy/va remote up --slot test --ref feat/my-branch
+./deploy/va remote status --slot test    # instance state + tunnel reachability
+./deploy/va remote down --slot test      # destroy when done testing
 ```
 
 > **Currency caveat:** the API has been observed returning `usd` for an
@@ -451,10 +499,10 @@ SERVER_START_TIMEOUT_MS=300000    # cold boot: provisioning + startup script + i
 ```
 
 > Field names in `cloud-start.sh` (`instance_type`, `gpu_memory.size_in_gigabytes`,
-> `price_per_hour`, `ssh_key_ids`, `startup_script_id`, …) come from Verda's
-> published API docs and are not yet verified against a live response —
-> confirm with `--dry-run` and a real `GET /v1/instance-types` call before
-> relying on this unattended.
+> `price_per_hour`, `ssh_key_ids`, `startup_script_id`, …) were verified
+> against live Verda API responses (2026-07). The `POST /v1/scripts` response
+> shape is parsed defensively (`.id` / `.script.id`) — if Verda changes it,
+> the error message includes the raw (secret-redacted) body.
 
 #### Bot-triggered shutdown (`SERVER_STOP_CMD`)
 
@@ -462,10 +510,12 @@ The counterpart to the above: `deploy/scripts/cloud-stop.sh` is built to be
 `SERVER_STOP_CMD` — once a session ends, the bot waits `SERVER_STOP_DELAY_MS`
 of idle time and then runs this command to tear the instance back down, so a
 finished session doesn't keep billing until someone remembers to destroy it
-by hand. Idempotent like `cloud-start.sh`: it finds every Verda instance named
-`VERDA_HOSTNAME` in a running/provisioning/ordered state and destroys each one
-it finds; if none match, it logs that and exits 0, so it's safe to call
-speculatively.
+by hand. Idempotent like `cloud-start.sh`: it finds every Verda instance whose
+hostname **exactly** matches the slot's (`va-gpu` for prod — a running
+`va-gpu-test` is never touched) in a running/provisioning/ordered state and
+destroys each one it finds; if none match, it logs that and exits 0, so it's
+safe to call speculatively. Same `--slot` flag as `cloud-start.sh`; no
+arguments means prod, so the bot's config stays a bare script path.
 
 ```ini
 SERVER_STOP_CMD=/path/to/deploy/scripts/cloud-stop.sh

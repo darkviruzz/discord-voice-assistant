@@ -154,3 +154,8 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# local experiment/scratch dirs (verda-test contains a private SSH key — never commit)
+verda-test/
+outputs/
+sample_layouts/

@@ -147,6 +147,15 @@ R8. Teils erledigt: `CONTROL_BEARER` ✅ **rotiert** (2026-07-10, neuer Wert in
 
 ## Phase B — Neuer Branch `fix/finalize-cloud-dataflow` von main
 
+> **Status 2026-07-10: C1–C4 sind IMPLEMENTIERT und verifiziert** (Branch
+> `fix/finalize-cloud-dataflow`, Commits `efe165c` C1, `d704189` C2,
+> `26552da` C3, `d157c6d` C4; Suite 117→140 Tests, CI-Image-Build grün
+> inkl. setpriv-Build-Guard). **Offen ist NUR noch die Live-Verifikation**
+> (Matrix unten, Punkte 4–9: echte Test-Slot-Instanz, echte Session,
+> `/finalize run`, `~/archive/<archiveName>/` auf dem bot-host prüfen,
+> LAN-Regression) — danach mergen. Die Abschnitte C1–C4 unten bleiben als
+> Referenz stehen.
+
 **Warum:** `/leave` funktioniert; Live-Transkript-Events (JSONL) streamen seit
 PR #16 tatsächlich nach `~/transcripts` auf den Bot-Host (**Achtung:** vor #16
 lief die Route nie — der Handler existierte, wurde aber nie erreicht, siehe

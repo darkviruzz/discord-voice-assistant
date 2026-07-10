@@ -465,6 +465,12 @@ client.on('interactionCreate', async (i) => {
         } else if (startResult === 'timeout') {
           warn('join: server did not come up — continuing in offline mode');
           serverStatusLine = '⚠️ Server-Start fehlgeschlagen (Timeout) – Aufnahme läuft lokal.';
+          // The watchdog (transport/index.js) keeps retrying independently after
+          // this point. Mark an outage so handleServerLink's existing recovery
+          // path (a fresh ephemeral "server wieder verbunden") fires once it
+          // eventually succeeds — otherwise this message is left stale forever
+          // even though the connection quietly came up moments later.
+          _outage.active = true;
         } else {
           return; // 'already-online' / 'no-base-url' — no extra status line
         }

@@ -1,3 +1,12 @@
+> [!WARNING]
+> **Work in progress — persönliches Homelab-Projekt, nicht für den allgemeinen
+> Gebrauch.** Dieses Repo ist auf genau *ein* konkretes Setup zugeschnitten
+> (Proxmox-LXC als Bot-Host, WireGuard-Tunnel, Verda-Cloud-GPU bzw. ein
+> Windows/AMD-Gaming-PC, private Discord-Runde). Pfade, IPs, Modellwahl und
+> Deploy-Skripte spiegeln dieses eine Setup wider. Es gibt keinen Support,
+> keine Stabilitätsgarantien und scharfe Kanten überall — als Referenz/
+> Inspiration gedacht, nicht als installierbares Produkt.
+
 ## Titel
 
 Discord Voice Assistant – lokaler Pen-&-Paper-Recorder mit Transkript-Pipeline

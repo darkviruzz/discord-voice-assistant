@@ -1,33 +1,71 @@
 #!/usr/bin/env bash
 # Generates a Verda "startup script" that fully bootstraps a fresh instance on
-# first boot: WireGuard tunnel to Proxmox, repo clone, deploy/.env, GHCR login,
-# and `start.sh` (pulls pre-built images — see deploy/README.md). Paste the
-# output into Verda's startup-script dashboard / `verda startup-script add`.
+# first boot: WireGuard tunnel to Proxmox, repo clone, deploy/.env, optional
+# GHCR login, and `start.sh` (pulls pre-built images — see deploy/README.md).
 #
-# This script itself holds no secrets — it's safe to commit. The secrets are
-# read from environment variables at generation time and end up baked into
-# the OUTPUT, which you must NOT commit (Verda's startup scripts are plain
-# text, same trust tier as the WireGuard key already living there).
+# Normally you do NOT run this by hand: cloud-start.sh calls it per launch,
+# registers the output via POST /v1/scripts and cleans up afterwards. Running
+# it standalone (prints to stdout) is still useful for inspection/debugging.
 #
-# Usage:
+# This script itself holds no secrets — it is safe to commit. Secrets are read
+# from environment variables at generation time and end up baked into the
+# OUTPUT, which you must NOT commit (Verda startup scripts are plain text, same
+# trust tier as the WireGuard key already living there).
+#
+# Parameters (environment variables):
+#   WG_PRIVATE_KEY   REQUIRED  fixed per-slot WireGuard identity (reuse the same
+#                              one every time — that is what keeps the Proxmox
+#                              peer entry untouched forever)
+#   WG_HOME_PUBKEY   REQUIRED  the Proxmox public key (its wg peer for us)
+#   WG_ENDPOINT      REQUIRED  e.g. yourdomain.myfritz.net:51820
+#   CONTROL_BEARER   REQUIRED  must match apps/bot/.env on Proxmox
+#   WG_ADDRESS       default 10.10.0.2/24 — FULL CIDR of this instance inside
+#                              the tunnel (prod 10.10.0.2/24, test 10.10.0.3/24);
+#                              SERVER_BIND is derived from it (address without
+#                              the /prefix)
+#   GIT_BRANCH       default main   — git ref to clone on the instance
+#   IMAGE_TAG        default latest — GHCR image tag to pull
+#   GH_USER / GH_PAT OPTIONAL — only for a PRIVATE repo/GHCR. If GH_PAT is set,
+#                              the output does `docker login ghcr.io` and a
+#                              credentialed clone; if it is UNSET, the output
+#                              does an anonymous https clone and NO docker login
+#                              (public repo + public packages). GH_USER is only
+#                              required alongside GH_PAT.
+#
+# Usage (standalone inspection):
 #   WG_PRIVATE_KEY=... WG_HOME_PUBKEY=... WG_ENDPOINT=host:51820 \
-#   GH_USER=... GH_PAT=... CONTROL_BEARER=... IMAGE_TAG=... \
+#   CONTROL_BEARER=... IMAGE_TAG=v2.0.0 GIT_BRANCH=main WG_ADDRESS=10.10.0.2/24 \
 #   ./gen-verda-startup.sh > verda-startup.sh
-#
-# Re-run whenever the GHCR PAT is rotated or IMAGE_TAG changes. Keep
-# WG_PRIVATE_KEY the SAME across regenerations — that's what lets Proxmox's
-# peer entry stay untouched forever (see deploy/README.md, Networking).
 set -euo pipefail
 
 : "${WG_PRIVATE_KEY:?set WG_PRIVATE_KEY (fixed instance identity — reuse the same one every time)}"
 : "${WG_HOME_PUBKEY:?set WG_HOME_PUBKEY (the Proxmox public key, from wg show on the instance side)}"
 : "${WG_ENDPOINT:?set WG_ENDPOINT (e.g. yourdomain.myfritz.net:51820)}"
-: "${GH_USER:?set GH_USER (GitHub username, for GHCR + repo clone)}"
-: "${GH_PAT:?set GH_PAT (read:packages + repo scope; give it a real expiry, not a few days)}"
 : "${CONTROL_BEARER:?set CONTROL_BEARER (must match apps/bot/.env on Proxmox)}"
+WG_ADDRESS="${WG_ADDRESS:-10.10.0.2/24}"
+WG_IP="${WG_ADDRESS%%/*}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
+GH_USER="${GH_USER:-}"
+GH_PAT="${GH_PAT:-}"
 REPO_HOST_PATH="github.com/darkviruzz/discord-voice-assistant.git"
+
+# ── Repo/registry access block: credentialed only when GH_PAT is present ──────
+if [ -n "$GH_PAT" ]; then
+  : "${GH_USER:?set GH_USER when GH_PAT is set (GitHub username for GHCR + credential clone)}"
+  ACCESS_BLOCK=$(cat <<BLOCK
+# Private repo/packages: authenticate to GHCR and clone with credentials.
+echo "${GH_PAT}" | docker login ghcr.io -u "${GH_USER}" --password-stdin
+git clone --branch "${GIT_BRANCH}" "https://${GH_USER}:${GH_PAT}@${REPO_HOST_PATH}" /root/discord-voice-assistant
+BLOCK
+)
+else
+  ACCESS_BLOCK=$(cat <<BLOCK
+# Public repo/packages: anonymous clone, no docker login (images pull anonymously).
+git clone --branch "${GIT_BRANCH}" "https://${REPO_HOST_PATH}" /root/discord-voice-assistant
+BLOCK
+)
+fi
 
 cat <<STARTUP
 #!/usr/bin/env bash
@@ -42,7 +80,7 @@ mkdir -p /etc/wireguard
 umask 077
 cat > /etc/wireguard/wg0.conf <<'WGCONF'
 [Interface]
-Address = 10.10.0.2/24
+Address = ${WG_ADDRESS}
 PrivateKey = ${WG_PRIVATE_KEY}
 ListenPort = 51820
 
@@ -55,13 +93,11 @@ WGCONF
 systemctl enable --now wg-quick@wg0
 
 # ── Repo + deploy config ─────────────────────────────────────────────────────
-echo "${GH_PAT}" | docker login ghcr.io -u "${GH_USER}" --password-stdin
-git clone --branch "${GIT_BRANCH}" \\
-  "https://${GH_USER}:${GH_PAT}@${REPO_HOST_PATH}" /root/discord-voice-assistant
+${ACCESS_BLOCK}
 cd /root/discord-voice-assistant/deploy
 cp .env.example .env
 sed -i "s|^CONTROL_BEARER=.*|CONTROL_BEARER=${CONTROL_BEARER}|" .env
-sed -i "s|^SERVER_BIND=.*|SERVER_BIND=10.10.0.2|" .env
+sed -i "s|^SERVER_BIND=.*|SERVER_BIND=${WG_IP}|" .env
 sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_TAG}|" .env
 chmod +x scripts/*.sh
 

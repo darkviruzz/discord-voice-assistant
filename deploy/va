@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# va — unified deploy CLI for the voice assistant.
+# Contract: docs/deploy-architecture.md (env layering, slots, image-tag scheme).
+#
+#   va local  up|down|status|logs   [--profile cuda|windows-native] [--ref R]
+#   va remote up|down|status|logs|ssh [--slot prod|test] [--ref R] [--image-tag T] [--dry-run]
+#   va bot    update|switch R|status|logs      (run ON the bot host)
+#   va env    show [--profile P] [--slot S]    (effective env, secrets masked)
+#
+# local  = deploy/refresh the stack on THIS machine.
+#          cuda:           merged env -> deploy/.env, then scripts/start.sh
+#                          (compose pull + model fetch, same path as the instance)
+#          windows-native: delegates to deploy/va.ps1, which wraps
+#                          scripts/Start-VoiceAssistant.ps1 (whisper-vulkan,
+#                          piper-directml, ollama as native processes)
+# remote = ephemeral cloud GPU instance (Verda). Thin wrapper around
+#          scripts/cloud-start.sh / cloud-stop.sh — refs/tags/slots are theirs,
+#          `va remote up --ref feat/x --slot test` boots a test instance with
+#          that branch cloned and its branch-<slug> images pulled.
+# bot    = the persistent bot host (git pull / branch switch + npm ci + restart).
+#
+# Env layering (highest wins): CLI flags/process env > $VA_DEPLOY_ENV
+# (default ~/.config/va/deploy.env) > deploy/env/<profile>.env > deploy/.env.example.
+# Secrets live ONLY in $VA_DEPLOY_ENV, outside the worktree — switching branches
+# never touches them.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/lib-env.sh
+. "$SCRIPT_DIR/scripts/lib-env.sh"
+
+log() { printf '[va] %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+usage() {
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ── secret masking (contract rule: mask if the NAME contains one of these) ──
+is_secret_name() {
+  case "$1" in
+    *_KEY*|*_SECRET*|*_PAT|*_PAT_*|*_BEARER*|*_TOKEN*|*PRIVATE*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ── env merge: layered KEY=VALUE files -> VA_VAL/VA_SRC maps ────────────────
+# Same parsing rules as lib-env.sh (no eval; KEY of [A-Z_][A-Z0-9_]*; one layer
+# of quotes stripped; CRLF tolerated). Later files win; process env wins last.
+declare -A VA_VAL VA_SRC
+
+merge_env_file() {
+  local file="$1" label="$2" line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [ -z "$line" ] && continue
+    case "$line" in \#*) continue ;; esac
+    case "$line" in "export "*) line="${line#export }" ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    case "$key" in [A-Z_]*) ;; *) continue ;; esac
+    case "$key" in *[!A-Z0-9_]*) continue ;; esac
+    val="${line#*=}"
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    VA_VAL["$key"]="$val"
+    VA_SRC["$key"]="$label"
+  done < "$file"
+}
+
+deploy_env_file() {
+  local f="${VA_DEPLOY_ENV:-$HOME/.config/va/deploy.env}"
+  case "$f" in "~/"*) f="$HOME/${f#\~/}" ;; esac
+  printf '%s' "$f"
+}
+
+merge_layers() { # $1 = profile ('' = none)
+  local profile="$1" k
+  merge_env_file "$SCRIPT_DIR/.env.example" "example"
+  [ -n "$profile" ] && merge_env_file "$SCRIPT_DIR/env/$profile.env" "profile:$profile"
+  merge_env_file "$(deploy_env_file)" "deploy.env"
+  for k in "${!VA_VAL[@]}"; do
+    if [ -n "${!k+x}" ]; then VA_VAL["$k"]="${!k}"; VA_SRC["$k"]="process-env"; fi
+  done
+}
+
+# ── shared: Verda API auth (for remote status/logs/ssh) ─────────────────────
+API="https://api.verda.com/v1"
+api_token() {
+  : "${VERDA_CLIENT_ID:?set VERDA_CLIENT_ID (in $(deploy_env_file))}"
+  : "${VERDA_CLIENT_SECRET:?set VERDA_CLIENT_SECRET (in $(deploy_env_file))}"
+  curl -fsS -X POST "$API/oauth2/token" -H 'Content-Type: application/json' \
+    -d "{\"client_id\":\"${VERDA_CLIENT_ID}\",\"client_secret\":\"${VERDA_CLIENT_SECRET}\",\"grant_type\":\"client_credentials\"}" \
+    | jq -r '.access_token // empty'
+}
+
+slot_hostname() { case "$1" in prod) echo va-gpu ;; test) echo va-gpu-test ;; *) die "unknown slot: $1" ;; esac; }
+slot_tunnel_ip() { case "$1" in prod) echo 10.10.0.2 ;; test) echo 10.10.0.3 ;; esac; }
+
+instance_json() { # $1=token $2=hostname -> first matching active instance (or empty)
+  curl -fsS -H "Authorization: Bearer $1" "$API/instances" \
+    | jq --arg h "$2" '[.[] | select(.hostname == $h and (.status == "running" or .status == "provisioning" or .status == "ordered"))] | .[0] // empty'
+}
+
+ssh_key_file() {
+  local k
+  for k in "$HOME/.ssh/id_verda" "$HOME/.ssh/verda-a6000"; do
+    [ -f "$k" ] && { printf '%s' "$k"; return 0; }
+  done
+  die "no instance SSH key found (~/.ssh/id_verda or ~/.ssh/verda-a6000)"
+}
+
+# ── va env show ─────────────────────────────────────────────────────────────
+cmd_env() {
+  local sub="${1:-show}"; shift || true
+  [ "$sub" = "show" ] || usage 1
+  local profile="" slot=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile) profile="${2:?}"; shift 2 ;; --profile=*) profile="${1#*=}"; shift ;;
+      --slot)    slot="${2:?}"; shift 2 ;;    --slot=*)    slot="${1#*=}"; shift ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  merge_layers "$profile"
+  [ -n "$slot" ] && log "slot $slot -> hostname $(slot_hostname "$slot"), tunnel IP $(slot_tunnel_ip "$slot")"
+  log "deploy env file: $(deploy_env_file) $([ -f "$(deploy_env_file)" ] && echo '(present)' || echo '(MISSING)')"
+  local k v
+  for k in $(printf '%s\n' "${!VA_VAL[@]}" | sort); do
+    v="${VA_VAL[$k]}"
+    is_secret_name "$k" && [ -n "$v" ] && v="«redacted»"
+    printf '%-28s = %-45s # %s\n' "$k" "$v" "${VA_SRC[$k]}"
+  done
+}
+
+# ── va local ────────────────────────────────────────────────────────────────
+default_profile() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) echo windows-native ;;
+    *) echo cuda ;;
+  esac
+}
+
+checkout_ref() { # $1=ref — only called when --ref was EXPLICITLY given
+  [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] \
+    || die "worktree is dirty — commit/stash before va ... --ref"
+  log "switching worktree to ref '$1' (was: $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD))"
+  git -C "$REPO_ROOT" fetch origin "$1"
+  git -C "$REPO_ROOT" checkout "$1"
+}
+
+write_merged_env() { # merged layers -> deploy/.env (generated artifact)
+  local out="$SCRIPT_DIR/.env" k
+  { printf '# GENERATED by `va local up` — do not edit, edit the layers instead\n'
+    printf '# (deploy/.env.example, deploy/env/*.env, %s)\n' "$(deploy_env_file)"
+    for k in $(printf '%s\n' "${!VA_VAL[@]}" | sort); do
+      printf '%s=%s\n' "$k" "${VA_VAL[$k]}"
+    done
+  } > "$out"
+  log "wrote merged env -> $out"
+}
+
+cmd_local() {
+  local sub="${1:?va local needs a subcommand}"; shift
+  local profile="" ref=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile) profile="${2:?}"; shift 2 ;; --profile=*) profile="${1#*=}"; shift ;;
+      --ref)     ref="${2:?}"; shift 2 ;;     --ref=*)     ref="${1#*=}"; shift ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  profile="${profile:-$(default_profile)}"
+  [ -n "$ref" ] && checkout_ref "$ref"
+
+  if [ "$profile" = "windows-native" ]; then
+    log "profile windows-native -> deploy/va.ps1 $sub"
+    exec pwsh -NoProfile -File "$SCRIPT_DIR/va.ps1" "$sub"
+  fi
+  [ "$profile" = "cuda" ] || die "unknown profile: $profile (cuda|windows-native)"
+
+  merge_layers "$profile"
+  case "$sub" in
+    up)     write_merged_env; exec "$SCRIPT_DIR/scripts/start.sh" ;;
+    down)   exec "$SCRIPT_DIR/scripts/stop.sh" ;;
+    status) cd "$SCRIPT_DIR" && exec docker compose -p va ps ;;
+    logs)   cd "$SCRIPT_DIR" && exec docker compose -p va logs --tail=100 -f server ;;
+    *)      usage 1 ;;
+  esac
+}
+
+# ── va remote ───────────────────────────────────────────────────────────────
+cmd_remote() {
+  local sub="${1:?va remote needs a subcommand}"; shift
+  local slot="${VA_SLOT:-prod}" pass=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot)   slot="${2:?}"; pass+=("$1" "$2"); shift 2 ;;
+      --slot=*) slot="${1#*=}"; pass+=("$1"); shift ;;
+      --ref|--image-tag|--instance-type) pass+=("$1" "${2:?$1 needs an argument}"); shift 2 ;;
+      --ref=*|--image-tag=*|--instance-type=*|--dry-run) pass+=("$1"); shift ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  local host; host="$(slot_hostname "$slot")"
+
+  case "$sub" in
+    up)   exec "$SCRIPT_DIR/scripts/cloud-start.sh" "${pass[@]+"${pass[@]}"}" ;;
+    down) # cloud-stop only understands --slot/--dry-run; strip the rest
+      local stop_args=() i=0
+      while [ $i -lt ${#pass[@]} ]; do
+        case "${pass[$i]}" in
+          --slot) stop_args+=("--slot" "${pass[$((i+1))]}"); i=$((i+2)) ;;
+          --slot=*|--dry-run) stop_args+=("${pass[$i]}"); i=$((i+1)) ;;
+          --ref|--image-tag|--instance-type) i=$((i+2)) ;;
+          *) i=$((i+1)) ;;
+        esac
+      done
+      exec "$SCRIPT_DIR/scripts/cloud-stop.sh" "${stop_args[@]+"${stop_args[@]}"}" ;;
+    status)
+      va_load_env
+      command -v jq >/dev/null || die "jq not found"
+      local token inst ip tunnel_ip
+      token="$(api_token)"; [ -n "$token" ] || die "auth failed"
+      inst="$(instance_json "$token" "$host")"
+      if [ -z "$inst" ]; then
+        log "slot $slot ($host): no active instance"
+      else
+        jq -r '"slot '"$slot"' ('"$host"'): id=\(.id) status=\(.status) ip=\(.ip // .public_ip // "?") created=\(.created_at // .created // "?")"' <<<"$inst" >&2
+      fi
+      tunnel_ip="$(slot_tunnel_ip "$slot")"
+      if timeout 3 bash -c "exec 3<>/dev/tcp/$tunnel_ip/7440" 2>/dev/null; then
+        log "server reachable via tunnel: yes ($tunnel_ip:7440)"
+      else
+        log "server reachable via tunnel: no ($tunnel_ip:7440)"
+      fi ;;
+    logs|ssh)
+      va_load_env
+      command -v jq >/dev/null || die "jq not found"
+      local token inst ip key
+      token="$(api_token)"; [ -n "$token" ] || die "auth failed"
+      inst="$(instance_json "$token" "$host")"
+      [ -n "$inst" ] || die "slot $slot ($host): no active instance"
+      ip="$(jq -r '.ip // .public_ip // empty' <<<"$inst")"
+      [ -n "$ip" ] || die "instance has no public IP in the API response"
+      key="$(ssh_key_file)"
+      if [ "$sub" = "ssh" ]; then
+        exec ssh -i "$key" -o StrictHostKeyChecking=accept-new "root@$ip"
+      fi
+      set +e
+      ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "root@$ip" \
+        "cd /root/discord-voice-assistant/deploy && docker compose -p va logs --tail=100 -f server"
+      exit 0 ;;
+    *) usage 1 ;;
+  esac
+}
+
+# ── va bot ──────────────────────────────────────────────────────────────────
+BOT_REPO="/home/discordbot/discord-voice-assistant"
+
+require_bot_host() {
+  [ -d "$BOT_REPO" ] || die "run this on the bot host ($BOT_REPO not found)"
+}
+
+bot_restart() {
+  if sudo -n systemctl restart discord-bot 2>/dev/null; then
+    sudo -n systemctl status discord-bot --no-pager --lines=5 || true
+  else
+    log "sudo needs a password here — run yourself: sudo systemctl restart discord-bot"
+  fi
+}
+
+cmd_bot() {
+  local sub="${1:?va bot needs a subcommand}"; shift || true
+  require_bot_host
+  case "$sub" in
+    update)
+      git -C "$BOT_REPO" pull --ff-only
+      (cd "$BOT_REPO" && npm ci --omit=dev)
+      bot_restart ;;
+    switch)
+      local ref="${1:?va bot switch needs a ref}"
+      [ -z "$(git -C "$BOT_REPO" status --porcelain)" ] || die "bot worktree is dirty"
+      git -C "$BOT_REPO" fetch origin "$ref"
+      git -C "$BOT_REPO" checkout "$ref"
+      git -C "$BOT_REPO" pull --ff-only 2>/dev/null || true   # no-op for tags/detached
+      (cd "$BOT_REPO" && npm ci --omit=dev)
+      bot_restart ;;
+    status)
+      systemctl status discord-bot --no-pager --lines=10 || true
+      log "checked out: $(git -C "$BOT_REPO" rev-parse --abbrev-ref HEAD) @ $(git -C "$BOT_REPO" rev-parse --short HEAD)" ;;
+    logs)
+      set +e
+      journalctl -u discord-bot -n 100 -f 2>/dev/null || sudo -n journalctl -u discord-bot -n 100 -f \
+        || log "journalctl needs sudo here — run yourself: sudo journalctl -u discord-bot -n 100 -f"
+      exit 0 ;;
+    *) usage 1 ;;
+  esac
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────
+[ $# -ge 1 ] || usage 1
+case "$1" in
+  local)  shift; cmd_local "$@" ;;
+  remote) shift; cmd_remote "$@" ;;
+  bot)    shift; cmd_bot "$@" ;;
+  env)    shift; cmd_env "$@" ;;
+  -h|--help|help) usage 0 ;;
+  *) die "unknown command: $1 (local|remote|bot|env — see --help)" ;;
+esac

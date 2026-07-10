@@ -1,0 +1,6 @@
+# Line-ending discipline — kills the CRLF-on-Windows-checkout pitfall class
+# (documented in docs/plans/fix-gpu-deployment-and-webui-merge.md, Fallstrick 1).
+*.sh text eol=lf
+deploy/va text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

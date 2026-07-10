@@ -10,7 +10,7 @@ name: build-images
 
 on:
   push:
-    branches: ["claude/gpu-cloud-deployment-msrcy3", "main"]
+    branches: ["**"]
     paths:
       - "apps/server/**"
       - "services/piper/**"
@@ -63,16 +63,65 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image metadata
+      - name: Image labels
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.name }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=sha,format=short
-            type=semver,pattern={{version}}
+          # Nur .outputs.labels wird verwendet (OCI-Annotationen). Die Tags
+          # kommen aus dem Schritt "Compute image tags" unten: die generischen
+          # type=ref/type=semver-Regeln dieser Action weichen bei Groß-/
+          # Umlaut-Branchnamen und der 40-Zeichen-Kürzung vom Kontrakt in
+          # docs/deploy-architecture.md ("Image-Tags (CI-Kontrakt)") ab.
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        env:
+          # Werte über env: reichen, NICHT direkt in den Skripttext interpolieren:
+          # github.ref_name ist der Branch-Name und damit für jeden mit Push-Recht
+          # frei wählbar (git erlaubt u.a. `$`, `` ` ``, `(`, `)`) — als env-Var
+          # bleibt er reine Daten statt in die Shell-Syntax eingesetzt zu werden.
+          VA_IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.name }}
+          VA_REF_NAME: ${{ github.ref_name }}
+          VA_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          # Referenz-Implementierung aus docs/deploy-architecture.md
+          # ("Image-Tags (CI-Kontrakt)") — MUSS identisch zu va_slug() in
+          # deploy/scripts/cloud-start.sh bleiben.
+          va_slug() {
+            printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+              | cut -c1-40 | sed -E 's/-+$//'
+          }
+
+          image="$VA_IMAGE"
+          ref_name="$VA_REF_NAME"
+          ref_type="$VA_REF_TYPE"
+          short_sha="${GITHUB_SHA:0:7}"
+
+          if [ "$ref_type" = "tag" ]; then
+            # git tag vX.Y.Z -> vX.Y.Z, stable
+            tags="$(printf '%s\n%s' "${image}:${ref_name}" "${image}:stable")"
+          elif [ "$ref_type" = "branch" ] && [ "$ref_name" = "main" ]; then
+            # push main -> latest, sha-<shortsha (7 Zeichen)>
+            tags="$(printf '%s\n%s' "${image}:latest" "${image}:sha-${short_sha}")"
+          else
+            # push branch X -> branch-<slug(X)>
+            slug="$(va_slug "$ref_name")"
+            tags="${image}:branch-${slug}"
+          fi
+
+          echo "computed tags (ref_type=$ref_type, ref_name=$ref_name):"
+          printf '%s\n' "$tags"
+
+          {
+            echo "tags<<VA_TAGS_EOF"
+            printf '%s\n' "$tags"
+            echo "VA_TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -80,7 +129,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}

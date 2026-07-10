@@ -1,5 +1,11 @@
 # Plan: fix GPU-Deployment dependencies and prepare live transcript web-UI merge
 
+> **Update 2026-07-09:** Deploy-Architektur überarbeitet — siehe
+> `docs/deploy-architecture.md`. Phase-A-Schritt 5 (manuelle
+> Startup-Script-Regeneration) und die `VERDA_STARTUP_SCRIPT_ID`-Mechanik sind
+> dadurch ersetzt (dynamische Script-Registrierung pro Launch). Phase B/D
+> gelten unverändert.
+
 Ausführungsplan für Folge-Sessions (Sonnet/Opus). Kontext: Cloud-GPU-Deployment
 (Verda, ephemere Instanzen, WireGuard-Tunnel zu Proxmox) funktioniert end-to-end;
 `finalize` ist auf der Cloud-Instanz kaputt (2 Root Causes, unten). Branch
@@ -19,7 +25,7 @@ Ausführungsplan für Folge-Sessions (Sonnet/Opus). Kontext: Cloud-GPU-Deploymen
 | Proxmox | `pve-jn`, WG `10.10.0.1`, wg0.conf-Peer für Instanz-Pubkey `PgXopBtYrEHctHqF99+5vBoXIWPFkgwOI2slHdjWnVo=` |
 | GPU-Instanz | immer `10.10.0.2` (Tunnel-IP fix), Hostname `va-gpu`, Server-Port 7440 |
 | SSH zur Instanz | `ssh -i ~/.ssh/verda-a6000 root@<öffentliche-IP>` (Windows-Host); auf bot-host: `~/.ssh/id_verda` |
-| CONTROL_BEARER | `a453a09f3ef52838f116bd0cb1353162435b5e7808ea064c824a61a1c9e488ae` (deploy/.env auf Instanz + apps/bot/.env auf Bot) |
+| CONTROL_BEARER | (secret — liegt in deploy/.env auf der Instanz + apps/bot/.env auf dem Bot; stand bis 2026-07-09 hier im Klartext → **vor Repo-public rotieren**) |
 | Verda-Config | `/etc/discord-bot-verda.env`: CLIENT_ID/SECRET, SSH_KEY_ID, STARTUP_SCRIPT_ID, LOCATION_PREFIX=FIN, OS_IMAGE=`ubuntu-22.04-cuda-12.4-docker` (NIE bare ubuntu-22.04 — kein Docker/CUDA!), MAX_HOURLY, ALLOW_SPOT |
 | Startup-Script | registriert bei Verda via `POST /v1/scripts`; generiert von `deploy/scripts/gen-verda-startup.sh`; WG-Privatekey liegt auf bot-host `/root/boot_private.key` — bei Regenerierung WIEDERVERWENDEN, sonst muss Proxmox-Peer geändert werden |
 | Route Bot→Tunnel | systemd-Unit `va-tunnel-route.service` auf bot-host (`ip route replace 10.10.0.0/24 via 192.168.20.4`) |

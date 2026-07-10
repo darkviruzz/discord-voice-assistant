@@ -10,16 +10,36 @@
 > Dataflow — DAS ist der Grund, warum das fertige Transkript/Archiv nach dem
 > Server-Shutdown noch NICHT auf dem Bot liegt) und **Phase D**.
 >
-> **Beim Live-Rollout auf dem echten bot-host gefunden + gefixt** (jeweils
-> eigener PR, Details dort — hier nur damit spätere Sessions nicht erneut
-> stolpern): PR #13 — `POST /v1/scripts` liefert die Script-ID als reinen
-> Text statt JSON (cloud-start.sh nahm fälschlich ein JSON-Objekt an) +
-> `VERDA_SSH_KEY_ID` fehlte in der `--dry-run`-Redaction. PR #14 — der
-> Watchdog in `transport/index.js` gate­te auf `currentSessionId` (bleibt
-> über `/leave` hinweg absichtlich gesetzt, für Session-Resume) statt auf
-> `hasActiveSession()` (echtes „ist gerade wer in Voice"-Signal) → re-startete
-> `SERVER_START_CMD` alle ~5–6 Min unbegrenzt weiter, auch lange nachdem alle
-> den Channel verlassen hatten.
+> **Beim Live-Rollout auf dem echten bot-host gefunden + gefixt** (alle vier
+> PRs #13-#16 sind gemergt, Details in den Commits — hier nur damit spätere
+> Sessions nicht erneut stolpern):
+> - **#13**: `POST /v1/scripts` liefert die Script-ID als reinen Text statt
+>   JSON (cloud-start.sh nahm fälschlich ein JSON-Objekt an) +
+>   `VERDA_SSH_KEY_ID` fehlte in der `--dry-run`-Redaction.
+> - **#14**: Watchdog in `transport/index.js` gate­te auf `currentSessionId`
+>   (bleibt über `/leave` hinweg absichtlich gesetzt, für Session-Resume)
+>   statt auf `hasActiveSession()` → re-startete `SERVER_START_CMD`
+>   unbegrenzt weiter, auch lange nachdem alle den Channel verlassen hatten.
+> - **#15**: `uplink: frame dropped` flutete den Log mit einer Zeile pro
+>   Opus-Frame (~50/s) während der Server unreachable war — jetzt erste
+>   Drop sofort geloggt, Rest alle 10s als Summary.
+> - **#16**: `control.js`s `serverCommand`-Allowlist enthielt `transcript_event`
+>   nicht → der fertige Handler in `transport/index.js` wurde nie erreicht,
+>   Live-Transkript-Push zum bot-host lief komplett ins Leere (nur "unknown
+>   msg type" geloggt). Dazu: `/join`s Timeout-Meldung blieb stehen, auch
+>   wenn der Watchdog Minuten später doch noch erfolgreich verband — nutzt
+>   jetzt den vorhandenen `handleServerLink`-Recovery-Pfad.
+>
+> **Wichtig für die nächste Session:** #14/#15/#16 ändern Bot-Code
+> (`apps/bot/src/**`) — der bot-host braucht nach dem Mergen noch
+> `git pull --ff-only && npm ci --omit=dev && sudo systemctl restart discord-bot`,
+> sonst läuft dort weiterhin der alte Stand ohne diese Fixes.
+>
+> **Live bestätigt (2026-07-10):** ein kompletter Cloud-Deploy lief
+> Ende-zu-Ende durch (alle 4 Container healthy, Server korrekt als v2.0.0
+> geloggt, LLM-Antwort + TTS-Wiedergabe funktionierten). Repo ist jetzt
+> **public** (R4/R8 unten aktualisiert), `CONTROL_BEARER` wurde bereits
+> rotiert.
 
 ## Ausführungskontext für Folge-Sessions (WICHTIG zuerst lesen)
 
@@ -54,12 +74,14 @@ Claude Code** (arbeitet auf einem frischen Clone dieses Repos). Für die gilt:
 | Proxmox | `pve-jn`, WG `10.10.0.1`, wg0.conf-Peer für Instanz-Pubkey `PgXopBtYrEHctHqF99+5vBoXIWPFkgwOI2slHdjWnVo=` |
 | GPU-Instanz | immer `10.10.0.2` (Tunnel-IP fix), Hostname `va-gpu`, Server-Port 7440 |
 | SSH zur Instanz | `ssh -i ~/.ssh/verda-a6000 root@<öffentliche-IP>` (Windows-Host); auf bot-host: `~/.ssh/id_verda` |
-| CONTROL_BEARER | (secret — liegt in deploy/.env auf der Instanz + apps/bot/.env auf dem Bot; stand bis 2026-07-09 hier im Klartext → **vor Repo-public rotieren**) |
-| Verda-Config | Ziel-Zustand: `~/.config/va/deploy.env` auf dem bot-host (Schema in `docs/deploy-architecture.md`); Alt-Bestand `/etc/discord-bot-verda.env` (systemd-EnvironmentFile) gewinnt als Prozess-Env weiterhin über die Datei — beides koexistiert. `VERDA_STARTUP_SCRIPT_ID` ist obsolet (wird ignoriert). OS_IMAGE=`ubuntu-22.04-cuda-12.4-docker` (NIE bare ubuntu-22.04 — kein Docker/CUDA!) |
+| CONTROL_BEARER | (secret — liegt in deploy/.env auf der Instanz + apps/bot/.env auf dem Bot; alter Wert stand bis 2026-07-09 im Klartext in diesem Doc → **am 2026-07-10 rotiert**, neuer Wert in apps/server/.env (Windows), apps/bot/.env + deploy.env (bot-host)) |
+| Verda-Config | `~/.config/va/deploy.env` auf dem bot-host ist jetzt die Quelle (Schema in `docs/deploy-architecture.md`). Ob dort zusätzlich `GH_USER`/`GH_PAT` gesetzt sind (von einem Zwischenschritt, als das Repo noch privat war) ist NICHT verifiziert — seit das Repo public ist, ist es ohnehin optional (anonymer Clone funktioniert, live bestätigt). Alt-Bestand `/etc/discord-bot-verda.env` existiert noch als systemd-EnvironmentFile, überschreibt einzelne Keys als Prozess-Env falls dort gesetzt. `VERDA_STARTUP_SCRIPT_ID` ist obsolet (wird ignoriert). OS_IMAGE=`ubuntu-22.04-cuda-12.4-docker` (NIE bare ubuntu-22.04 — kein Docker/CUDA!) |
 | Startup-Script | seit PR #12 **dynamisch pro Launch**: `cloud-start.sh` generiert + registriert via `POST /v1/scripts` (`va-<slot>-<slug>-<epoch>`) und räumt alte auf. WG-Privatekey = `VA_WG_KEY_PROD` in deploy.env (Wert stammt aus `/root/boot_private.key`) — NIE rotieren ohne Proxmox-Peer-Update |
 | Slots | prod = `va-gpu`/10.10.0.2, test = `va-gpu-test`/10.10.0.3 (eigener Key `VA_WG_KEY_TEST`, Proxmox-Peer einmalig nötig); parallel betreibbar; exakter Hostname-Match überall |
 | va-CLI | `deploy/va`: `local up/down/status/logs`, `remote up/down/status/logs/ssh --slot --ref`, `bot update/switch/status/logs`, `env show` (maskiert) |
-| Bot-Host-Stand (2026-07-10) | Checkout ist noch `feature/streaming-stt @ 959785a` (v1.6.0!) — hat WEDER transcriptWriter (Live-JSONL-Empfang) NOCH SERVER_STOP_CMD/Watchdog NOCH das neue cloud-start. **Erster Rollout-Schritt = auf main bringen** |
+| Repo-Sichtbarkeit | Seit 2026-07-10 **public** (`darkviruzz/discord-voice-assistant`) — GHCR-Packages ebenfalls public. Der PAT-lose Clone-Pfad im Startup-Script funktioniert dadurch jetzt tatsächlich (davor lief er nie erfolgreich, weil das Repo trotz "public packages" noch privat war — R4 hatte das ursprünglich vermengt) |
+| Bot-Host-Stand (2026-07-10) | Auf `main`, Version läuft aktuell mit den Fixes aus #13-#16 (nach `git pull`+Restart) oder kurz davor — bei Zweifel `./deploy/va bot status` prüfen |
+| DATA_DIR-Falle | `apps/bot/.env`s `DATA_DIR` muss auf ein vom discordbot-User beschreibbares Verzeichnis zeigen (funktionierend: `/tmp/voice-sessions`). `.env.example`s Platzhalter `/opt/discord-recorder/data` ist eine ALTE, root-owned Deployment-Leiche — schon einmal aus Versehen beim "mit example vergleichen" drübergeschrieben worden → EACCES beim Session-Start. Nicht verwechseln |
 | Route Bot→Tunnel | systemd-Unit `va-tunnel-route.service` auf bot-host (`ip route replace 10.10.0.0/24 via 192.168.20.4`) |
 | Web-UI | nur auf `main` (`/transcript`, Basic-Auth greyhawk/greyhawk, configApi.js Live-Settings) — NICHT auf PR-#11-Branch |
 
@@ -68,10 +90,20 @@ Claude Code** (arbeitet auf einem frischen Clone dieses Repos). Für die gilt:
 1. **CRLF**: Windows-Checkout hat CRLF. Dateien NIE per scp vom Windows-Host auf Linux kopieren → `env: 'bash\r'`. Stattdessen `git show HEAD:pfad | ssh host "cat > ziel"` oder auf dem Ziel `git pull`.
 2. **Executable-Bits**: Neue Skripte auf Windows landen als 100644 im Index → `git update-index --chmod=+x <file>` vor Commit.
 3. **Bash-Parser**: Apostroph in `${VAR:?message with ' quote}` bricht das Skript. Keine Apostrophe in Parameter-Expansion-Messages.
-4. **Verda-API**: `os_volume` braucht zwingend `name` (String) UND `size`. `is_spot` explizit setzen. Bei `VERDA_ALLOW_SPOT=true` nach `spot_price` ranken (nicht `price_per_hour`). 503 `service_unavailable` = Kapazität, retrybar; alles andere sofort abbrechen. Währung der API (usd) ≠ Dashboard (eur) — Preis-Cap ist nicht normalisiert.
+4. **Verda-API**: `os_volume` braucht zwingend `name` (String) UND `size`. `is_spot` explizit setzen. Bei `VERDA_ALLOW_SPOT=true` nach `spot_price` ranken (nicht `price_per_hour`). 503 `service_unavailable` = Kapazität, retrybar; alles andere sofort abbrechen. Währung der API (usd) ≠ Dashboard (eur) — Preis-Cap ist nicht normalisiert. `POST /v1/scripts` liefert die neue ID als REINEN TEXT zurück (kein JSON!) — nicht bei jedem Endpoint blind JSON annehmen, immer erst den echten Response-Body prüfen (siehe PR #13).
 5. **known_hosts**: Jede neue Instanz = neuer Hostkey, IPs werden wiederverwendet → alten Eintrag löschen statt StrictHostKeyChecking zu deaktivieren.
 6. **Docker-Volumes root-owned**: Container-User `app` (uid 10001) kann frisch erzeugte named volumes nicht beschreiben — das ist Root Cause hinter allen EACCES-Bugs (siehe Schritt C1).
 7. **Discord-Interaction**: `/join` darf NIE auf Server-Start warten (bereits gefixt: Join sofort, `ensureServerReachable` läuft im Hintergrund, Watchdog re-triggert `SERVER_START_CMD` nach 90s Unreachable während aktiver Session).
+8. **Neuer Server→Bot-Message-Type = ZWEI Stellen anfassen**: `control.js`s
+   `serverCommand`-Allowlist (case-Liste, ~Zeile 361) UND der eigentliche
+   Handler-Switch in `transport/index.js`. Ein Type im zweiten, aber nicht im
+   ersten registriert → fällt lautlos auf "unknown msg type", der fertige
+   Handler wird nie erreicht (genau das ist `transcript_event` passiert,
+   siehe PR #16). Bei C2/C3 relevant, falls dort neue Message-Types
+   dazukommen (sind aber HTTP-Routen, kein neuer WS-Message-Type nötig).
+9. **"Repo public" ≠ "Packages public"**: zwei unabhängige GitHub-Einstellungen.
+   Ein PAT-loser `git clone` scheitert an einem privaten Repo, selbst wenn
+   die GHCR-Container-Images schon public sind (siehe R4-Historie oben).
 
 ---
 
@@ -81,64 +113,48 @@ Schritte 1–4 sind durch: PR #11 gemergt, Version 2.0.0 (`ecafcb3`),
 `v2.0.0`-Images published. Schritt 5 (Startup-Script-Regeneration) ist
 **ersatzlos entfallen** — PR #12 registriert Scripts dynamisch pro Launch.
 
-## Rollout-Checkliste (User, nach Merge von PR #12 — Reihenfolge einhalten!)
+## Rollout-Checkliste — Stand 2026-07-10
 
-R1. **PR #12 mergen** (`feat/unified-deploy`).
-R2. **bot-host auf main bringen** (der Checkout ist noch
-    `feature/streaming-stt`! Erster Wechsel manuell, danach gibt es `va bot`):
-    ```bash
-    cd ~/discord-voice-assistant && git fetch origin \
-      && git checkout main && git pull --ff-only \
-      && npm ci --omit=dev && sudo systemctl restart discord-bot
-    ```
-R3. **`~/.config/va/deploy.env` anlegen** (einmalig, als root auf bot-host —
-    zieht die Werte aus dem Alt-Bestand zusammen, nichts landet im Chat):
-    ```bash
-    sudo bash -c '
-    umask 077; mkdir -p ~discordbot/.config/va
-    {
-      grep -E "^(VERDA_CLIENT_ID|VERDA_CLIENT_SECRET|VERDA_SSH_KEY_ID|VERDA_LOCATION_PREFIX|VERDA_OS_IMAGE|VERDA_MAX_HOURLY|VERDA_ALLOW_SPOT|VERDA_MIN_VRAM_GB|VERDA_OS_VOLUME_SIZE_GB)=" /etc/discord-bot-verda.env
-      echo "VA_WG_KEY_PROD=$(cat /root/boot_private.key)"
-      echo "WG_HOME_PUBKEY=qvQpI+2Q8osKihzsBFhos5YgweclBx6Mb4S3NgAc7Ck="
-      echo "WG_ENDPOINT=a6x298v3ofbem8xx.myfritz.net:51820"
-      grep -E "^CONTROL_BEARER=" ~discordbot/discord-voice-assistant/apps/bot/.env
-    } > ~discordbot/.config/va/deploy.env
-    chown -R discordbot:discordbot ~discordbot/.config/va
-    chmod 600 ~discordbot/.config/va/deploy.env
-    '
-    ```
-    Check danach als discordbot: `./deploy/va env show` (Werte maskiert) und
-    `./deploy/va remote up --dry-run` (druckt redactetes Startup-Script).
-R4. **GHCR-Packages public** stellen (GitHub → Packages → `va-server`,
-    `va-piper`, `va-whisper` → Change visibility). Alternativ (falls privat
-    bleiben soll): `GH_USER`/`GH_PAT` (read:packages) in die deploy.env.
-R5. **Erster echter Deploy** = einfach `/join` in Discord (Bot ruft
-    `SERVER_START_CMD` → neues cloud-start) — oder manuell:
-    `./deploy/va remote up` bzw. `--slot test --ref <branch>` für Branch-Tests.
-    Dabei Phase-D-Punkt 2 abhaken (Server-Log muss v2.0.0 zeigen).
-R6. **Erst NACH erfolgreichem R5**: altes Startup-Script im Verda-Dashboard
-    löschen und Branch `claude/gpu-cloud-deployment-msrcy3` löschen. (Vorher
-    NICHT — bis zur Migration ist das alte Dashboard-Script der einzige
-    funktionierende /join-Pfad, und es klont genau diesen Branch.)
-R7. **Web-UI-Reverse-Proxy** (unverändert offen, nur von LAN/bot-host machbar):
-    nginx auf bot-host `192.168.20.21:7440 → 10.10.0.2:7440` (Config wörtlich
-    in deploy/README.md „Web UI access"; SSE braucht `proxy_buffering off`).
+R1. ✅ **PR #12 gemergt.**
+R2. ✅ **bot-host auf main.** Braucht nach #13-#16 nochmal
+    `cd ~/discord-voice-assistant && git pull --ff-only && npm ci --omit=dev
+    && sudo systemctl restart discord-bot` (oder `./deploy/va bot update`),
+    falls das noch nicht passiert ist — sonst laufen dort die #14/#15/#16-Fixes
+    nicht. Check: `./deploy/va bot status` zeigt den Commit.
+R3. ✅ **`~/.config/va/deploy.env` angelegt und verifiziert** (`env show`,
+    `remote up --dry-run` liefen sauber).
+R4. ✅ **Repo UND GHCR-Packages public.** (Ursprünglich hier nur "Packages
+    public" geplant — das reichte NICHT: der PAT-lose Clone-Pfad im
+    Startup-Script braucht ein öffentlich klonbares REPO, nicht nur öffentliche
+    Container-Images. Das war eine echte Lücke in diesem Schritt, live
+    gefunden. Beides ist jetzt public.)
+R5. ✅ **Erster echter Deploy live bestätigt** (2026-07-10): Instanz
+    hochgefahren, alle 4 Container healthy, Server loggt `v2.0.0` (Phase-D-2
+    damit erledigt), LLM-Antwort + TTS-Wiedergabe funktionierten.
+R6. ⏳ **Jetzt actionable** (Bedingung "erfolgreicher R5" ist erfüllt): altes
+    Startup-Script im Verda-Dashboard löschen, Branch
+    `claude/gpu-cloud-deployment-msrcy3` löschen.
+R7. ⏳ **Offen** — Web-UI-Reverse-Proxy (nur von LAN/bot-host machbar): nginx
+    auf bot-host `192.168.20.21:7440 → 10.10.0.2:7440` (Config wörtlich in
+    deploy/README.md „Web UI access"; SSE braucht `proxy_buffering off`).
     Vor jeder Cloudflared-Veröffentlichung: `TRANSCRIPT_UI_USER/_PASS` ändern!
-R8. **Vor Repo-public** (unabhängig vom Rest): `CONTROL_BEARER` rotieren
-    (`openssl rand -hex 32`; eintragen in apps/bot/.env + deploy.env auf
-    bot-host + apps/server/.env auf dem Windows-Rechner — Instanzen bekommen
-    ihn ab dann automatisch), `verda-test/soft-love-smashes-fin-01.ppk` lokal
-    löschen (privater Key!), Lizenz-Entscheidung.
+R8. Teils erledigt: `CONTROL_BEARER` ✅ **rotiert** (2026-07-10, neuer Wert in
+    apps/server/.env + apps/bot/.env + deploy.env). Noch offen: ⏳
+    `verda-test/soft-love-smashes-fin-01.ppk` lokal auf dem Windows-Rechner
+    löschen (privater Key, liegt seit dem Audit noch da), Lizenz-Entscheidung.
 
 ## Phase B — Neuer Branch `fix/finalize-cloud-dataflow` von main
 
-**Warum:** `/leave` funktioniert; Live-Transkript-Events (JSONL) streamen nach
-dem Bot-Update (R2) live nach `~/transcripts` auf den Bot-Host und überleben
-das Instanz-Zerstören. Aber `finalize` ist auf der Cloud-Instanz **kaputt**
-(C1: Volume-Rechte, C2: kein Upload-Weg), und selbst wenn es liefe, bliebe
-das Ergebnis (transcript.md, Audio-Archiv, speaker-map) auf der ephemeren
-Instanz liegen und stirbt mit ihr (C3 fehlt). `stop.sh --backup` ist bis
-dahin der einzige manuelle Rettungsweg.
+**Warum:** `/leave` funktioniert; Live-Transkript-Events (JSONL) streamen seit
+PR #16 tatsächlich nach `~/transcripts` auf den Bot-Host (**Achtung:** vor #16
+lief die Route nie — der Handler existierte, wurde aber nie erreicht, siehe
+Callout oben — verwechsle "Code sieht fertig aus" nicht mit "läuft auch")
+und überleben das Instanz-Zerstören. Aber `finalize` ist auf der
+Cloud-Instanz **kaputt** (C1: Volume-Rechte — live bestätigt, siehe unten;
+C2: kein Upload-Weg), und selbst wenn es liefe, bliebe das Ergebnis
+(transcript.md, Audio-Archiv, speaker-map) auf der ephemeren Instanz liegen
+und stirbt mit ihr (C3 fehlt). `stop.sh --backup` ist bis dahin der einzige
+manuelle Rettungsweg.
 
 **Cloud-Session-tauglich:** komplett (reiner Repo-Code: apps/server,
 apps/bot, Dockerfile). Verifikation per `npm test` + Syntax-Checks dort;
@@ -155,6 +171,11 @@ die Live-Verifikation (unten) bleibt für User/lokale Session.
   `["node","src/index.js"]`. WORKDIR-Zeilen nicht anfassen.
 - Danach obsolet-prüfen: der TRANSCRIPT_DIR=/data/transcripts-Eintrag in
   deploy/docker-compose.yml bleibt korrekt, funktioniert dann aber wirklich.
+- **Live bestätigt (2026-07-10)**, nicht mehr nur Verdacht: Server-Log auf
+  der echten Instanz zeigte bei praktisch jedem STT/LLM/TTS-Event
+  `[WARN] transcript: log error: EACCES: permission denied, mkdir
+  '/data/transcripts'`. Konkreter Akzeptanztest für den Fix: diese Zeile
+  darf danach in einer echten Session nicht mehr auftauchen.
 
 ### C2. [OPUS] HTTP-Upload statt scp (`FINALIZE_UPLOAD_CMD`)
 
@@ -210,17 +231,18 @@ Bot, `apps/bot/src/finalize.js` `uploadSession()`:
 
 ## Phase D — Offene, separate Bugs (nicht Teil des Dataflow-Umbaus)
 
-1. **TTS-Playback bricht ab** [OPUS]: Bot-Log zeigte
-   `tts-playback: start` → sofort `stopped`, für BEIDE Requests, obwohl Server
-   `debug-tts: done frames=71` meldet. Keine Audio-Ausgabe im Channel. Verdacht:
-   Playback/Barge-in-Logik in `apps/bot/src/audio/`-Pfad (FIFO-Playback,
-   downlink.js) — reproduzieren mit `/join` + „Hey Rabenauge", dann
-   downlink.js/ttsStream-Logs beidseitig vergleichen. ACHTUNG: Beobachtung
-   stammt vom ALTEN Bot-Stand (v1.6.0/Streaming-Branch, läuft dort bis R2);
-   erst nach R2+R5 auf main reproduzieren — der gemergte Streaming-Rewrite
-   kann den Bug verändert/behoben haben. Erst Repro, dann Code anfassen.
-2. **Server-Version im Cloud-Image alt**: Log zeigte `server v1.4.1` obwohl
-   Branch-Image — nach v2.0.0-Tag verifizieren, dass Instanz `v2.0.0` loggt.
+1. **TTS-Playback bricht ab** — vermutlich BEREITS BEHOBEN, aber noch nicht
+   formal geschlossen. Ursprüngliche Beobachtung stammte vom ALTEN Bot-Stand
+   (v1.6.0/Streaming-Branch vor dem main-Merge): `tts-playback: start` →
+   sofort `stopped`, keine Audio-Ausgabe. **Live am 2026-07-10 auf main/v2.0.0
+   beobachtet: TTS lief zweimal sauber komplett durch** (`tts-playback: start`
+   → alle Frames empfangen/abgespielt → `stream ended` → `player idle`, keine
+   vorzeitigen Abbrüche). Kein aktiver Repro mehr nötig, solange das so bleibt
+   — nur noch einmal gegenprüfen (z.B. eine Session mit mehreren
+   Interrupt/Barge-in-Versuchen), dann diesen Punkt streichen statt mit
+   [OPUS]-Aufwand zu suchen.
+2. ✅ **Server-Version im Cloud-Image** — erledigt, live bestätigt: Instanz
+   loggt korrekt `server v2.0.0 listening on http://0.0.0.0:7440`.
 3. **Rabenauge-Kontext**: CAMPAIGN_REMOTE ist leer → Campaign-Volume leer →
    LLM ohne Kampagnen-Kontext. rclone-Setup (README „Campaign data") einrichten,
    wenn gewünscht.

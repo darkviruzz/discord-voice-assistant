@@ -167,11 +167,15 @@ VERDA_MIN_VRAM_GB="${VERDA_MIN_VRAM_GB:-24}"
 VERDA_MAX_HOURLY="${VERDA_MAX_HOURLY:-1.00}"
 VERDA_ALLOW_SPOT="${VERDA_ALLOW_SPOT:-false}"
 
-# Mask every real secret value in any text we print (dry-run output, error
-# bodies). Empty secrets are skipped so we never blanket-replace "".
+# Mask every real secret/identifier value in any text we print (dry-run
+# output, error bodies). Includes VERDA_SSH_KEY_ID and VERDA_CLIENT_ID even
+# though neither is exploitable alone without VERDA_CLIENT_SECRET (same
+# "prefer to over-mask" rule as `va env show`'s name-based masking) —
+# SSH_KEY_ID in particular gets baked into the dry-run instance payload.
+# Empty values are skipped so we never blanket-replace "".
 redact() {
   local text="$1" s
-  for s in "${WG_KEY:-}" "${CONTROL_BEARER:-}" "${GH_PAT:-}"; do
+  for s in "${WG_KEY:-}" "${CONTROL_BEARER:-}" "${GH_PAT:-}" "${VERDA_SSH_KEY_ID:-}" "${VERDA_CLIENT_ID:-}"; do
     [ -n "$s" ] && text="${text//"$s"/«redacted»}"
   done
   printf '%s' "$text"

@@ -116,6 +116,11 @@ services:
       OLLAMA_URL: http://ollama:11434
       TTS_URL: http://piper:5000
       RAG_URL: ${RAG_URL:-}
+      RAG_TIMEOUT_MS: ${RAG_TIMEOUT_MS:-800}
+      RAG_BRIEFING_ENABLED: ${RAG_BRIEFING_ENABLED:-true}
+      RAG_BRIEFING_TOP_K: ${RAG_BRIEFING_TOP_K:-3}
+      RAG_BRIEFING_POST_CHAT: ${RAG_BRIEFING_POST_CHAT:-false}
+      RAG_SCORE_THRESHOLD: ${RAG_SCORE_THRESHOLD:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-de}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
@@ -148,18 +153,40 @@ services:
         condition: service_started
       piper:
         condition: service_started
+      rag:
+        condition: service_started
 
-  # ── RAG (Phase 4 — placeholder, not yet implemented) ──────────────────────
-  # Uncomment once apps/rag/ exists. The server already reads RAG_URL.
-  # rag:
-  #   build:
-  #     context: ..
-  #     dockerfile: apps/rag/Dockerfile
-  #   container_name: va-rag
-  #   restart: unless-stopped
-  #   environment:
-  #     NVIDIA_VISIBLE_DEVICES: ${RAG_VISIBLE_DEVICES:-0}
-  #   networks: [voice]
+  # ── RAG (Phase 4) — semantic search over the Obsidian vault ────────────────
+  # Deliberately NO NVIDIA_VISIBLE_DEVICES / GPU reservation here, unlike the
+  # services above: this container does no computation of its own — embeddings
+  # are produced by the `ollama` service over HTTP (OLLAMA_URL), so `rag` only
+  # ever needs CPU.
+  rag:
+    image: ${REGISTRY:-ghcr.io/darkviruzz/discord-voice-assistant}/va-rag:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/rag/Dockerfile
+    container_name: va-rag
+    restart: unless-stopped
+    environment:
+      VAULT_PATH: /data/campaign
+      CHROMA_DIR: /data/chroma
+      OLLAMA_URL: http://ollama:11434
+      EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
+      RAG_SCORE_THRESHOLD: ${RAG_SCORE_THRESHOLD:-}
+    volumes:
+      - campaign:/data/campaign:ro
+      - rag-chroma:/data/chroma
+    networks: [voice]
+    depends_on:
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5001/health', timeout=3)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
 
 networks:
   voice:
@@ -173,3 +200,4 @@ volumes:
   archive:
   server-data:
   campaign:
+  rag-chroma:

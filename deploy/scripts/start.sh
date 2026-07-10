@@ -126,6 +126,14 @@ for _ in $(seq 1 30); do
 done
 "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || warn "ollama pull failed — pull manually later"
 
+# RAG (Phase 4) needs its own embedding model in the same ollama instance.
+# Only relevant once RAG_URL is set — skip silently on a plain deployment.
+if [ -n "${RAG_URL:-}" ]; then
+  RAG_EMBED_MODEL="${RAG_EMBED_MODEL:-nomic-embed-text}"
+  step "Pulling RAG embedding model: $RAG_EMBED_MODEL"
+  "${COMPOSE[@]}" exec -T ollama ollama pull "$RAG_EMBED_MODEL" || warn "RAG embed model pull failed — pull manually later"
+fi
+
 step "Starting the full stack"
 "${COMPOSE[@]}" up -d
 

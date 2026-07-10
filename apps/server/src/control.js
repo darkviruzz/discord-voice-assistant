@@ -188,6 +188,7 @@ async function handleFinalize(ws, msg) {
       sessionId: String(sessionId),
       transcriptPath: result.transcriptPath,
       archiveDir: result.archiveDir,
+      archiveName: result.archiveName, // → bot pulls the archive back by this dir name
       spanCount: result.spanCount,
       userCount: result.userCount,
       missing: result.missing,

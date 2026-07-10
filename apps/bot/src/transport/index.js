@@ -19,6 +19,13 @@ let _instance = null;
 let _chatMessageCallback = null;
 let _serverInfoCallback = null;
 let _finalizeRequestCallback = null;
+// Supplied by index.js at start() — true while the bot is actively in a voice
+// channel with an open session (same signal scheduleServerStop/scheduleIdleRelease
+// use). The watchdog below gates on THIS, not on currentSessionId: a session
+// deliberately stays "open" (currentSessionId set) across /leave for later
+// /join resumption, so gating on it alone kept re-running SERVER_START_CMD
+// long after nobody was even in voice anymore.
+let _isSessionActive = () => false;
 
 // Server-initiated finalize (idle auto-finalize). cb receives { sessionId, reason }.
 export function onFinalizeRequest(cb) {
@@ -48,8 +55,9 @@ function deriveBaseUrl() {
   return null;
 }
 
-export function start({ botId } = {}) {
+export function start({ botId, isSessionActive } = {}) {
   if (_instance) return _instance;
+  if (isSessionActive) _isSessionActive = isSessionActive;
   const baseUrl = deriveBaseUrl();
   if (!baseUrl) {
     log('transport: no SERVER_BASE_URL set — running standalone (no server link)');
@@ -96,15 +104,19 @@ export function start({ botId } = {}) {
   // Watchdog: the control socket's own reconnect loop only ever retries the
   // same SERVER_BASE_URL — it has no notion of "the server is gone for good
   // and a replacement needs to be launched" (e.g. a reclaimed spot instance).
-  // If we're unreachable for a while during an active session, re-run
-  // SERVER_START_CMD via the same ensureServerReachable() used on /join.
+  // If we're unreachable for a while while someone is actively in voice, re-run
+  // SERVER_START_CMD via the same ensureServerReachable() used on /join. Gated
+  // on _isSessionActive(), NOT currentSessionId: a session stays "open"
+  // (currentSessionId set) across /leave so it can resume on the next /join,
+  // so gating on it alone kept re-launching a cloud instance long after
+  // everyone had already left voice.
   let lastReadyAt = Date.now();
   let lastRestartAttemptAt = 0;
   fsm.on('change', (next) => {
     if (next === State.READY) lastReadyAt = Date.now();
   });
   const watchdogTimer = setInterval(() => {
-    if (!_instance?.currentSessionId || fsm.is(State.READY)) return;
+    if (!_isSessionActive() || fsm.is(State.READY)) return;
     const now = Date.now();
     if (now - lastReadyAt < WATCHDOG_THRESHOLD_MS) return;
     if (now - lastRestartAttemptAt < WATCHDOG_COOLDOWN_MS) return;
@@ -155,8 +167,8 @@ export function start({ botId } = {}) {
   // connect()/ensureConnected() (on /join or an on-demand /ask) and closed via
   // disconnect() (on /leave) so an idle bot keeps no server link — no endless
   // reconnect attempts and no periodic app-rtt pings while out of voice. The
-  // watchdog above is a no-op until currentSessionId is set (i.e. a session
-  // is actually active), so it stays dormant during this idle period too.
+  // watchdog above is a no-op until _isSessionActive() is true (i.e. someone
+  // is actually in voice), so it stays dormant during this idle period too.
   _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, idleReleaseTimer: null, watchdogTimer };
   return _instance;
 }

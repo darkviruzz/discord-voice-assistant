@@ -9,6 +9,17 @@
 > **Rollout-Checkliste** unten (User, bot-host), **Phase B** (Finalize-
 > Dataflow — DAS ist der Grund, warum das fertige Transkript/Archiv nach dem
 > Server-Shutdown noch NICHT auf dem Bot liegt) und **Phase D**.
+>
+> **Beim Live-Rollout auf dem echten bot-host gefunden + gefixt** (jeweils
+> eigener PR, Details dort — hier nur damit spätere Sessions nicht erneut
+> stolpern): PR #13 — `POST /v1/scripts` liefert die Script-ID als reinen
+> Text statt JSON (cloud-start.sh nahm fälschlich ein JSON-Objekt an) +
+> `VERDA_SSH_KEY_ID` fehlte in der `--dry-run`-Redaction. PR #14 — der
+> Watchdog in `transport/index.js` gate­te auf `currentSessionId` (bleibt
+> über `/leave` hinweg absichtlich gesetzt, für Session-Resume) statt auf
+> `hasActiveSession()` (echtes „ist gerade wer in Voice"-Signal) → re-startete
+> `SERVER_START_CMD` alle ~5–6 Min unbegrenzt weiter, auch lange nachdem alle
+> den Channel verlassen hatten.
 
 ## Ausführungskontext für Folge-Sessions (WICHTIG zuerst lesen)
 

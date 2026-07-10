@@ -438,6 +438,50 @@ export const CATALOG = [
     desc: 'Obergrenze der Zeichen (vom Dateianfang), die aus der Kampagnen-Kontext-Datei '
       + 'übernommen werden. Wird beim Laden gelesen.',
   },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_URL',
+    label: 'RAG-Dienst-URL (semantische Vault-Suche)', type: 'string', def: '',
+    applyMode: 'live',
+    desc: 'Basis-URL des Python-RAG-Dienstes (apps/rag). Gesetzt → pro Wake-Word-Query '
+      + 'semantische Suche im Obsidian-Vault statt statischem CAMPAIGN.md; bei Fehler/'
+      + 'Timeout Fallback auf die Datei. Leer = RAG aus. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_TIMEOUT_MS',
+    label: 'RAG-Timeout (ms)', type: 'number', def: '800', applyMode: 'live',
+    desc: 'Timeout pro RAG-Abfrage in ms; danach lautloser Fallback auf CAMPAIGN.md, die '
+      + 'Voice-Pipeline blockiert nie auf RAG. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_ENABLED',
+    label: 'Session-Briefing beim /join', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'true', applyMode: 'next-session',
+    desc: 'Session-Briefing beim /join — RAG-Query mit dem rekonstruierten Summary der '
+      + 'letzten Sitzung, Ergebnis als system-Message an den Anfang der '
+      + 'conversationHistory. Nur wirksam wenn RAG_URL gesetzt und ein Summary existiert. '
+      + 'Wird beim Session-Start gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_TOP_K',
+    label: 'Vault-Chunks fürs Briefing', type: 'number', def: '3', applyMode: 'next-session',
+    desc: 'Anzahl Vault-Chunks fürs /join-Briefing. Wird beim Session-Start gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_POST_CHAT',
+    label: 'Briefing als Chat-Nachricht posten', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'false', applyMode: 'next-session',
+    desc: 'Briefing zusätzlich als kurze Discord-Textnachricht in den Join-Kanal posten '
+      + '(LLM-generierter 2-3-Satz-Text). false = nur als LLM-Kontext injizieren. Wird '
+      + 'beim Session-Start gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_SCORE_THRESHOLD',
+    label: 'Max. Trefferdistanz (Score-Filter)', type: 'number', def: '', applyMode: 'live',
+    desc: 'Maximale Cosine-Distanz (0–2, kleiner = ähnlicher) für RAG-Treffer; wird als '
+      + 'score_threshold im POST /query an den RAG-Dienst durchgereicht, der Treffer '
+      + 'darüber verwirft, bevor sie in den LLM-Kontext gehen. Leer = kein Filter (alle '
+      + 'Top-K-Treffer). Typisch sinnvoll ~0.6–0.9. Wird pro Anfrage gelesen.',
+  },
 
   // ======================= SERVER: TTS ======================================
   {

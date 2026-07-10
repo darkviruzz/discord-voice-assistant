@@ -14,6 +14,7 @@ import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
 import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
+import { pullArchive, startArchiveCleanup } from './archivePuller.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -179,6 +180,7 @@ client.once('clientReady', async () => {
   log(`Bot v${getVersion()} online als ${client.user.tag}`);
   setBotStatus(null);
   startTranscriptCleanup();
+  startArchiveCleanup();
   await recoverOldSessions();
   transport.start({ botId: client.user.id, isSessionActive: hasActiveSession });
 
@@ -270,6 +272,26 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     session.finalize = { transcriptPath: result.transcriptPath, archiveDir: result.archiveDir, userCount: result.userCount };
     SessionManager.save(session);
 
+    // Pull the finished archive back onto the persistent bot host immediately —
+    // on a cloud instance the archive dies with the box at auto-stop, and the
+    // instance can only reach Proxmox (not the bot), so the bot must pull. Purely
+    // additive: a failure here NEVER kips the finalize result (stop.sh --backup
+    // stays as the safety net), it only annotates the status line.
+    let archiveNote = '';
+    if (result.archiveName) {
+      try {
+        const pull = await pullArchive({ archiveName: result.archiveName });
+        if (pull && pull.ok) {
+          archiveNote = ` 📦 Archiv lokal gesichert (${pull.files} Dateien).`;
+        } else if (pull && !pull.skipped) {
+          archiveNote = ` ⚠️ Archiv-Pull unvollständig (${pull.failed?.length ?? 0} Datei(en) fehlgeschlagen) — stop.sh --backup bleibt als Netz.`;
+        }
+      } catch (e) {
+        warn('finalize: archive pull failed:', e.message);
+        archiveNote = ' ⚠️ Archiv-Pull fehlgeschlagen — stop.sh --backup bleibt als Netz.';
+      }
+    }
+
     let retentionNote = '';
     if (fromArchive) {
       retentionNote = '';
@@ -281,7 +303,7 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     }
 
     if (sessions.active && sessions.active.id === session.id) detachActiveSession();
-    return { result, fullyVerified, retentionNote };
+    return { result, fullyVerified, retentionNote: retentionNote + archiveNote };
   } catch (e) {
     session.status = prevStatus;
     SessionManager.save(session);

@@ -133,8 +133,9 @@ function uploadRootDir() {
 }
 
 // Ensure the per-session upload dir exists before the bot transfers WAVs into
-// it (scp does not create missing remote directories).
-function ensureUploadDir(sessionId) {
+// it (scp does not create missing remote directories). Exported so the HTTP
+// upload route (finalizeHttp.js) resolves the same per-session target.
+export function ensureUploadDir(sessionId) {
   const dir = path.join(uploadRootDir(), String(sessionId));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -187,6 +188,7 @@ async function handleFinalize(ws, msg) {
       sessionId: String(sessionId),
       transcriptPath: result.transcriptPath,
       archiveDir: result.archiveDir,
+      archiveName: result.archiveName, // → bot pulls the archive back by this dir name
       spanCount: result.spanCount,
       userCount: result.userCount,
       missing: result.missing,

@@ -125,7 +125,8 @@ it trades portability and the simple WireGuard story for ~$0.30/hr.
 ## Portable images (the transfer guarantee)
 
 CI (`.github/workflows/build-images.yml`) builds and pushes three images to GHCR
-on every push to the deploy branch and on `v*` tags:
+on every branch push (`branch-<slug>` tags) and on `v*` tags — see the tag
+scheme in `docs/deploy-architecture.md`:
 
 ```
 ghcr.io/darkviruzz/discord-voice-assistant/va-server:<tag>
@@ -145,8 +146,10 @@ docker compose pull && docker compose up -d
 ```
 
 `start.sh` still works for build-on-host; pulling is just faster and guarantees
-the cheap-GPU test == big-GPU run. Make GHCR packages private and log in once
-per instance with a read-only PAT (`docker login ghcr.io`) — see Security below.
+the cheap-GPU test == big-GPU run. Repo and GHCR packages are public since
+2026-07 — pulls and clones are anonymous, no PAT anywhere. (If you ever flip
+them private again, set `GH_USER`/`GH_PAT` in `~/.config/va/deploy.env` and the
+startup script re-enables `docker login` + credentialed clone automatically.)
 
 ---
 
@@ -254,7 +257,9 @@ Ollama model on a running stack:
 docker compose -p va exec ollama ollama pull <model>
 ```
 
-Output volumes copied off the instance by `stop.sh`:
+Output volumes copied off the instance by `stop.sh` (now the manual fallback —
+the finished `archive` is pulled back to the bot host automatically after each
+finalize, see [Data privacy](#data-privacy)):
 
 | Volume        | Content |
 |---------------|---------|
@@ -534,10 +539,11 @@ destroy without calling the delete API.
 > paused state to resume, and the next `/join` cold-boots a brand new instance
 > via `cloud-start.sh`. Data safety for that destruction: session transcript
 > events already stream to the bot host live during the session (not just at
-> the end), an upcoming automatic archive pull-back after finalize is meant to
-> bring the full audio/transcript bundle back too, and `deploy/scripts/stop.sh
-> --backup` remains available as a manual pre-destroy fallback for anything
-> else left on the volumes.
+> the end), and the archive pull-back after a successful finalize brings the
+> full audio/transcript bundle back to the bot host automatically
+> (`BOT_ARCHIVE_DIR`, default `~/archive`) — `deploy/scripts/stop.sh --backup`
+> is now only a manual pre-destroy fallback for anything left on the volumes
+> outside that flow (e.g. a session that was never finalized).
 
 ### Option B — Tailscale (lighter)
 
@@ -631,9 +637,12 @@ is built so that, done right, **nothing is reachable from the public internet**.
 - **Web UI credentials.** Before exposing `/transcript` beyond the home LAN
   (Cloudflared or any other public tunnel), change `TRANSCRIPT_UI_USER`/`_PASS`
   away from the `greyhawk`/`greyhawk` default — see "Web UI access" above.
-- **Destroy, don't just stop.** After a session, pull the data back (`stop.sh`)
-  and **terminate** the instance so no disk lingers on the provider. Persist only
-  the model volume (no session data) if you want fast restarts.
+- **Destroy, don't just stop.** The finished archive and live transcript already
+  made it back to the bot host automatically (see [Data privacy](#data-privacy));
+  after a session, **terminate** the instance so no disk lingers on the provider —
+  `stop.sh --backup` remains the manual fallback for anything else left on the
+  volumes. Persist only the model volume (no session data) if you want fast
+  restarts.
 - **Data minimisation.** Only per-request audio chunks and (Phase 4) RAG chunks
   leave home — see below.
 
@@ -643,9 +652,12 @@ is built so that, done right, **nothing is reachable from the public internet**.
 
 Only the audio chunks and (Phase 4) RAG results needed for a request leave the
 home network over the tunnel. The Obsidian vault and Nextcloud stay local; the
-future `apps/rag/` service is expected to send **chunks only**. Transcripts and
-the audio archive live on instance volumes and are pulled back by `stop.sh`
-before the instance is destroyed.
+future `apps/rag/` service is expected to send **chunks only**. Live transcript
+events stream to the bot host throughout the session (not just at the end),
+and the finished audio archive is pulled back there automatically right after
+a successful finalize (`BOT_ARCHIVE_DIR`, default `~/archive`, each file
+sha256-verified). `stop.sh --backup` remains a manual fallback for anything
+left on the instance volumes before it's destroyed.
 
 ---
 

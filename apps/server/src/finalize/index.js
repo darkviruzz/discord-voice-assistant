@@ -200,6 +200,7 @@ export async function finalizeSession({
     sessionId: String(sessionId),
     transcriptPath,
     archiveDir,
+    archiveName: dirName, // sanitized dir basename → the bot's archive-pull key
     files,
     spanCount: model.spans.length,
     userCount: model.userCount,

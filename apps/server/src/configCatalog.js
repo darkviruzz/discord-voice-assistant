@@ -157,16 +157,20 @@ export const CATALOG = [
     label: 'Langzeit-Archiv-Verzeichnis', type: 'string', def: './archive',
     applyMode: 'next-finalize',
     desc: 'Zielverzeichnis des permanenten Archivs (Transkript + Audio + JSONL + '
-      + 'Manifest + Speaker-Map-Snapshot pro Session). Quelle für Re-Finalize. '
-      + 'Wird beim Finalize gelesen.',
+      + 'Manifest + Speaker-Map-Snapshot pro Session). Quelle für Re-Finalize. Wird '
+      + 'nach jedem erfolgreichen Finalize zusätzlich automatisch vom Bot auf den '
+      + 'Bot-Host gezogen (siehe BOT_ARCHIVE_DIR) — überlebt so das Zerstören der '
+      + 'ephemeren Cloud-Instanz. Wird beim Finalize gelesen.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'TRANSCRIPT_DIR',
     label: 'Transkript-Verzeichnis (Live-JSONL)', type: 'string', def: './transcripts',
     applyMode: 'live',
     desc: 'Verzeichnis für die fortlaufenden Live-Transkript-Events (JSONL pro '
-      + 'Session), die die Transkript-UI und das spätere Finalize nutzen. '
-      + 'Wird pro Zugriff neu gelesen.',
+      + 'Session), die die Transkript-UI und das spätere Finalize nutzen. Jedes '
+      + 'Event wird zusätzlich live über die Control-WS an den Bot gepusht und dort '
+      + 'in BOT_TRANSCRIPT_DIR gespiegelt — übersteht so auch das Ende der '
+      + '(bei Cloud-Instanzen: ephemeren) Server-Kopie. Wird pro Zugriff neu gelesen.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SPEAKER_MAP_FILE',
@@ -643,14 +647,64 @@ export const CATALOG = [
       + 'Modul-Konstante beim Bot-Start gelesen — greift nach Bot-Neustart.',
   },
 
+  // ======================= BOT: Transkript-Live-Sync =========================
+  {
+    scope: 'bot', group: 'Bot · Transkript-Live-Sync', key: 'BOT_TRANSCRIPT_DIR',
+    label: 'Transkript-Sync-Verzeichnis (Bot-Host)', type: 'string', def: '~/transcripts',
+    applyMode: 'restart',
+    desc: 'Zielverzeichnis auf dem (persistenten) Bot-Host, in das der Server jedes '
+      + 'Live-Transkript-Event (STT, LLM-Antwort, Wake-Word, …) zusätzlich zu seiner '
+      + 'eigenen — bei Cloud-Instanzen: ephemeren — Kopie live über die Control-WS '
+      + 'pusht (session_<id>.jsonl je Session). Unabhängig vom serverseitigen '
+      + 'TRANSCRIPT_DIR. Wird als Modul-Konstante beim Bot-Start gelesen — greift '
+      + 'erst nach einem Bot-Neustart, auch wenn eine Änderung hier sofort '
+      + 'gespeichert wird.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Transkript-Live-Sync', key: 'BOT_TRANSCRIPT_RETENTION_DAYS',
+    label: 'Aufbewahrung Transkript-Sync (Tage)', type: 'number', def: '30',
+    applyMode: 'restart',
+    desc: 'Wie viele Tage synchronisierte session_*.jsonl-Dateien in BOT_TRANSCRIPT_DIR '
+      + 'aufbewahrt werden, bevor sie automatisch gelöscht werden (Prüfung täglich, '
+      + 'einmal sofort beim Bot-Start). Wird als Modul-Konstante beim Bot-Start '
+      + 'gelesen — greift erst nach einem Bot-Neustart.',
+  },
+
+  // ======================= BOT: Finalize-Archiv-Pull ==========================
+  {
+    scope: 'bot', group: 'Bot · Finalize-Archiv-Pull', key: 'BOT_ARCHIVE_DIR',
+    label: 'Archiv-Zielverzeichnis (Bot-Host)', type: 'string', def: '~/archive',
+    applyMode: 'restart',
+    desc: 'Zielverzeichnis auf dem (persistenten) Bot-Host, in das der Bot das fertige '
+      + 'Archiv (transcript.md, manifest.json, speaker-map.json, session.jsonl, '
+      + 'audio/*) direkt nach einem erfolgreichen Finalize automatisch zurückzieht — '
+      + 'sonst stirbt es mit der ephemeren Cloud-Instanz beim Auto-Stop. Jede Datei '
+      + 'wird dabei per sha256 gegen das Server-Manifest verifiziert. Wird als '
+      + 'Modul-Konstante beim Bot-Start gelesen — greift erst nach einem '
+      + 'Bot-Neustart, auch wenn eine Änderung hier sofort gespeichert wird.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Finalize-Archiv-Pull', key: 'BOT_ARCHIVE_RETENTION_DAYS',
+    label: 'Aufbewahrung gezogener Archive (Tage)', type: 'number', def: '60',
+    applyMode: 'restart',
+    desc: 'Wie viele Tage gepullte Archiv-Ordner in BOT_ARCHIVE_DIR aufbewahrt werden, '
+      + 'bevor sie automatisch gelöscht werden (Prüfung täglich, einmal sofort beim '
+      + 'Bot-Start). Wird als Modul-Konstante beim Bot-Start gelesen — greift erst '
+      + 'nach einem Bot-Neustart.',
+  },
+
   // ======================= BOT: Finalize-Upload =============================
   {
     scope: 'bot', group: 'Bot · Finalize-Upload', key: 'FINALIZE_UPLOAD_CMD',
-    label: 'Upload-Kommando (WAV→Server)', type: 'string', def: '', applyMode: 'live',
+    label: 'Upload-Kommando (WAV→Server, Legacy)', type: 'string', def: '', applyMode: 'live',
     desc: 'Kommando-Template (scp/SSH), mit dem der Bot die Session-WAVs zum Server '
       + 'überträgt. Platzhalter: {src} = lokales chunks-Verzeichnis, {sessionId} = '
-      + 'Session-ID. Leer = Upload überspringen (gemeinsames Dateisystem). Wird pro '
-      + 'Finalize gelesen.',
+      + 'Session-ID. LEER (neuer Default) = HTTP-Upload über die bestehende '
+      + 'Server-Verbindung (SERVER_BASE_URL + CONTROL_BEARER, PUT /finalize/upload/…) '
+      + '— der Cloud-Pfad ohne scp-Ziel (Instanz nur per WireGuard erreichbar). '
+      + 'GESETZT = dieses Legacy-Kommando unverändert (LAN/Windows-Profil). Ist '
+      + 'weder dieses Kommando noch SERVER_BASE_URL gesetzt, wird der Upload '
+      + 'übersprungen (gemeinsames Dateisystem). Wird pro Finalize gelesen.',
   },
   {
     scope: 'bot', group: 'Bot · Finalize-Upload', key: 'ARCHIVE_RETENTION',

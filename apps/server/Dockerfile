@@ -34,7 +34,16 @@ COPY --from=build /app/node_modules ./node_modules
 COPY package.json package-lock.json ./
 COPY apps/server ./apps/server
 
-USER app
+# The entrypoint starts as root, fixes /data volume ownership, then drops to the
+# `app` user (uid 10001) itself — so there is no `USER app` here on purpose.
+# chmod here so the image works regardless of the file's git-index mode bit.
+COPY apps/server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Fail the BUILD (not the container start at 3am) if a future base-image bump
+# ships without setpriv — the entrypoint's privilege drop depends on it.
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && command -v setpriv >/dev/null \
+    || { echo "setpriv missing from base image — install util-linux or switch the entrypoint to gosu" >&2; exit 1; }
+
 WORKDIR /app/apps/server
 
 EXPOSE 7440
@@ -42,4 +51,5 @@ EXPOSE 7440
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=5 \
     CMD curl -fsS http://localhost:7440/health || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "src/index.js"]

@@ -365,7 +365,8 @@ export class ControlClient extends EventEmitter {
       case 'save_session':
       case 'stop_playback':
       case 'finalize_request':
-      case 'chat_message': {
+      case 'chat_message':
+      case 'transcript_event': {
         debug('control: server command:', msg.type);
         this.emit('serverCommand', msg);
         return;

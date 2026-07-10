@@ -19,8 +19,13 @@ is down the server silently falls back to the static `CAMPAIGN.md`.
 | Method | Path      | Body / result |
 |--------|-----------|---------------|
 | `POST` | `/index`  | (re)build the whole collection → `{ ok, indexed, files }` |
-| `POST` | `/query`  | `{ "query": "...", "top_k": 3 }` → `[{ "text", "source" }]` |
+| `POST` | `/query`  | `{ "query": "...", "top_k": 3, "score_threshold": 0.4 }` → `[{ "text", "source", "distance" }]` |
 | `GET`  | `/health` | `{ "ok": true, "indexed": N }` |
+
+`score_threshold` (optional, max cosine distance — smaller means more similar)
+drops hits above it; when omitted it falls back to the `RAG_SCORE_THRESHOLD`
+env var below. Each result's `distance` is the cosine distance to the query;
+it is left out when the running Chroma version doesn't report one.
 
 ## Setup
 
@@ -48,3 +53,4 @@ On Windows the service is started together with the others by
 | `OLLAMA_URL`  | `http://localhost:11434` | Ollama base URL for embeddings |
 | `EMBED_MODEL` | `nomic-embed-text`       | Ollama embedding model |
 | `RAG_PORT`    | `5001`                   | Port (when run via `python server.py`) |
+| `RAG_SCORE_THRESHOLD` | – (no filter)    | Max cosine distance for `/query` hits (0=identical..2=opposite); empty/invalid/negative = no filtering. Overridden per-request by `score_threshold` in the body. |

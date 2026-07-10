@@ -11,8 +11,11 @@ Endpoints
 POST /index   – (re)scan VAULT_PATH, chunk every .md by `##` sections, parse
                 frontmatter and (re)write the whole collection. Returns
                 {"ok": true, "indexed": N, "files": M}.
-POST /query   – body {"query": "...", "top_k": 3} → [{"text": "...",
-                "source": "..."}] (closest chunks first).
+POST /query   – body {"query": "...", "top_k": 3, "score_threshold": null} →
+                [{"text": "...", "source": "...", "distance": 0.0}] (closest
+                chunks first). score_threshold (optional, max cosine distance)
+                drops hits above it; falls back to RAG_SCORE_THRESHOLD when
+                omitted from the request.
 GET  /health  – {"ok": true, "indexed": N}.
 
 Environment variables
@@ -22,6 +25,9 @@ CHROMA_DIR    Directory for the persistent Chroma store (default ./chroma).
 OLLAMA_URL    Ollama base URL (default http://localhost:11434).
 EMBED_MODEL   Ollama embedding model (default nomic-embed-text).
 RAG_PORT      Port for `python -m uvicorn server:app` convenience (default 5001).
+RAG_SCORE_THRESHOLD  Max cosine distance for /query hits (0=identical..2=far);
+                     empty/unset/invalid/negative = no filtering (default).
+                     Overridden per-request by the query body's score_threshold.
 
 Run with:  python -m uvicorn server:app --host 0.0.0.0 --port %RAG_PORT%
 """
@@ -50,6 +56,22 @@ CHROMA_DIR  = os.environ.get("CHROMA_DIR", os.path.join(os.path.dirname(__file__
 OLLAMA_URL  = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 COLLECTION  = "vault"
+
+
+def _parse_score_threshold(raw: Optional[str]) -> Optional[float]:
+    """Parse RAG_SCORE_THRESHOLD: empty/unset/invalid/negative → None (no filter)."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+# Service-wide default max cosine distance for /query hits; a request's own
+# score_threshold (see QueryRequest) takes precedence when present. None = off.
+RAG_SCORE_THRESHOLD = _parse_score_threshold(os.environ.get("RAG_SCORE_THRESHOLD"))
 
 app = FastAPI(title="discord-voice-assistant RAG")
 
@@ -293,6 +315,37 @@ def _start_watcher():
 class QueryRequest(BaseModel):
     query: str
     top_k: int = Field(default=3, ge=1, le=20)
+    # Per-request max cosine distance; overrides RAG_SCORE_THRESHOLD when set.
+    score_threshold: Optional[float] = Field(default=None, ge=0)
+
+
+# ── Query filtering ──────────────────────────────────────────────────────────
+
+def _apply_threshold(
+    docs: list[str],
+    metas: list[Optional[dict]],
+    dists: Optional[list[Optional[float]]],
+    threshold: Optional[float],
+) -> list[dict]:
+    """Zip Chroma's parallel /query result lists into response items.
+
+    Drops hits whose cosine distance exceeds `threshold` (smaller = more
+    similar; None = no filtering). Pure and Chroma/FastAPI-free so it is
+    testable on its own. `dists` may be None or contain None entries — older
+    Chroma versions may omit distances, or a single hit may lack one; either
+    way the hit is kept (we can't judge it) and its "distance" key is left out.
+    """
+    if dists is None:
+        dists = [None] * len(docs)
+    out = []
+    for doc, meta, dist in zip(docs, metas, dists):
+        if threshold is not None and dist is not None and dist > threshold:
+            continue
+        item = {"text": doc, "source": (meta or {}).get("source", "")}
+        if dist is not None:
+            item["distance"] = round(dist, 4)
+        out.append(item)
+    return out
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -337,14 +390,14 @@ def query(req: QueryRequest) -> list[dict]:
         res = col.query(
             query_embeddings=[vec],
             n_results=req.top_k,
-            include=["documents", "metadatas"],
+            include=["documents", "metadatas", "distances"],
         )
     docs = (res.get("documents") or [[]])[0]
     metas = (res.get("metadatas") or [[]])[0]
-    out = []
-    for doc, meta in zip(docs, metas):
-        out.append({"text": doc, "source": (meta or {}).get("source", "")})
-    return out
+    dists_raw = res.get("distances")
+    dists = dists_raw[0] if dists_raw else None
+    threshold = req.score_threshold if req.score_threshold is not None else RAG_SCORE_THRESHOLD
+    return _apply_threshold(docs, metas, dists, threshold)
 
 
 @app.get("/health")

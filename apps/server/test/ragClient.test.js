@@ -6,9 +6,14 @@ import { queryRag, ragEnabled } from '../src/ragClient.js';
 let savedEnv;
 
 beforeEach(() => {
-  savedEnv = { RAG_URL: process.env.RAG_URL, RAG_TIMEOUT_MS: process.env.RAG_TIMEOUT_MS };
+  savedEnv = {
+    RAG_URL: process.env.RAG_URL,
+    RAG_TIMEOUT_MS: process.env.RAG_TIMEOUT_MS,
+    RAG_SCORE_THRESHOLD: process.env.RAG_SCORE_THRESHOLD,
+  };
   delete process.env.RAG_URL;
   delete process.env.RAG_TIMEOUT_MS;
+  delete process.env.RAG_SCORE_THRESHOLD;
 });
 
 afterEach(() => {
@@ -83,4 +88,48 @@ test('degrades to "" on timeout', async () => {
     assert.equal(await queryRag('x'), '');
     assert.ok(Date.now() - t0 < 400, 'aborted well before the slow response');
   });
+});
+
+test('sends score_threshold in the body when RAG_SCORE_THRESHOLD is set', async () => {
+  process.env.RAG_SCORE_THRESHOLD = '0.75';
+  await withServer((body, res) => {
+    assert.equal(body.score_threshold, 0.75);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('[]');
+  }, () => queryRag('Greyhawk'));
+});
+
+test('omits score_threshold when RAG_SCORE_THRESHOLD is unset', async () => {
+  await withServer((body, res) => {
+    assert.equal('score_threshold' in body, false);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('[]');
+  }, () => queryRag('Greyhawk'));
+});
+
+test('omits score_threshold when RAG_SCORE_THRESHOLD is empty', async () => {
+  process.env.RAG_SCORE_THRESHOLD = '   ';
+  await withServer((body, res) => {
+    assert.equal('score_threshold' in body, false);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('[]');
+  }, () => queryRag('Greyhawk'));
+});
+
+test('omits score_threshold when RAG_SCORE_THRESHOLD is not a number', async () => {
+  process.env.RAG_SCORE_THRESHOLD = 'abc';
+  await withServer((body, res) => {
+    assert.equal('score_threshold' in body, false);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('[]');
+  }, () => queryRag('Greyhawk'));
+});
+
+test('omits score_threshold when RAG_SCORE_THRESHOLD is negative', async () => {
+  process.env.RAG_SCORE_THRESHOLD = '-1';
+  await withServer((body, res) => {
+    assert.equal('score_threshold' in body, false);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('[]');
+  }, () => queryRag('Greyhawk'));
 });

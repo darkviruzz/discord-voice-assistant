@@ -19,6 +19,16 @@ function timeoutMs() {
   return Number.isFinite(v) && v > 0 ? v : 800;
 }
 
+// Max cosine distance for /query hits, read fresh on every call (settings-panel
+// friendly). Empty/unset/invalid/negative → null, meaning "no filter" — the
+// RAG service then falls back to its own RAG_SCORE_THRESHOLD default, if any.
+function scoreThreshold() {
+  const raw = process.env.RAG_SCORE_THRESHOLD;
+  if (!raw || !raw.trim()) return null;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 // Render the service's [{ text, source }] result into a compact text block,
 // one chunk per paragraph, each prefixed with its source for traceability.
 function formatChunks(results) {
@@ -39,13 +49,19 @@ export async function queryRag(query, topK = 3) {
   const text = typeof query === 'string' ? query.trim() : '';
   if (!text) return '';
 
+  // score_threshold is only sent when configured — older RAG services would
+  // ignore an unknown field anyway, but omitting it keeps the body minimal.
+  const threshold = scoreThreshold();
+  const body = { query: text, top_k: topK };
+  if (threshold !== null) body.score_threshold = threshold;
+
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs());
   try {
     const res = await fetch(`${base}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text, top_k: topK }),
+      body: JSON.stringify(body),
       signal: ac.signal,
     });
     if (!res.ok) {

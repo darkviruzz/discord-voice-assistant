@@ -134,10 +134,12 @@ R5. ✅ **Erster echter Deploy live bestätigt** (2026-07-10): Instanz
 R6. ⏳ **Jetzt actionable** (Bedingung "erfolgreicher R5" ist erfüllt): altes
     Startup-Script im Verda-Dashboard löschen, Branch
     `claude/gpu-cloud-deployment-msrcy3` löschen.
-R7. ⏳ **Offen** — Web-UI-Reverse-Proxy (nur von LAN/bot-host machbar): nginx
-    auf bot-host `192.168.20.21:7440 → 10.10.0.2:7440` (Config wörtlich in
-    deploy/README.md „Web UI access"; SSE braucht `proxy_buffering off`).
-    Vor jeder Cloudflared-Veröffentlichung: `TRANSCRIPT_UI_USER/_PASS` ändern!
+R7. ✅ **Erledigt** (2026-07-10): nginx-Reverse-Proxy auf bot-host installiert
+    (`192.168.20.21:7440 → 10.10.0.2:7440`, Config aus deploy/README.md
+    „Web UI access", `nginx -t` ok, Service enabled). Web-UI damit LAN-weit
+    unter `http://192.168.20.21:7440/transcript/` erreichbar. WEITERHIN
+    GÜLTIG: vor jeder Cloudflared-Veröffentlichung `TRANSCRIPT_UI_USER/_PASS`
+    ändern (Default greyhawk/greyhawk)!
 R8. Teils erledigt: `CONTROL_BEARER` ✅ **rotiert** (2026-07-10, neuer Wert in
     apps/server/.env + apps/bot/.env + deploy.env). Noch offen: ⏳
     `verda-test/soft-love-smashes-fin-01.ppk` lokal auf dem Windows-Rechner

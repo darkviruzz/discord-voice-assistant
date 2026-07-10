@@ -276,8 +276,18 @@ if [ "$REG_CODE" -ge 400 ]; then
 fi
 SCRIPT_ID=$(jq -r '.id // .script.id // empty' "$REG_BODY" 2>/dev/null || true)
 if [ -z "$SCRIPT_ID" ]; then
+  # Observed in practice: Verda returns the bare id as PLAIN TEXT (no JSON at
+  # all), not {"id":...}. Fall back to the raw body, quote/whitespace-stripped,
+  # treated as the id IF it doesn't still look like leftover JSON structure.
+  RAW_ID="$(tr -d '[:space:]"' < "$REG_BODY")"
+  case "$RAW_ID" in
+    ''|*[{}\[\]]*) ;;
+    *) SCRIPT_ID="$RAW_ID" ;;
+  esac
+fi
+if [ -z "$SCRIPT_ID" ]; then
   MSG=$(redact "$(cat "$REG_BODY")"); rm -f "$REG_BODY"
-  die "could not parse script id from POST /scripts response (.id / .script.id): $MSG"
+  die "could not parse script id from POST /scripts response (.id / .script.id, nor as bare text): $MSG"
 fi
 rm -f "$REG_BODY"
 log "registered startup script $SCRIPT_NAME (id=$SCRIPT_ID)"

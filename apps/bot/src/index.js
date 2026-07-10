@@ -180,7 +180,7 @@ client.once('clientReady', async () => {
   setBotStatus(null);
   startTranscriptCleanup();
   await recoverOldSessions();
-  transport.start({ botId: client.user.id });
+  transport.start({ botId: client.user.id, isSessionActive: hasActiveSession });
 
   transport.onServerInfo((info) => {
     setBotStatus(info.connected ? info.version : null);

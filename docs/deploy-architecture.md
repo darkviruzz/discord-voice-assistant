@@ -36,7 +36,7 @@ Implementierungen nachziehen.
 
 ## Image-Tags (CI-Kontrakt)
 
-| Git-Ereignis | Docker-Tags (je Image `va-server`, `va-piper`, `va-whisper`) |
+| Git-Ereignis | Docker-Tags (je Image `va-server`, `va-rag`, `va-piper`, `va-whisper`) |
 |---|---|
 | push `main` | `latest`, `sha-<shortsha>` |
 | push Branch X | `branch-<slug(X)>` |
@@ -155,7 +155,9 @@ va env    show [--profile P] [--slot S]      # effektive Env, Secret-Werte maski
    Proxmox (`wg set wg0 peer <pubkey> allowed-ips 10.10.0.3/32` +
    persistent in wg0.conf).
 3. **GHCR-Packages public** stellen (GitHub → Packages → je `va-server`,
-   `va-piper`, `va-whisper` → Change visibility) → PAT entfällt komplett.
+   `va-rag`, `va-piper`, `va-whisper` → Change visibility) → PAT entfällt
+   komplett. (`va-rag` existiert erst nach dem ersten CI-Lauf mit dem
+   RAG-Branch/-Merge — neue GHCR-Packages starten immer privat.)
 4. **Vor Repo-public**: `CONTROL_BEARER` rotieren (Wert stand bis 2026-07 im
    Klartext in docs/plans/…), altes Verda-Startup-Script im Dashboard löschen,
    untracked lokale Verzeichnisse (`verda-test/`, `outputs/`, …) prüfen/löschen,

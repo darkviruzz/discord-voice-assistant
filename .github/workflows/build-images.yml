@@ -39,6 +39,9 @@ jobs:
           - name: va-server
             context: .
             dockerfile: apps/server/Dockerfile
+          - name: va-rag
+            context: .
+            dockerfile: apps/rag/Dockerfile
           - name: va-piper
             context: services/piper
             dockerfile: services/piper/Dockerfile

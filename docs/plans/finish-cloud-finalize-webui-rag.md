@@ -1,6 +1,6 @@
 # Plan: Cloud-Finalize, Web-UI und RAG fertigstellen
 
-Stand: 2026-07-10, main @ `c4501b9`. Basiert auf einer Drei-Branch-Analyse
+Stand: 2026-07-11, Branch `claude/rag-integration-orchestration-inmqox`. Basiert auf einer Drei-Branch-Analyse
 (Kompatibilität + Vollständigkeit) von `fix/finalize-cloud-dataflow`,
 `claude/rag-service-phase-4-bml2jq` und dem Web-UI-Reststand laut
 [`fix-gpu-deployment-and-webui-merge.md`](fix-gpu-deployment-and-webui-merge.md).
@@ -8,7 +8,11 @@ Stand: 2026-07-10, main @ `c4501b9`. Basiert auf einer Drei-Branch-Analyse
 > **Fortschritt:**
 > - ✅ **Schritt 1** — `fix/finalize-cloud-dataflow` gemergt (`c4501b9`), 140 Tests grün. Offen: nur Live-Verify auf echter Instanz.
 > - ✅ **R7** — nginx-Reverse-Proxy fürs Web-UI erledigt (vom User bestätigt).
-> - ⏭️ **Nächste Coding-Session: Schritt 2 (RAG)** — siehe Detail-Checkliste unten.
+> - ✅ **Schritt 2 (RAG)** — RAG-Branch per Merge-Commit integriert (`081809d`), Katalog/config_state
+>   (`63eef7e`), Score-Threshold (`493f6bf`), Docker-Deploy (`63431bd`). 144/144 Server- + 10/10
+>   Bot-Tests grün. Version auf `2.1.0` gebumpt, TODO.md aktualisiert (Housekeeping-Commit); der
+>   `v2.1.0`-Tag folgt erst nach dem PR-Merge auf `main`.
+> - ⏭️ **Nächster Schritt** — Live-Verify (siehe „Danach"-Abschnitt unten) + Web-UI-Rest (Schritt 3).
 
 ## Befund-Zusammenfassung
 
@@ -110,36 +114,45 @@ Was der Branch mitbringt (bereits fertig, nur mergen):
 
 ### Checkliste (in Reihenfolge)
 
-- [ ] **1. Rebase** `claude/rag-service-phase-4-bml2jq` auf aktuellen main.
-  - Einziger Konflikt: `apps/server/src/control.js` Import-/Callback-Block.
-    Beide Ketten behalten: main hat `maybeFold`/`appendLive` (Live-Chunk-Update),
-    Branch fügt `maybeSessionBriefing` hinzu. Im `session_start`-Handler nach
-    `rebuildLiveContext` **beide** Aufrufe verdrahten.
-  - `pipeline.js`/`campaignContext.js` mergen textuell sauber (nur Kommentar-Drift).
-    Semantik verifizieren: main ruft `getCampaignContext` synchron in
-    `buildSystemBlocks` (nicht async) — der Branch macht beide async. Einziger
-    Call-Site, also sauber; nach Rebase `buildSystemBlocks` = async lassen und
-    den `await` prüfen.
-- [ ] **2. configCatalog.js** — die 5 RAG-Env-Vars registrieren (Gruppe
+- [x] **1. Merge** `claude/rag-service-phase-4-bml2jq` auf aktuellen main geholt.
+  **Korrektur gegenüber dem Plan:** Es war **kein Rebase** — der Branch wurde per
+  Merge-Commit (`081809d`) auf den aktuellen main-Stand geholt.
+  - Der erwartete Konflikt trat wie vorhergesagt genau in `apps/server/src/control.js`
+    auf (Import-/Callback-Block) und wurde wie geplant aufgelöst: **beide Ketten**
+    behalten — main behält `maybeFold`/`appendLive` (Live-Chunk-Update), der Branch
+    bringt `maybeSessionBriefing` mit; im `session_start`-Handler laufen nach
+    `rebuildLiveContext` beide Aufrufe.
+  - `pipeline.js`/`campaignContext.js` mergten textuell sauber (nur Kommentar-Drift).
+    Semantik verifiziert: `buildSystemBlocks` ist async und awaitet
+    `getCampaignContext` korrekt — einziger Call-Site.
+- [x] **2. configCatalog.js** — die RAG-Env-Vars registriert (Gruppe
   „Server · Live- & Kampagnen-Kontext", wo schon `CAMPAIGN_CONTEXT_*`/`OBSIDIAN_VAULT_PATH` stehen):
-  `RAG_URL`, `RAG_TIMEOUT_MS`, `RAG_BRIEFING_ENABLED`, `RAG_BRIEFING_TOP_K`, `RAG_BRIEFING_POST_CHAT`.
-  Contract ist verpflichtend — ohne Katalog-Eintrag erscheinen sie nicht im Settings-Panel.
-  Zusätzlich `config_state`-Report in `control.js` (~Z.95) um die RAG-Felder ergänzen (Bot-Parität).
-- [ ] **3. Deploy** — RAG in den Stack:
-  - `apps/rag/Dockerfile` schreiben (existiert noch nicht; Compose-Kommentar referenziert ihn).
-  - Auskommentierten `rag`-Service-Block in `deploy/docker-compose.yml` aktivieren
-    (`RAG_URL` wird bereits an den `server`-Service durchgereicht).
-  - `server`-environment um `RAG_TIMEOUT_MS`/`RAG_BRIEFING_*` ergänzen.
-  - `deploy/.env.example`: `RAG_VISIBLE_DEVICES`, `RAG_TIMEOUT_MS`, `RAG_BRIEFING_*`.
-  - Vault-Volume read-only in den RAG-Container mounten (analog `campaign:/data/campaign:ro`).
-- [ ] **4. Score-Threshold** für `POST /query` (fehlendes Spec-Item aus `obsidian-per-query`):
-  `server.py` filtert Top-K nach Distanz; `RAG_SCORE_THRESHOLD`-Env + Katalog-Eintrag.
-- [ ] **5. Tests grün** — `npm install` (Workspace-`node_modules` fehlen im frischen Container!),
-  dann `node --test` in `apps/server` und `apps/bot`. Ziel: alle grün inkl. der neuen RAG-Tests.
-- [ ] **6. Version-Bump** auf `2.1.0` (Bot + Server `package.json`), TODO.md Phase-4-Einträge
-  auf `[x]` setzen, `v2.1.0` taggen.
+  `RAG_URL`, `RAG_TIMEOUT_MS`, `RAG_BRIEFING_ENABLED`, `RAG_BRIEFING_TOP_K`, `RAG_BRIEFING_POST_CHAT`,
+  `RAG_SCORE_THRESHOLD` — Commit `63eef7e`. `config_state`-Report in `control.js` um die
+  RAG-Felder ergänzt (Bot-Parität).
+- [x] **3. Deploy** — RAG in den Stack — Commit `63431bd`:
+  - `apps/rag/Dockerfile` geschrieben (non-root `app`-User, setpriv-Privilegien-Drop
+    analog zum Server-Container).
+  - `rag`-Service-Block in `deploy/docker-compose.yml` aktiviert (Vault-Volume ro,
+    eigenes `rag-chroma`-Volume, Healthcheck; kein GPU-Passthrough — Embeddings laufen
+    über den `ollama`-Service per HTTP).
+  - `server`-environment um `RAG_TIMEOUT_MS`/`RAG_BRIEFING_*`/`RAG_SCORE_THRESHOLD` ergänzt.
+  - `deploy/.env.example`: alle `RAG_*`-Vars dokumentiert/defaultet (`RAG_URL` →
+    `http://rag:5001`).
+  - `deploy/scripts/start.sh`: pullt zusätzlich `RAG_EMBED_MODEL` in die Ollama-Instanz.
+- [x] **4. Score-Threshold** für `POST /query` (fehlendes Spec-Item aus `obsidian-per-query`)
+  — Commit `493f6bf`: `server.py` filtert Top-K-Treffer nach Cosine-Distanz
+  (`_apply_threshold`, pure/testbar ohne FastAPI/Chroma); `RAG_SCORE_THRESHOLD`-Env +
+  per-Request-Override (`score_threshold`) + Katalog-Eintrag; `ragClient.js` hängt den
+  Threshold nur an, wenn konfiguriert.
+- [x] **5. Tests grün** — `npm install` im Root, dann `node --test` in `apps/server`
+  (144/144) und `apps/bot` (10/10). Alle grün inkl. der neuen RAG-/Score-Threshold-Tests.
+- [x] **6. Version-Bump** auf `2.1.0` (Bot + Server `package.json`, `package-lock.json`
+  nachgezogen), TODO.md Phase-4-Einträge auf `[x]` gesetzt (Housekeeping-Commit).
+  **`v2.1.0`-Tag folgt erst nach dem PR-Merge auf `main`** — noch nicht gesetzt.
 
 ### Optional / niedrige Priorität (nicht blockierend)
+Bewusst **nicht** Teil dieser Session (Housekeeping-Commit betrifft nur Version/TODO/Doku):
 - [ ] RAG-Query parallel zu STT/LLM statt sequenziellem `await` (fail-soft + 800-ms-Timeout
   machen die Sequenzialität funktional unkritisch — nur Latenz-Politur).
 - [ ] pytest für `apps/rag/server.py` (Chunking/Frontmatter/Endpunkte — aktuell 0 Python-Coverage).

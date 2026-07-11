@@ -141,17 +141,21 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Endpunkte: `POST /query`, `POST /index`, `GET /health`
   - Env: `VAULT_PATH`, `CHROMA_DIR`, `OLLAMA_URL`, `EMBED_MODEL`, `RAG_PORT`; Start/Stop via `scripts/Start-VoiceAssistant.ps1`
   - Voraussetzungen: `ollama pull nomic-embed-text`, eigenes venv in `apps/rag/`
+  - **Score-Threshold-Filter** (2.1.0): `RAG_SCORE_THRESHOLD` (max. Cosine-Distanz, 0=identisch..2=entgegengesetzt) filtert `/query`-Treffer serverseitig (`server.py`, `_apply_threshold`), pro Request via `score_threshold` überschreibbar; `ragClient.js` liest den Env-Wert frisch pro Call und hängt ihn nur an, wenn gesetzt
+  - **Docker-Deploy** (2.1.0): `apps/rag/Dockerfile` (non-root, setpriv-Privilegien-Drop wie der Server-Container), `rag`-Service im Cloud-Compose-Stack (`deploy/docker-compose.yml`, Vault-Volume ro, eigenes `rag-chroma`-Volume, Healthcheck), `RAG_EMBED_MODEL`-Pull in `deploy/scripts/start.sh`, alle `RAG_*`-Vars in `deploy/.env.example`
 
 - [x] **`feature/obsidian-per-query`** — Vault-Kontext bei jedem Wake-Word-Call.
   - `apps/server/src/ragClient.js`: `queryRag(query, topK)` über native `fetch`, fail-soft mit Timeout (`RAG_TIMEOUT_MS`, Default 800ms)
   - `getCampaignContext(query)` ist jetzt async: bei gesetztem `RAG_URL` semantische Suche, sonst/bei Fehler Fallback auf `CAMPAIGN.md`
   - `buildSystemBlocks()` awaitet den Lookup; Top-K Chunks als `role: system`-Präambel (nicht in History persistiert)
+  - `RAG_SCORE_THRESHOLD` (2.1.0) filtert schwache Treffer bereits im RAG-Service weg, bevor sie hier ankommen (s. `feature/rag-service`)
 
 - [x] **`feature/obsidian-session-start`** — Briefing beim `/join`.
   - `apps/server/src/sessionBriefing.js`: nach dem Live-Context-Rebuild RAG-Query mit der rekonstruierten rollenden Zusammenfassung als Suchtext
   - Vault-Chunks als `role: system`-Message am Anfang der `conversationHistory`
   - Optional (`RAG_BRIEFING_POST_CHAT`): LLM erzeugt kurzes Briefing → Discord-Text-Nachricht (Bot rendert `briefing`-`chat_message`)
   - Durchgängig best-effort: No-op wenn RAG aus, kein Summary vorhanden oder ein Call fehlschlägt
+  - Alle RAG-Env-Vars (inkl. `RAG_BRIEFING_*`) seit 2.1.0 im Settings-Katalog (`configCatalog.js` + `config_state` in `control.js`) — sichtbar/konfigurierbar im Web-Panel
 
 - [ ] **`feature/obsidian-write-notes`** *(später)* — automatische Session-Notes.
   - Format und Vault-Pfad noch offen

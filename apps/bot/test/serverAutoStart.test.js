@@ -45,6 +45,11 @@ function listen(port = 0) {
   });
 }
 // A loopback port with nothing listening on it (bound once, then released).
+// A port that is free right now — only for tests that then bind it
+// themselves. NOT for "nothing ever listens here": `node --test` runs the
+// other test files in parallel processes, and any of their listen(0) calls can
+// be handed exactly this ephemeral port seconds later (seen in CI: the
+// "never comes up" test got 'started').
 async function closedPort() {
   const srv = net.createServer();
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -64,10 +69,15 @@ afterEach(async () => {
 const node = JSON.stringify(process.execPath);
 const FAST = { probeTimeoutMs: 300, pollIntervalMs: 20 };
 
+// Port 1 (tcpmux) is below the ephemeral range, so no listen(0) anywhere in
+// the suite can ever be assigned it, and nothing listens there on dev/CI
+// hosts → a connect is refused deterministically.
+const NEVER_OPEN_PORT = 1;
+
 test('probeTcp: true for a listening port, false for a closed one (never throws)', async () => {
   const open = await listen();
   assert.equal(await probeTcp('127.0.0.1', open, 500), true);
-  assert.equal(await probeTcp('127.0.0.1', await closedPort(), 500), false);
+  assert.equal(await probeTcp('127.0.0.1', NEVER_OPEN_PORT, 500), false);
   assert.equal(await probeTcp('127.0.0.1', 70000, 200), false, 'invalid port (sync throw) resolves false');
 });
 
@@ -88,7 +98,7 @@ test('ensureServerReachable: reachable server → "already-online" without runni
 });
 
 test('ensureServerReachable: offline and no SERVER_START_CMD → "no-cmd"', async () => {
-  process.env.SERVER_BASE_URL = `ws://127.0.0.1:${await closedPort()}`;
+  process.env.SERVER_BASE_URL = `ws://127.0.0.1:${NEVER_OPEN_PORT}`;
   delete process.env.SERVER_START_CMD;
   assert.equal(await ensureServerReachable(FAST), 'no-cmd');
 });
@@ -112,7 +122,7 @@ test('ensureServerReachable: offline → runs the start command and returns "sta
 });
 
 test('ensureServerReachable: "timeout" when the server never comes up; progress carries the command\'s last output line', async () => {
-  process.env.SERVER_BASE_URL = `ws://127.0.0.1:${await closedPort()}`;
+  process.env.SERVER_BASE_URL = `ws://127.0.0.1:${NEVER_OPEN_PORT}`;
   process.env.SERVER_START_CMD = `${node} -e "console.log('stdout line'); console.error('[cloud-start] no capacity'); process.exit(3)"`;
   const waiting = [];
   const r = await ensureServerReachable({

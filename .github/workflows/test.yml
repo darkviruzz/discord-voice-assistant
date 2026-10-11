@@ -4,8 +4,11 @@ name: test
 # service (apps/rag). No GPU, Ollama or Discord needed: the RAG suite stubs the
 # embedding call and uses a throwaway ChromaDB in a tmp dir.
 
+# push only on main: PR branches are covered by pull_request (otherwise every
+# push to a PR branch ran the whole suite twice).
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

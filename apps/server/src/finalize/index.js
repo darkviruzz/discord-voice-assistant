@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
 import { summarizeSession, writeSummaryToVault } from './summary.js';
+import { resetLastSessionCache } from '../lastSession.js';
 import { warn, log } from '../logger.js';
 
 // Default re-STT is lazy-loaded so importing the orchestrator (e.g. in tests
@@ -196,6 +197,9 @@ export async function finalizeSession({
     fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');
     const dateLabel = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(model.sessionStartMs));
     writeSummaryToVault(summary, { title: `${dateLabel} Session-Zusammenfassung (${dirName})`, dateLabel });
+    // The recap context ("Was war letztes Mal?", /recap) caches its archive
+    // lookup for 30 s — a /recap right after this finalize must see it.
+    resetLastSessionCache();
   }
 
   // Audio archive (OGG/Opus). Best-effort: a failure must not lose the transcript.

@@ -157,6 +157,12 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - Durchgängig best-effort: No-op wenn RAG aus, kein Summary vorhanden oder ein Call fehlschlägt
   - Alle RAG-Env-Vars (inkl. `RAG_BRIEFING_*`) seit 2.1.0 im Settings-Katalog (`configCatalog.js` + `config_state` in `control.js`) — sichtbar/konfigurierbar im Web-Panel
 
+- [x] **`feat/rag-in-node`** — RAG in den Node-Server verlegt; Python-Dienst, `va-rag`-Image und pytest-CI-Job entfernt.
+  - `apps/server/src/rag/`: Frontmatter (`yaml`, rein JS), `##`-Chunking, Vault-Scan, Float32-Brute-Force-Cosinus, atomar persistierter Index (`RAG_INDEX_DIR`, Compose: `/data/rag` auf `server-data`), inkrementeller Single-Flight-Sync, `fs.watch`-Watcher + periodischer Abgleich
+  - Embeddings über `providers/embed.js` (Ollama oder OpenAI-kompatibel); `ragClient.js` entfällt, `RAG_URL` ebenso; neu: `RAG_ENABLED`, `RAG_MAX_CHUNK_CHARS`, `RAG_RESCAN_INTERVAL_MS`, `EMBED_*`
+  - Die pytest-Suite ist nach `node:test` portiert (`apps/server/test/rag*.test.js`); Doku: [`docs/rag.md`](docs/rag.md)
+  - Die Einträge oben beschreiben den historischen Python-Stand (`apps/rag/`, ChromaDB, `RAG_URL`)
+
 - [ ] **`feature/obsidian-write-notes`** *(später)* — automatische Session-Notes.
   - Format und Vault-Pfad noch offen
   - Erst nach Erfahrung mit Read-Only-Integration

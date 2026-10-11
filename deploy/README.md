@@ -13,11 +13,10 @@ this stack is exposed to the public internet.
                  home network                    │   GPU cloud instance
   ┌───────────────────────────────┐              │  ┌──────────────────────────┐
   │ Proxmox (control plane)        │   WireGuard  │  │ docker compose (deploy/)  │
-  │  └─ discord-bot (systemd) ─────┼──────────────┼─▶│  server :7440             │
+  │  └─ discord-bot (systemd) ─────┼──────────────┼─▶│  server :7440 (+ RAG)     │
   │     SERVER_BASE_URL=wg-ip:7440 │   tunnel     │  │   ├─ whisper :8080 (CUDA) │
   └───────────────────────────────┘              │  │   ├─ ollama  :11434       │
-                                                  │  │   ├─ piper   :5000 (CUDA) │
-                                                  │  │   └─ (rag    Phase 4)     │
+                                                  │  │   └─ piper   :5000 (CUDA) │
                                                   │  └──────────────────────────┘
 ```
 
@@ -88,7 +87,7 @@ GPU must run unchanged on a big one) and **security** (no public exposure,
 ideally EU jurisdiction for the P&P data).
 
 **Portability is solved by version-pinned images, not by the provider.** CI
-publishes `va-server` / `va-rag` / `va-piper` / `va-whisper` to GHCR; you pin `IMAGE_TAG`
+publishes `va-server` / `va-piper` / `va-whisper` to GHCR; you pin `IMAGE_TAG`
 and `docker compose pull` the *exact same bytes* on any host — RTX 4090 today,
 H100/H200 next month. See [Portable images](#portable-images-the-transfer-guarantee).
 
@@ -124,13 +123,12 @@ it trades portability and the simple WireGuard story for ~$0.30/hr.
 
 ## Portable images (the transfer guarantee)
 
-CI (`.github/workflows/build-images.yml`) builds and pushes four images to GHCR
+CI (`.github/workflows/build-images.yml`) builds and pushes three images to GHCR
 on every branch push (`branch-<slug>` tags) and on `v*` tags — see the tag
 scheme in `docs/deploy-architecture.md`:
 
 ```
 ghcr.io/darkviruzz/discord-voice-assistant/va-server:<tag>
-ghcr.io/darkviruzz/discord-voice-assistant/va-rag:<tag>
 ghcr.io/darkviruzz/discord-voice-assistant/va-piper:<tag>
 ghcr.io/darkviruzz/discord-voice-assistant/va-whisper:<tag>
 ```
@@ -212,12 +210,19 @@ themselves).
 | whisper | `deploy/whisper/Dockerfile` (CUDA)    | 8080  | ✅  | whisper.cpp HTTP server, built from source |
 | ollama  | `ollama/ollama:latest`                | 11434 | ✅  | model pulled on first start |
 | piper   | `services/piper/Dockerfile` (CUDA)    | 5000  | ✅  | upstream piper-tts + onnxruntime-gpu |
-| server  | `apps/server/Dockerfile` (Node 22)    | 7440  | ❌  | only published port (bind to tunnel) |
-| rag     | Phase 4 — placeholder in compose      | —     | —   | `RAG_URL` already wired in the server |
+| server  | `apps/server/Dockerfile` (Node 22)    | 7440  | ❌  | only published port (bind to tunnel); also runs the vault RAG |
 
 Services talk to each other over the internal `voice` network by name
 (`http://whisper:8080`, `http://ollama:11434`, `http://piper:5000`). The server
 reads those URLs from environment variables set in `docker-compose.yml`.
+
+**Vault RAG** is part of the server (no separate container): it indexes the
+read-only `campaign` volume with embeddings from the `ollama` service
+(`EMBED_MODEL`, default `nomic-embed-text` — `start.sh` pulls it next to
+`OLLAMA_MODEL` unless `RAG_ENABLED=false` or `EMBED_PROVIDER=openai`) and keeps
+its vector index in `/data/rag` on the `server-data` volume, so a restart
+re-embeds nothing that didn't change. Until the index exists the server answers
+from `CAMPAIGN.md`. See [`docs/rag.md`](../docs/rag.md).
 
 ### whisper image: build-from-source vs. official
 
@@ -249,9 +254,11 @@ images, load once):
 |-----------------|---------|
 | `whisper-models`| `${WHISPER_MODEL_FILE}` (default `ggml-medium-q5_0.bin`) |
 | `piper-voices`  | `de_DE-thorsten-high` + `de_DE-thorsten_emotional-medium` (`.onnx` + `.onnx.json`) |
-| `ollama-models` | `${OLLAMA_MODEL}` pulled via `ollama pull` |
+| `ollama-models` | `${OLLAMA_MODEL}` + the RAG embedding model `${EMBED_MODEL}` (default `nomic-embed-text`) pulled via `ollama pull` |
+| `server-data`   | not a model: the server's RAG vector index (`/data/rag`), rebuilt from the vault when missing |
 
-Change models in `.env` (`WHISPER_MODEL_FILE`, `OLLAMA_MODEL`). To swap an
+Change models in `.env` (`WHISPER_MODEL_FILE`, `OLLAMA_MODEL`, `EMBED_MODEL` —
+a new embedding model makes the server re-embed the vault once). To swap an
 Ollama model on a running stack:
 
 ```bash
@@ -644,16 +651,19 @@ is built so that, done right, **nothing is reachable from the public internet**.
   `stop.sh --backup` remains the manual fallback for anything else left on the
   volumes. Persist only the model volume (no session data) if you want fast
   restarts.
-- **Data minimisation.** Only per-request audio chunks and (Phase 4) RAG chunks
-  leave home — see below.
+- **Data minimisation.** Only per-request audio chunks and, if you set
+  `CAMPAIGN_REMOTE`, the campaign vault (+ its RAG index on `server-data`)
+  live on the instance — see below.
 
 ---
 
 ## Data privacy
 
-Only the audio chunks and (Phase 4) RAG results needed for a request leave the
-home network over the tunnel. The Obsidian vault and Nextcloud stay local; the
-future `apps/rag/` service is expected to send **chunks only**. Live transcript
+Per request only the audio chunks leave the home network over the tunnel. The
+campaign vault reaches the instance only if `CAMPAIGN_REMOTE` is set (`start.sh`
+copies it into the read-only `campaign` volume); the server then builds its RAG
+vector index from it on the `server-data` volume — both disappear with the
+instance, and deleting `/data/rag` is always safe (it is rebuilt). Live transcript
 events stream to the bot host throughout the session (not just at the end),
 and the finished audio archive is pulled back there automatically right after
 a successful finalize (`BOT_ARCHIVE_DIR`, default `~/archive`, each file

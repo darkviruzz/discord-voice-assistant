@@ -36,7 +36,7 @@ Implementierungen nachziehen.
 
 ## Image-Tags (CI-Kontrakt)
 
-| Git-Ereignis | Docker-Tags (je Image `va-server`, `va-rag`, `va-piper`, `va-whisper`) |
+| Git-Ereignis | Docker-Tags (je Image `va-server`, `va-piper`, `va-whisper`) |
 |---|---|
 | push `main` | `latest`, `sha-<shortsha>` |
 | push Branch X | `branch-<slug(X)>` |
@@ -74,9 +74,9 @@ Prozess-Env-Variablen gewinnen (Datei füllt nur Lücken) — so funktioniert
 derselbe Aufruf via systemd (Env kommt vom Unit-File) und standalone/SSH
 (Env kommt aus der Datei).
 
-**Ausnahme `windows-native`:** Layer 1 entfällt — `deploy/.env.example` trägt
-Compose-Hostnamen (`RAG_URL=http://rag:5001`), die native Dienste verbiegen
-würden. Die Kette lautet dort: eingebaute Defaults
+**Ausnahme `windows-native`:** Layer 1 entfällt — `deploy/.env.example` ist
+auf den Compose-Stack zugeschnitten (CUDA-/Image-Variablen, Container-Pfade wie
+`/data/rag`) und würde native Dienste verbiegen. Die Kette lautet dort: eingebaute Defaults
 (`scripts/lib/VaLocalConfig.ps1`) → `deploy/env/windows-native.env` →
 `%USERPROFILE%\.config\va\deploy.env` → Prozess-Env (nur für die
 Launcher-Keys). Ausgewertet wird sie von `Start-VoiceAssistant.ps1` selbst, damit
@@ -168,9 +168,9 @@ va env    show [--profile P] [--slot S]      # effektive Env, Secret-Werte maski
    Proxmox (`wg set wg0 peer <pubkey> allowed-ips 10.10.0.3/32` +
    persistent in wg0.conf).
 3. **GHCR-Packages public** stellen (GitHub → Packages → je `va-server`,
-   `va-rag`, `va-piper`, `va-whisper` → Change visibility) → PAT entfällt
-   komplett. (`va-rag` existiert erst nach dem ersten CI-Lauf mit dem
-   RAG-Branch/-Merge — neue GHCR-Packages starten immer privat.)
+   `va-piper`, `va-whisper` → Change visibility) → PAT entfällt komplett.
+   (Ein altes `va-rag`-Package aus der Zeit des Python-RAG-Dienstes wird nicht
+   mehr gebaut und kann gelöscht werden — RAG läuft jetzt im `va-server`.)
 4. **Vor Repo-public**: `CONTROL_BEARER` rotieren (Wert stand bis 2026-07 im
    Klartext in docs/plans/…), altes Verda-Startup-Script im Dashboard löschen,
    untracked lokale Verzeichnisse (`verda-test/`, `outputs/`, …) prüfen/löschen,

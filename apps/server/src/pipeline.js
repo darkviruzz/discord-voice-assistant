@@ -3,6 +3,7 @@ import { sessions, ensureSession } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
+import { sttProviderLabel } from './providers/stt.js';
 import { chat } from './llm.js';
 import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -12,6 +13,7 @@ import { appendLive, renderLiveContext, liveContextEnabled } from './liveContext
 import { publishEntry, publishAnnotation } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
 import { getCampaignContext } from './campaignContext.js';
+import { lastSessionBlock } from './lastSession.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { speakerLabel, normalizeText } from './finalize/merge.js';
 import {
@@ -240,7 +242,9 @@ function summarizeStt(chunks, chunkResults) {
   }
 
   return {
-    provider: 'whisper.cpp',
+    // Whoever actually answered (providers/stt.js stamps it on every chunk's
+    // meta); the current setting only when no chunk was transcribed.
+    provider: chunkResults.find((r) => r.meta?.provider)?.meta.provider ?? sttProviderLabel(),
     noSpeechProbAvg: totalWeight > 0 ? weightedNoSpeech / totalWeight : null,
     noSpeechProbMax,
     chunkDurationsMs: chunks.map((chunk) => Math.round((chunk.pcm.length / 2 / SAMPLE_RATE) * 1000)),
@@ -454,12 +458,18 @@ function discordPostRepliesEnabled() {
 // Assemble the extra `system` blocks for a voice session, in priority order:
 // campaign context → rolling summary → live transcript. Empty parts are skipped
 // so an unavailable block costs nothing. `query` is forwarded to the campaign
-// lookup (RAG hook for later). Returns [] when live context is disabled.
-function buildSystemBlocks(session, query) {
-  if (!liveContextEnabled()) return [];
+// lookup (semantic vault RAG when enabled, else the static CAMPAIGN.md).
+// Async because that lookup may embed the query (an HTTP round-trip). Returns
+// [] when live context is disabled.
+async function buildSystemBlocks(session, query) {
   const blocks = [];
-  const campaign = getCampaignContext(query);
+  // Recap source for "Was war letztes Mal?" / /recap — independent of the live
+  // context switch and also for text queries outside a voice session.
+  const last = lastSessionBlock();
+  if (!liveContextEnabled()) return last ? [last] : [];
+  const campaign = await getCampaignContext(query);
   if (campaign) blocks.push(`Kampagnen-Kontext:\n${campaign}`);
+  if (last) blocks.push(last);
   const summary = session?.liveContext?.summary;
   if (summary && summary.trim()) {
     blocks.push(`Bisheriger Gesprächsverlauf (Zusammenfassung):\n${summary.trim()}`);
@@ -557,13 +567,29 @@ async function answerQuestion({
 
   // Voice sessions get campaign context + rolling summary + live transcript as
   // extra system blocks; text/global queries get none (no live buffer).
-  const systemBlocks = session ? buildSystemBlocks(session, query) : [];
+  // Text queries without a voice session get campaign + last-session context
+  // too (live transcript/rolling summary only exist inside a session).
+  const systemBlocks = await buildSystemBlocks(session, query);
 
   let response;
   try {
     response = await chat(history, query, { systemBlocks });
   } catch (e) {
     warn('pipeline: llm error:', e.message);
+    // A typed question is answered in its channel (see below) — on an LLM
+    // failure too, otherwise the asker only ever sees "Frage gesendet."
+    if (source !== 'voice') {
+      broadcastToAllBots({
+        type: 'chat_message',
+        cmdId: randomUUID(),
+        channelId,
+        question: transcript ?? query,
+        answer: '⚠️ Keine Antwort — das Sprachmodell ist gerade nicht erreichbar oder hat nicht rechtzeitig geantwortet. Bitte später erneut fragen.',
+        userDisplayName,
+        assistantName: wakeWordName(),
+        isStop: false,
+      });
+    }
     return;
   }
 
@@ -599,7 +625,11 @@ async function answerQuestion({
     maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
   }
 
-  if (discordPostRepliesEnabled()) {
+  // A typed question (/ask, /recap, @mention) always gets its answer in the
+  // channel it came from — otherwise /ask without tts answered into the void
+  // with the default DISCORD_POST_REPLIES=false. That switch only governs
+  // mirroring VOICE answers into chat.
+  if (source !== 'voice' || discordPostRepliesEnabled()) {
     broadcastToAllBots({
       type: 'chat_message',
       cmdId: randomUUID(),

@@ -8,6 +8,7 @@
     "start:bot": "npm -w apps/bot start",
     "start:server": "npm -w apps/server start",
     "test": "node --test",
-    "transcript": "node scripts/build-transcript.mjs"
+    "transcript": "node scripts/build-transcript.mjs",
+    "bench:stt": "node scripts/stt-bench.mjs"
   }
 }

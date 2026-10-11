@@ -7,12 +7,15 @@ import { log, warn, debug } from './logger.js';
 export function parseHostPort(url) {
   if (!url) return null;
   try {
-    // Replace ws/wss with http/https so URL parser is happy.
-    const normalized = url.replace(/^wss?:/i, 'http:');
+    // Map ws→http and wss→https so the URL parser knows the scheme's default
+    // port (it reports u.port as '' when the port equals that default).
+    const secure = /^(wss|https):/i.test(url);
+    const normalized = url.replace(/^wss?:/i, secure ? 'https:' : 'http:');
     const u = new URL(normalized);
     if (!u.hostname) return null;
-    const port = u.port ? Number(u.port) : (url.startsWith('wss') ? 443 : 80);
-    return { host: u.hostname, port };
+    const port = u.port ? Number(u.port) : (secure ? 443 : 80);
+    // IPv6 literals come back bracketed ('[::1]'); net.connect wants them bare.
+    return { host: u.hostname.replace(/^\[(.*)\]$/, '$1'), port };
   } catch {
     return null;
   }

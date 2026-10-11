@@ -12,6 +12,13 @@ const RETENTION_DAYS = Number(process.env.BOT_TRANSCRIPT_RETENTION_DAYS) || 30;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export function writeTranscriptEvent(sessionId, event) {
+  // The id arrives from the server over the wire and becomes part of a file
+  // path: wire session ids are always u64 digit strings — refuse anything else
+  // so it can never steer the write outside DIR (e.g. '/../../x').
+  if (!/^\d+$/.test(String(sessionId))) {
+    warn('transcriptWriter: refusing non-numeric sessionId', JSON.stringify(String(sessionId)).slice(0, 80));
+    return;
+  }
   try {
     mkdirSync(DIR, { recursive: true });
     appendFileSync(join(DIR, `session_${sessionId}.jsonl`), JSON.stringify(event) + '\n');

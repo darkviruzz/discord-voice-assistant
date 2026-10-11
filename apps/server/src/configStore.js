@@ -198,7 +198,15 @@ export function coerce(scope, key, rawValue) {
     throw new Error(`${key} erwartet einen Boolean`);
   }
   if (t === 'number') {
-    const n = Number(rawValue);
+    // Number('') / Number('  ') ist 0 — ein geleertes Feld darf nicht still zu
+    // 0 werden. Optionale Zahlen (def '', z. B. RAG_SCORE_THRESHOLD) speichern
+    // leer = „aus"; Pflicht-Zahlen lehnen leer ab.
+    const s = rawValue == null ? '' : String(rawValue).trim();
+    if (s === '') {
+      if ((entry.def ?? '') === '') return '';
+      throw new Error(`${key} erwartet eine Zahl`);
+    }
+    const n = Number(s);
     if (!Number.isFinite(n)) throw new Error(`${key} erwartet eine Zahl`);
     return String(n);
   }

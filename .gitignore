@@ -10,6 +10,17 @@ archive/
 __pycache__/
 *.pyc
 
+# Python virtualenvs (local runs of services/piper) + pytest cache
+venv/
+.venv/
+.pytest_cache/
+
+# The vault RAG index lives in apps/server/data/rag/ (ignored above via
+# apps/server/data/) and is rebuilt from the vault on demand. apps/rag/ is a
+# leftover of the removed Python RAG service (venv + Chroma store) in older
+# checkouts — safe to delete.
+apps/rag/
+
 # Logs
 logs
 *.log
@@ -159,3 +170,8 @@ vite.config.ts.timestamp-*
 verda-test/
 outputs/
 sample_layouts/
+
+# STT-Benchmark: echte Aufnahmen, Referenzen und Ergebnisse bleiben lokal
+bench/stt/*
+!bench/stt/README.md
+!bench/stt/profiles.example.json

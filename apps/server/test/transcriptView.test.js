@@ -66,16 +66,25 @@ test('buildSnapshot works for an ended session (JSONL only, no RAM)', () => {
   assert.equal(snap.entries.length, 2);
 });
 
-test('listSessions / newestActiveSessionId reflect the RAM map', () => {
-  ensureSession('100');
-  ensureSession('200');
+test('listSessions / newestActiveSessionId reflect the RAM map (newest by createdAt)', (t) => {
+  t.after(() => { dropSession('100'); dropSession('200'); });
+  // Pin createdAt explicitly — both would otherwise share the same ms.
+  ensureSession('200').createdAt = 1000;
+  ensureSession('100').createdAt = 2000; // started later despite the smaller id
+  const s100 = ensureSession('100');
+  s100.guildName = 'Greyhawk';
+  s100.liveContext.buffer.push({ label: 'A', text: 'x', startMs: 1, kind: 'user' });
   const list = listSessions();
-  assert.ok(list.length >= 2);
-  // newest by createdAt is last ensured; both share ~now, so just assert membership.
-  const ids = list.map((x) => x.sessionId);
-  assert.ok(ids.includes('100') && ids.includes('200'));
-  assert.ok(['100', '200'].includes(newestActiveSessionId()));
-  dropSession('100'); dropSession('200');
+  const byId = Object.fromEntries(list.map((x) => [x.sessionId, x]));
+  assert.deepEqual(Object.keys(byId).sort(), ['100', '200']);
+  assert.equal(byId['100'].guildName, 'Greyhawk');
+  assert.equal(byId['100'].bufferEntries, 1);
+  assert.equal(byId['100'].active, true);
+  assert.equal(newestActiveSessionId(), '100');
+  dropSession('100');
+  assert.equal(newestActiveSessionId(), '200');
+  dropSession('200');
+  assert.equal(newestActiveSessionId(), null);
 });
 
 test('buildSnapshot flags wake/stop and surfaces session_meta + TTS turn debug', () => {
@@ -150,10 +159,11 @@ test('buildVoice falls back to JSONL for an ended session (not connected)', () =
   assert.equal(v.members[0].label, 'Nogâr');
 });
 
-test('buildSnapshot includes a voice block', () => {
+test('buildSnapshot includes the voice block (ended session without voice events → empty)', () => {
   const snap = buildSnapshot(SID);
-  assert.ok(snap.voice, 'voice present');
-  assert.ok(Array.isArray(snap.voice.members));
+  assert.equal(snap.voice.connected, false);
+  assert.equal(snap.voice.populated, false);
+  assert.deepEqual(snap.voice.members, []);
 });
 
 test('liveBus publishes to subscribers filtered by sessionId string', () => {

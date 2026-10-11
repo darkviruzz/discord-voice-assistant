@@ -3,21 +3,32 @@
 .SYNOPSIS
     Health-Check aller lokalen Voice-Assistant-Dienste.
     Zeigt für jeden Service: Port-Status, HTTP-Health, PID und Detail.
+    Die Vault-Suche (RAG) läuft im Node-Server — keine eigene Zeile.
 #>
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
-# Konfiguration – muss zu Start-VoiceAssistant.ps1 passen
+# Konfiguration – dieselbe Quelle wie Start-VoiceAssistant.ps1
 # ============================================================
-$Services = @(
-    @{ Name = "Whisper"; Port = 8080;  HealthUrl = "http://localhost:8080/";          HealthMatch = $null }
-    @{ Name = "Piper";   Port = 5000;  HealthUrl = "http://localhost:5000/health";    HealthMatch = "ok"  }
-    @{ Name = "Ollama";  Port = 11434; HealthUrl = "http://localhost:11434/api/tags"; HealthMatch = $null }
-    @{ Name = "Server";  Port = 7440;  HealthUrl = $null;                             HealthMatch = $null }
-)
+$RepoRoot = $PSScriptRoot | Split-Path -Parent
+. (Join-Path $PSScriptRoot 'lib\VaLocalConfig.ps1')
+$VaConfig = Get-VaLocalConfig -RepoRoot $RepoRoot
+$Svc      = Resolve-VaServices -Config $VaConfig -RepoRoot $RepoRoot
 
-$LogDir = "$env:TEMP\va-logs"
+# Nur lokale Dienste, die laut Provider-Wahl (apps/server/.env) gebraucht
+# werden; die übrigen erscheinen als „extern" (OpenAI-kompatibler Server).
+$Services = @()
+if ($Svc.WhisperEnabled) { $Services += @{ Name = "Whisper"; Port = $Svc.WhisperPort; HealthUrl = "$($Svc.WhisperUrl)/";        HealthMatch = $null } }
+if ($Svc.PiperEnabled)   { $Services += @{ Name = "Piper";   Port = $Svc.PiperPort;   HealthUrl = "$($Svc.PiperUrl)/health";    HealthMatch = "ok"  } }
+if ($Svc.OllamaNeeded)   { $Services += @{ Name = "Ollama";  Port = $Svc.OllamaPort;  HealthUrl = "$($Svc.OllamaUrl)/api/tags"; HealthMatch = $null } }
+$Services += @{ Name = "Server";  Port = $Svc.ServerPort;  HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
+$External = @()
+if (-not $Svc.WhisperEnabled) { $External += "STT=$($Svc.Providers.Stt)" }
+if (-not $Svc.PiperEnabled)   { $External += "TTS=$($Svc.Providers.Tts)" }
+if (-not $Svc.OllamaNeeded)   { $External += "LLM=$($Svc.Providers.Llm)" }
+
+$LogDir = $Svc.LogDir
 
 # ============================================================
 # Hilfsfunktionen
@@ -105,6 +116,10 @@ foreach ($svc in $Services) {
     }
 }
 
+if ($External.Count -gt 0) {
+    Write-Host ("  Extern (kein lokaler Dienst): " + ($External -join ', ')) -ForegroundColor DarkGray
+}
+
 Write-Host ""
 if ($anyDown) {
     Write-Host "  Einige Dienste sind nicht verfügbar." -ForegroundColor Yellow
@@ -114,4 +129,6 @@ if ($anyDown) {
 } else {
     Write-Host "  Alle Dienste laufen." -ForegroundColor Green
 }
+Write-Host "  Konfiguration prüfen: .\scripts\Setup-VoiceAssistant.ps1 -Check" -ForegroundColor DarkGray
+if ($anyDown) { exit 1 }
 Write-Host ""

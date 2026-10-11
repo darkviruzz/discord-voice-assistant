@@ -6,12 +6,13 @@ import { log, warn, debug } from './logger.js';
 import { initUplinkWSS } from './uplink.js';
 import { initDownlinkWSS } from './downlink.js';
 import { initControlWSS } from './control.js';
-import { checkBearer } from './auth.js';
+import { checkBearer, isLoopback } from './auth.js';
 import { getVersion } from './version.js';
 import { registerDebugTtsRoute } from './debugTts.js';
 import { registerFinalizeHttpRoutes } from './finalizeHttp.js';
 import { registerTranscriptRoutes } from './transcriptApi.js';
 import { registerConfigRoutes } from './configApi.js';
+import { startRag, stopRag } from './rag/index.js';
 
 const HB_INTERVAL_MS = 15000;
 
@@ -22,14 +23,25 @@ registerDebugTtsRoute(app);
 registerFinalizeHttpRoutes(app); // PUT /finalize/upload/:sessionId/:filename — bot streams session WAVs (bearer from CONTROL_BEARER)
 registerTranscriptRoutes(app); // mountet u.a. app.use('/transcript', auth) — vor den Config-Routen
 registerConfigRoutes(app);     // /transcript/config (GET/PUT), teilt sich die Transkript-Auth
-app.post('/shutdown', (_req, res) => {
+const bearer = process.env.CONTROL_BEARER;
+if (!bearer) {
+  warn('CONTROL_BEARER ist NICHT gesetzt — /control, /uplink, /downlink und /finalize/* sind '
+    + 'ohne Authentifizierung erreichbar. Für jeden Betrieb außerhalb eines isolierten LANs setzen '
+    + '(gleicher Wert in apps/bot/.env).');
+}
+
+// Unauthenticated shutdown was reachable by anyone who could reach the port.
+// Allowed now from the machine itself (the launcher scripts) or with the bearer.
+app.post('/shutdown', (req, res) => {
+  if (!isLoopback(req) && !(bearer && checkBearer(req, bearer))) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   res.json({ status: 'shutting down' });
   setTimeout(() => shutdown('HTTP /shutdown'), 200);
 });
 
 const server = http.createServer(app);
 
-const bearer = process.env.CONTROL_BEARER;
 const wssUplink   = initUplinkWSS(  { bearer });
 const wssDownlink = initDownlinkWSS({});
 const wssControl  = initControlWSS( { bearer });
@@ -40,7 +52,9 @@ const wssControl  = initControlWSS( { bearer });
 // Using noServer: true and dispatching here avoids that.
 const ROUTES = {
   '/uplink':   { wss: wssUplink,   requireBearer: true  },
-  '/downlink': { wss: wssDownlink, requireBearer: false }, // bot needs no token to subscribe; protect via session/control later
+  // The bot's DownlinkClient sends the same bearer header as uplink/control —
+  // without the check anyone reaching the port could subscribe to TTS audio.
+  '/downlink': { wss: wssDownlink, requireBearer: true  },
   '/control':  { wss: wssControl,  requireBearer: true  },
 };
 
@@ -87,7 +101,9 @@ function shutdown(reason) {
     }
     wss.close();
   }
-  server.close(() => process.exit(0));
+  // Flush the vault index before exiting (bounded by the hard exit below; the
+  // index is written atomically, so an interrupted save keeps the old file).
+  stopRag().finally(() => server.close(() => process.exit(0)));
   setTimeout(() => process.exit(0), 3000).unref?.();
 }
 process.on('SIGINT',  () => shutdown('SIGINT'));
@@ -96,4 +112,10 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = parseInt(process.env.PORT || '7440', 10);
 
-server.listen(PORT, HOST, () => log(`server v${getVersion()} listening on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => {
+  log(`server v${getVersion()} listening on http://${HOST}:${PORT}`);
+  // Vault RAG: load the persisted index, watch the vault and sync it in the
+  // background — never on the startup path (/health is up already), and
+  // until the index exists queries just fall back to CAMPAIGN.md.
+  startRag();
+});

@@ -217,45 +217,148 @@ export const CATALOG = [
       + '(Standard; das Archiv hält die Originale). true = zusätzlich im Upload-Ordner '
       + 'behalten. Wird beim Finalize gelesen.',
   },
-
-  // ======================= SERVER: STT (Whisper) ============================
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_URL',
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_ENABLED',
+    label: 'Session-Zusammenfassung beim Finalize', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'true', applyMode: 'next-finalize',
+    desc: 'Erzeugt beim Finalize per LLM eine kurze Zusammenfassung der Session '
+      + '(summary.md im Archiv). Daraus beantwortet Rabenauge auf Nachfrage „Was war '
+      + 'letztes Mal?" — nie als Begrüßung. Lange Sessions werden abschnittsweise '
+      + 'verdichtet. Ein Fehler hier lässt den Finalize unberührt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_MAX_CHARS',
+    label: 'Länge der Session-Zusammenfassung (Zeichen)', type: 'number', def: '2500',
+    applyMode: 'next-finalize',
+    desc: 'Obergrenze für die Zusammenfassung (gekürzt am Satzende).',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_CHUNK_CHARS',
+    label: 'Abschnittsgröße für lange Sessions (Zeichen)', type: 'number', def: '12000',
+    applyMode: 'next-finalize',
+    desc: 'Transkripte über dieser Länge werden in Abschnitte geteilt, einzeln verdichtet '
+      + 'und dann zusammengeführt. Kleiner = mehr, aber kürzere LLM-Aufrufe (für Modelle '
+      + 'mit kleinem Kontextfenster).',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_TIMEOUT_MS',
+    label: 'Zeitbudget der Session-Zusammenfassung (ms)', type: 'number', def: '600000',
+    applyMode: 'next-finalize',
+    desc: 'Obergrenze für die gesamte Zusammenfassung (alle Abschnitte + Zusammenführung). '
+      + 'Sie läuft innerhalb des Finalize, auf den der Bot höchstens 30 Minuten wartet — ist '
+      + 'das Budget aufgebraucht, wird ohne Zusammenfassung finalisiert statt den ganzen '
+      + 'Finalize zu gefährden.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_VAULT_DIR',
+    label: 'Zusammenfassung zusätzlich in den Vault schreiben', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Ordner relativ zu OBSIDIAN_VAULT_PATH (z. B. Rabenauge/Sessions), in den eine '
+      + 'Kopie der Zusammenfassung als Notiz geschrieben wird — der Vault-Index nimmt sie '
+      + 'dann auf. Leer = aus (Standard: nichts wird ungefragt in den Vault geschrieben). '
+      + 'Pfade außerhalb des Vaults werden abgelehnt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'FINALIZE_PROGRESS_MS',
+    label: 'Finalize-Fortschritt: Mindestabstand (ms)', type: 'number', def: '3000',
+    applyMode: 'next-finalize',
+    desc: 'Wie oft der Server den Fortschritt (x/N Äußerungen) an den Bot meldet, der ihn '
+      + 'als Statusnachricht in Discord aktualisiert. Phasenwechsel kommen immer sofort.',
+  },
+
+  // ======================= SERVER: STT ======================================
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_PROVIDER',
+    label: 'STT-Anbieter', type: 'enum', enumValues: ['whispercpp', 'openai'],
+    def: 'whispercpp', applyMode: 'live',
+    desc: 'Spracherkennungs-Backend. whispercpp = whisper.cpp-Server über dessen '
+      + 'eigenen /inference-Endpunkt (WHISPER_URL, Standard). openai = beliebiger '
+      + 'OpenAI-kompatibler /audio/transcriptions-Endpunkt (STT_BASE_URL, STT_MODEL, '
+      + 'STT_API_KEY) — z. B. vLLM mit Whisper oder Voxtral, AMD Lemonade, Speaches '
+      + 'oder whisper.cpp mit --inference-path /v1/audio/transcriptions. Wird pro '
+      + 'STT-Anfrage gelesen (der nächste Streaming-Tick nutzt schon den neuen Anbieter).',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_BASE_URL',
+    label: 'OpenAI-kompatible STT-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL inkl. /v1 (z. B. http://localhost:8000/v1) — angehängt wird '
+      + '/audio/transcriptions. Nur bei STT_PROVIDER=openai; leer = Fehler bei jeder '
+      + 'STT-Anfrage. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_MODEL',
+    label: 'STT-Modell (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Modellname im Feld "model" der Anfrage (z. B. openai/whisper-large-v3 oder '
+      + 'mistralai/Voxtral-Mini-3B-2507 bei vLLM, whisper-1 bei OpenAI). Leer = Feld '
+      + 'weglassen, der Server nimmt sein Standardmodell (vLLM: das geladene Modell; '
+      + 'whisper.cpp ignoriert es ohnehin). Nur bei STT_PROVIDER=openai. Wird pro '
+      + 'STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_API_KEY',
+    label: 'STT API-Key (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für den OpenAI-kompatiblen STT-Server (bei '
+      + 'STT_PROVIDER=openai; lokale Server brauchen meist keinen). Secret — hier nur '
+      + 'Status sichtbar; Änderung über .env. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_TIMEOUT_MS',
+    label: 'STT-Timeout (ms)', type: 'number', def: '120000', applyMode: 'live',
+    desc: 'Maximale Dauer einer STT-Anfrage inkl. Upload und Lesen der Antwort, für '
+      + 'beide Anbieter. Danach schlägt die Anfrage mit "stt: timeout" fehl: ein '
+      + 'Streaming-Tick wird übersprungen; scheitert der Abschluss-Durchlauf, fehlt die '
+      + 'Äußerung im Live-Transkript (das Finalize transkribiert sie später erneut). '
+      + '0 = kein Timeout. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_URL',
     label: 'Whisper-Server-URL', type: 'string', def: 'http://localhost:8080',
     applyMode: 'live',
     desc: 'Basis-URL des whisper.cpp-Servers, an den Audio zur Transkription gesendet '
-      + 'wird. Wird pro STT-Anfrage neu gelesen.',
+      + 'wird (POST /inference; bei STT_PROVIDER=whispercpp). Wird pro STT-Anfrage '
+      + 'neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_LANGUAGE',
+    scope: 'server', group: 'Server · STT', key: 'STT_LANGUAGE',
+    label: 'Erkennungssprache (anbieterneutral)', type: 'enum',
+    enumValues: ['', 'de', 'en', 'auto'], def: '', applyMode: 'live',
+    desc: 'Sprachcode für die Spracherkennung, gilt für beide Anbieter. de/en erzwingen '
+      + 'die Sprache, auto lässt das Modell raten. Leer = WHISPER_LANGUAGE verwenden '
+      + '(den lesen auch die Startskripte für den whisper.cpp-Server). Wird pro '
+      + 'STT-Anfrage neu gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_LANGUAGE',
     label: 'Erkennungssprache', type: 'enum', enumValues: ['de', 'en', 'auto'],
     def: 'de', applyMode: 'live',
     desc: 'Sprachcode für die Spracherkennung. de/en erzwingen die Sprache, auto lässt '
-      + 'Whisper raten. Wird pro STT-Anfrage neu gelesen.',
+      + 'Whisper raten. Wird verwendet, solange STT_LANGUAGE leer ist (gilt dann auch '
+      + 'für STT_PROVIDER=openai). Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_TEMPERATURE',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_TEMPERATURE',
     label: 'STT-Sampling-Temperatur', type: 'number', def: '0.1', applyMode: 'live',
-    desc: 'Sampling-Temperatur der Erkennung. Werte > 0 liefern deutlich brauchbarere '
-      + 'no_speech_prob-Werte; 0.1 ist ein konservativer, auf de_DE getesteter Default. '
-      + 'Wird pro STT-Anfrage neu gelesen.',
+    desc: 'Sampling-Temperatur der Erkennung (beide Anbieter). Werte > 0 liefern '
+      + 'deutlich brauchbarere no_speech_prob-Werte; 0.1 ist ein konservativer, auf '
+      + 'de_DE getesteter Default. Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_MAX_CHUNK_SECONDS',
+    scope: 'server', group: 'Server · STT', key: 'STT_MAX_CHUNK_SECONDS',
     label: 'Max. Chunk-Länge (s)', type: 'number', def: '30', applyMode: 'live',
     desc: 'Maximale Länge eines STT-Chunks, bevor an einer Stille gesplittet oder '
       + 'erzwungen geteilt wird. Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_WORD_TIMESTAMPS',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_WORD_TIMESTAMPS',
     label: 'Wort-Zeitstempel anfordern', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
-    desc: 'true = wortgenaue Zeitstempel von Whisper anfordern (für präzises '
-      + 'Interrupt-Splitting im Finalize). Wird ignoriert, wenn der Whisper-Server das '
-      + 'nicht kann. Wird pro STT-Anfrage gelesen.',
+    desc: 'true = wortgenaue Zeitstempel anfordern (für präzises Interrupt-Splitting im '
+      + 'Finalize und stabile Wörter im Streaming; beide Anbieter). Wird ignoriert, wenn '
+      + 'der STT-Server das nicht kann. Wird pro STT-Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAMING',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAMING',
     label: 'Streaming-Transkription während des Sprechens', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
     desc: 'true = echtes Wort-Streaming: das wachsende Audio-Fenster wird laufend als '
@@ -265,7 +368,7 @@ export const CATALOG = [
       + 'Äußerungsende und ersetzt die Vorschau. Wird pro Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_INTERVAL_MS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_INTERVAL_MS',
     label: 'Streaming-Tick-Intervall (ms)', type: 'number', def: '1000',
     applyMode: 'restart',
     desc: 'Wie oft das aktive Fenster eines Sprechers neu transkribiert wird. Kleiner = '
@@ -274,7 +377,7 @@ export const CATALOG = [
       + 'Streaming-Loops einmalig gelesen (Neustart nötig).',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_MIN_WINDOW_MS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_MIN_WINDOW_MS',
     label: 'Streaming: Mindest-Audio vor erstem Tick (ms)', type: 'number', def: '1000',
     applyMode: 'live',
     desc: 'So viel Audio muss vorliegen, bevor der Streamer das Fenster zum ersten Mal '
@@ -282,7 +385,7 @@ export const CATALOG = [
       + 'Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_TRIM_SECONDS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_TRIM_SECONDS',
     label: 'Streaming: Fenster-Trim ab (s)', type: 'number', def: '15', applyMode: 'live',
     desc: 'Sobald die bestätigten Wörter so viele Sekunden Audio abdecken, wird das '
       + 'Fenster an der letzten bestätigten Satzgrenze abgeschnitten und der Text '
@@ -290,7 +393,7 @@ export const CATALOG = [
       + 'GPU-Last) unabhängig von der Länge des Monologs. Wird pro Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_PROMPT',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_PROMPT',
     label: 'Streaming: fixierten Text als Kontext mitgeben', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
     desc: 'true = bereits fixierter Text wird Whisper als Decoder-Prompt mitgegeben, '
@@ -298,21 +401,58 @@ export const CATALOG = [
       + '(Satzanfang bekannt). Wird pro Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_SILENCE_THRESH',
+    scope: 'server', group: 'Server · STT', key: 'STT_SILENCE_THRESH',
     label: 'RMS-Schwellwert Stille-Erkennung', type: 'number', def: '300', applyMode: 'live',
     desc: 'RMS-Amplituden-Schwelle für die Stille-Erkennung beim Aufteilen langer '
       + 'Äußerungen. Höher = toleranter gegenüber Hintergrundgeräuschen. Wird in der '
       + 'Pipeline pro Verarbeitung gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_NO_SPEECH_THRESHOLD',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_NO_SPEECH_THRESHOLD',
     label: 'no_speech_prob-Schwellwert', type: 'number', def: '', applyMode: 'restart',
     note: 'Zukunftswert — derzeit im Code nicht aktiv ausgewertet (nur für Finalize/Offline-Tests vorgesehen).',
     desc: 'Optionaler Schwellwert, ab dem eine Äußerung als "keine Sprache" verworfen '
       + 'würde. Der Live-Pfad speichert no_speech_prob, verwirft aber nichts. Reserviert.',
   },
 
-  // ======================= SERVER: LLM (Ollama) =============================
+  // ======================= SERVER: LLM =======================================
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PROVIDER',
+    label: 'LLM-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
+    applyMode: 'live',
+    desc: 'ollama = natives Ollama-API (OLLAMA_URL/OLLAMA_MODEL, Keep-Warm). openai = '
+      + 'beliebiger OpenAI-kompatibler Server (/chat/completions) — z. B. vLLM, AMD '
+      + 'Lemonade, llama.cpp-Server, LM Studio — über LLM_BASE_URL/LLM_MODEL. Gilt für '
+      + 'Antworten, rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize. '
+      + 'Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_BASE_URL',
+    label: 'OpenAI-kompatible Basis-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: Basis-URL inklusive /v1, z. B. '
+      + 'http://localhost:8000/v1 (vLLM) — den genauen Pfad nennt die Doku des jeweiligen '
+      + 'Servers. Angefragt wird <URL>/chat/completions.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_MODEL',
+    label: 'Modellname (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: Modellname, wie ihn der Server erwartet. Leer = '
+      + 'OLLAMA_MODEL. SUMMARY_MODEL überschreibt ihn für die Zusammenfassung.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_API_KEY',
+    label: 'API-Key (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für LLM_PROVIDER=openai (lokale Server brauchen meist '
+      + 'keinen). Secret — hier nur Status sichtbar; Änderung über .env.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_TIMEOUT_MS',
+    label: 'LLM-Timeout (ms)', type: 'number', def: '120000', applyMode: 'live',
+    desc: 'Maximale Dauer einer Antwort-Anfrage inklusive Generierung, bevor sie als '
+      + 'fehlgeschlagen gilt (vorher: unbegrenzt — ein hängendes Modell blockierte die '
+      + 'Antwort für immer). Wird pro Anfrage gelesen.',
+  },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'OLLAMA_URL',
     label: 'Ollama-Server-URL', type: 'string', def: 'http://localhost:11434',
@@ -358,10 +498,10 @@ export const CATALOG = [
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'DISCORD_POST_REPLIES',
     label: 'Antwort in Discord-Chat schreiben', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'false', applyMode: 'live',
-    desc: 'Ob die Antwort des Assistenten (und Stop-Hinweise) zusätzlich als Text in '
-      + 'den Discord-Textkanal geschrieben werden. Standard: aus — Sprachausgabe + '
-      + 'Transkript sind der primäre Ausgabeweg. true = Frage/Antwort erscheinen auch '
-      + 'als Chat-Nachricht. Wird pro Anfrage gelesen.',
+    desc: 'Ob Antworten auf SPRACH-Anfragen (Wake-Word) und Stop-Hinweise zusätzlich als '
+      + 'Text in den Discord-Textkanal geschrieben werden. Standard: aus — Sprachausgabe + '
+      + 'Transkript sind der primäre Ausgabeweg. Getippte Fragen (/ask, /recap, @Erwähnung) '
+      + 'werden unabhängig davon immer im Kanal beantwortet. Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'OLLAMA_KEEP_WARM_INTERVAL_MS',
@@ -409,8 +549,9 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MODEL',
     label: 'Modell für Zusammenfassung', type: 'string', def: '', applyMode: 'live',
-    desc: 'Separates Ollama-Modell für die rollende Zusammenfassung. Leer = OLLAMA_MODEL '
-      + 'verwenden. Wird pro Zusammenfassung gelesen.',
+    desc: 'Separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung '
+      + 'beim Finalize (beide LLM-Anbieter). Leer = Antwort-Modell (OLLAMA_MODEL bzw. '
+      + 'LLM_MODEL). Wird pro Zusammenfassung gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MAX_CHARS',
@@ -421,9 +562,10 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'OBSIDIAN_VAULT_PATH',
     label: 'Obsidian-Vault-Wurzel', type: 'string', def: '', applyMode: 'live',
-    desc: 'Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn CAMPAIGN_CONTEXT_FILE ein '
-      + 'relativer Pfad ist. Relativ ohne gesetzten Vault → Kampagnen-Kontext deaktiviert. '
-      + 'Wird beim Laden des Kontexts gelesen.',
+    desc: 'Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der semantischen Vault-Suche '
+      + '(RAG, siehe RAG_ENABLED) und Basis für ein relatives CAMPAIGN_CONTEXT_FILE. Relativ '
+      + 'ohne gesetzten Vault → Kampagnen-Kontext deaktiviert, leer → auch RAG aus. Wird beim '
+      + 'Laden des Kontexts bzw. pro RAG-Anfrage gelesen (neuer Pfad → Indexer startet neu).',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'CAMPAIGN_CONTEXT_FILE',
@@ -436,23 +578,214 @@ export const CATALOG = [
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'CAMPAIGN_CONTEXT_MAX_CHARS',
     label: 'Max. Zeichen Kampagnen-Kontext', type: 'number', def: '6000', applyMode: 'live',
     desc: 'Obergrenze der Zeichen (vom Dateianfang), die aus der Kampagnen-Kontext-Datei '
-      + 'übernommen werden. Wird beim Laden gelesen.',
+      + 'übernommen werden. Gilt genauso für die RAG-Treffer pro Anfrage (beste Treffer '
+      + 'zuerst). Wird beim Laden gelesen.',
+  },
+
+  // ======================= SERVER: RAG (Vault-Suche) ========================
+  // Läuft im Server-Prozess (apps/server/src/rag/) — kein eigener Dienst.
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_ENABLED',
+    label: 'Semantische Vault-Suche (RAG) aktiv', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'true', applyMode: 'live',
+    desc: 'true = der Server indexiert den Obsidian-Vault (OBSIDIAN_VAULT_PATH) im Hintergrund '
+      + 'und liefert pro Wake-Word-Query die passendsten Vault-Abschnitte statt des statischen '
+      + 'CAMPAIGN.md. Embeddings kommen vom EMBED_PROVIDER (Standard: Ollama mit '
+      + 'nomic-embed-text). Solange der Index noch nicht steht oder Embeddings fehlschlagen: '
+      + 'Fallback auf CAMPAIGN.md. Ohne gesetzten Vault ist RAG immer aus. false = nur '
+      + 'CAMPAIGN.md. Wird pro Anfrage geprüft — der Indexer startet/stoppt bei der nächsten Anfrage.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_TIMEOUT_MS',
+    label: 'RAG-Timeout (ms)', type: 'number', def: '800', applyMode: 'live',
+    desc: 'Zeitbudget pro RAG-Abfrage in ms (Embedding der Frage + Suche im Index); danach '
+      + 'Fallback auf CAMPAIGN.md, die Voice-Pipeline wartet also höchstens so lange auf RAG. '
+      + 'Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_SCORE_THRESHOLD',
+    label: 'Max. Trefferdistanz (Score-Filter)', type: 'number', def: '', applyMode: 'live',
+    desc: 'Maximale Cosine-Distanz für RAG-Treffer (Distanz = 1 − Cosinus-Ähnlichkeit: '
+      + '0 = identisch, 1 = ohne Bezug, 2 = gegensätzlich). Treffer darüber werden verworfen, '
+      + 'bevor sie in den LLM-Kontext gehen. Leer = kein Filter (immer die Top-K-Treffer). Mit '
+      + 'nomic-embed-text liegen gute Treffer meist bei ~0.2–0.45, themenfremde ab ~0.55 — '
+      + 'sinnvoller Startwert ~0.5; mit DEBUG=1 stehen die Distanzen jeder Abfrage im Log. '
+      + 'Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_MAX_CHUNK_CHARS',
+    label: 'Max. Zeichen pro Vault-Abschnitt', type: 'number', def: '2000', applyMode: 'live',
+    desc: 'Notizen werden an jeder ##-Überschrift in Abschnitte geteilt; längere Abschnitte '
+      + 'zusätzlich an Absatz-/Zeilengrenzen auf höchstens so viele Zeichen, damit ein einzelner '
+      + 'Treffer den Prompt nicht flutet. Änderung → jede Notiz wird einmal neu eingebettet '
+      + '(Indexer startet bei der nächsten Anfrage neu).',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_INDEX_DIR',
+    label: 'Index-Verzeichnis', type: 'string', def: './data/rag', applyMode: 'live',
+    desc: 'Wo der Vektor-Index (index.bin) gespeichert wird, relativ zu apps/server (Standard: '
+      + 'DATA_DIR/rag bzw. ./data/rag; im Docker-Stack /data/rag auf dem server-data-Volume). '
+      + 'Übersteht Neustarts — unveränderte Notizen werden nicht neu eingebettet. Löschen ist '
+      + 'gefahrlos (wird aus dem Vault neu aufgebaut). Änderung greift bei der nächsten Anfrage.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_RESCAN_INTERVAL_MS',
+    label: 'Periodischer Vault-Abgleich (ms)', type: 'number', def: '300000', applyMode: 'live',
+    desc: 'Zusätzlich zum Datei-Watcher (Änderungen sofort, ~1 s entprellt) wird der Vault in '
+      + 'diesem Abstand komplett abgeglichen — Absicherung für Plattformen/Sync-Clients, bei '
+      + 'denen Datei-Ereignisse fehlen. Billig: nur geänderte Notizen werden neu eingebettet. '
+      + '0 = aus. Änderung greift bei der nächsten Anfrage.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_PROVIDER',
+    label: 'Embedding-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
+    applyMode: 'live',
+    desc: 'Backend für die Vektoren der Vault-Suche. ollama = /api/embed auf OLLAMA_URL '
+      + '(Standard). openai = beliebiger OpenAI-kompatibler /embeddings-Endpunkt auf '
+      + 'EMBED_BASE_URL (vLLM, llama.cpp-Server, LM Studio, AMD Lemonade …). Ein Wechsel '
+      + 'verwirft den Index und baut ihn mit dem neuen Modell komplett neu auf.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_BASE_URL',
+    label: 'Embedding-Server-URL (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL inkl. /v1 für EMBED_PROVIDER=openai, z. B. http://localhost:8000/v1. '
+      + 'Bei EMBED_PROVIDER=ollama ungenutzt (dann gilt OLLAMA_URL). Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_MODEL',
+    label: 'Embedding-Modell', type: 'string', def: 'nomic-embed-text', applyMode: 'live',
+    desc: 'Modell für die Vektoren (bei Ollama vorher: ollama pull <modell>). Ein Wechsel '
+      + 'verwirft den Index und bettet den ganzen Vault neu ein — Vektoren verschiedener '
+      + 'Modelle sind nicht vergleichbar. Bis dahin Fallback auf CAMPAIGN.md.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_API_KEY',
+    label: 'Embedding-API-Key (openai)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für EMBED_PROVIDER=openai. Secret — hier nur Status '
+      + 'sichtbar; Änderung über .env. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_KEEP_ALIVE',
+    label: 'Embedding-Modell-Verweildauer (Ollama)', type: 'string', def: '30m', applyMode: 'live',
+    desc: 'Wie lange Ollama das Embedding-Modell nach einem Aufruf geladen hält (z. B. 30m, '
+      + '-1 = dauerhaft). Sonst zahlt die erste Abfrage nach einer Pause das Nachladen und '
+      + 'reißt das RAG-Timeout. Nur bei EMBED_PROVIDER=ollama. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_QUERY_PREFIX',
+    label: 'Präfix für Suchanfragen', type: 'string', def: '', applyMode: 'live',
+    desc: 'Task-Präfix vor jeder Suchanfrage. Leer = automatisch (nomic-Modelle: '
+      + '„search_query: ", andere: keins); ein einzelnes Leerzeichen = kein Präfix. Änderung → '
+      + 'Index wird neu aufgebaut.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_DOC_PREFIX',
+    label: 'Präfix für Vault-Abschnitte', type: 'string', def: '', applyMode: 'live',
+    desc: 'Task-Präfix vor jedem indexierten Abschnitt. Leer = automatisch (nomic-Modelle: '
+      + '„search_document: ", andere: keins); ein einzelnes Leerzeichen = kein Präfix. '
+      + 'Änderung → Index wird neu aufgebaut.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_ENABLED',
+    label: 'Letzte Session als Kontext', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'true', applyMode: 'live',
+    desc: 'Gibt Rabenauge bei jeder Anfrage die Zusammenfassung der zuletzt finalisierten '
+      + 'Session (summary.md im Archiv) als Hintergrund mit — damit beantwortet er „Was war '
+      + 'letztes Mal?" bzw. /recap. Nur auf Nachfrage: der Kontext ist als „nicht ungefragt '
+      + 'nacherzählen" markiert, es gibt keine Begrüßung beim /join. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_MAX_CHARS',
+    label: 'Letzte Session: max. Zeichen', type: 'number', def: '2500', applyMode: 'live',
+    desc: 'Obergrenze für den Kontextblock der letzten Session (gekürzt am Satzende).',
   },
 
   // ======================= SERVER: TTS ======================================
   {
     scope: 'server', group: 'Server · TTS', key: 'TTS_PROVIDER',
-    label: 'TTS-Anbieter', type: 'enum', enumValues: ['piper', 'elevenlabs'], def: 'piper',
+    label: 'TTS-Anbieter', type: 'enum', enumValues: ['piper', 'openai', 'elevenlabs'], def: 'piper',
     applyMode: 'live',
-    desc: 'Sprachsynthese-Backend. piper = lokaler Piper-Server (Standard). elevenlabs = '
-      + 'Cloud-Stimmen (benötigt ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID). Wird pro '
+    desc: 'Sprachsynthese-Backend. piper = lokaler Piper-Server (Standard, TTS_URL). '
+      + 'openai = beliebiger OpenAI-kompatibler /audio/speech-Endpunkt (z. B. vLLM-Omni mit '
+      + 'Qwen3-TTS, AMD Lemonade/Kokoro, Speaches oder OpenAI selbst; TTS_BASE_URL, '
+      + 'TTS_MODEL, TTS_VOICE). elevenlabs = Cloud-Stimmen (benötigt ELEVENLABS_API_KEY + '
+      + 'ELEVENLABS_VOICE_ID). Stimmung (speaker_id 0–7) und Modell „emotional/high" aus der '
+      + 'LLM-Antwort wirken nur bei piper — die anderen Anbieter sprechen immer mit der '
+      + 'konfigurierten Stimme. Wird pro TTS-Anfrage gelesen: Umschalten greift bei der '
+      + 'nächsten Antwort.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_TIMEOUT_MS',
+    label: 'TTS-Timeout (ms)', type: 'number', def: '30000', applyMode: 'live',
+    desc: 'Gilt für alle Anbieter: maximale Wartezeit bis der TTS-Server antwortet und '
+      + 'zwischen zwei Audio-Datenpaketen. Stockt der Server mitten im Satz länger, endet die '
+      + 'Wiedergabe mit einem Fehler, statt ewig zu hängen. Begrenzt NICHT die Gesamtdauer — '
+      + 'ein langer Satz, der stetig weiterstreamt, läuft durch. 0 = kein Timeout. Wird pro '
       + 'TTS-Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · TTS', key: 'TTS_URL',
     label: 'Piper-Server-URL', type: 'string', def: 'http://localhost:5000', applyMode: 'live',
-    desc: 'Basis-URL des lokalen Piper-TTS-Servers (bei TTS_PROVIDER=piper). Wird pro '
-      + 'TTS-Anfrage gelesen.',
+    desc: 'Basis-URL des lokalen Piper-TTS-Servers (bei TTS_PROVIDER=piper); angefragt wird '
+      + '<URL>/tts/synthesize. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_BASE_URL',
+    label: 'OpenAI-kompatible TTS-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL des OpenAI-kompatiblen TTS-Servers inklusive /v1 (bei '
+      + 'TTS_PROVIDER=openai), z. B. http://localhost:8000/v1 oder https://api.openai.com/v1. '
+      + 'Angefragt wird <URL>/audio/speech. Pflicht bei openai. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_MODEL',
+    label: 'TTS-Modell (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Wert für das Feld "model" der /audio/speech-Anfrage (bei TTS_PROVIDER=openai): der '
+      + 'Modellname, unter dem der Server das TTS-Modell anbietet (siehe dessen /v1/models), '
+      + 'z. B. gpt-4o-mini-tts bei OpenAI oder kokoro bei Kokoro-Servern. Leer = Feld wird '
+      + 'weggelassen (Server-Standard). Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_VOICE',
+    label: 'TTS-Stimme (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Wert für das Feld "voice" (bei TTS_PROVIDER=openai): Stimmen- bzw. Sprecher-Name '
+      + 'laut Doku des Servers, z. B. alloy bei OpenAI. Leer = Feld wird weggelassen '
+      + '(Server-Standard). Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_API_KEY',
+    label: 'TTS-API-Key (openai)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'API-Schlüssel (Bearer) für den OpenAI-kompatiblen TTS-Server. Optional — lokale '
+      + 'Server brauchen meist keinen. Secret — hier nur Status sichtbar; Änderung über .env. '
+      + 'Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_RESPONSE_FORMAT',
+    label: 'Audioformat (openai)', type: 'enum', enumValues: ['pcm', 'wav'], def: 'pcm',
+    applyMode: 'live',
+    desc: 'Feld "response_format" (bei TTS_PROVIDER=openai). pcm = rohes 16-Bit-Mono-PCM ohne '
+      + 'Header, Abtastrate laut TTS_SAMPLE_RATE (OpenAI-Standard). wav = WAV mit Header — '
+      + 'Abtastrate und Kanäle stehen im Header (Stereo wird zu Mono gemischt); robuster, wenn '
+      + 'unklar ist, mit welcher Rate der Server PCM liefert. Komprimierte Formate (mp3, opus …) '
+      + 'werden nicht unterstützt und mit klarer Fehlermeldung abgelehnt. Wird pro TTS-Anfrage '
+      + 'gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_SAMPLE_RATE',
+    label: 'PCM-Abtastrate (Hz, openai)', type: 'number', def: '24000', applyMode: 'live',
+    desc: 'Abtastrate, mit der rohes PCM (TTS_RESPONSE_FORMAT=pcm) interpretiert wird. Laut '
+      + 'OpenAI-Spezifikation 24000. Ein falscher Wert lässt die Stimme zu hoch und schnell '
+      + 'bzw. zu tief und langsam klingen — im Zweifel TTS_RESPONSE_FORMAT=wav verwenden. Bei '
+      + 'wav ohne Bedeutung. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_SPEED',
+    label: 'Sprechtempo (openai)', type: 'number', def: '', applyMode: 'live',
+    desc: 'Feld "speed" (bei TTS_PROVIDER=openai), 0.25–4.0, 1 = normal. Leer = Feld wird '
+      + 'weggelassen (Server-Standard); nicht jeder Server wertet es aus. Fordert eine Anfrage '
+      + 'ein Piper-Tempo (lengthScale) an, wird dessen Kehrwert mit diesem Wert '
+      + 'multipliziert. Wird pro TTS-Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · TTS', key: 'ELEVENLABS_API_KEY',
@@ -466,6 +799,13 @@ export const CATALOG = [
     label: 'ElevenLabs Voice-ID', type: 'string', def: 'EXAVITQu4vr4xnSDxMaL', applyMode: 'live',
     desc: 'ID der ElevenLabs-Stimme (bei TTS_PROVIDER=elevenlabs). Keine geheime Angabe. '
       + 'Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'ELEVENLABS_BASE_URL',
+    label: 'ElevenLabs-API-URL', type: 'string', def: 'https://api.elevenlabs.io',
+    applyMode: 'live',
+    desc: 'Basis-URL der ElevenLabs-API ohne /v1 (bei TTS_PROVIDER=elevenlabs). Nur ändern für '
+      + 'einen regionalen Endpunkt oder einen Proxy. Wird pro TTS-Anfrage gelesen.',
   },
 
   // ======================= SERVER: Wake- / Stop-Word ========================
@@ -577,6 +917,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_BASE_URL',
     label: 'Server-Basis-URL', type: 'string', def: 'ws://192.168.x.x:7440',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: der Bot schickt CONTROL_BEARER an diese Adresse.',
     applyMode: 'reconnect',
     desc: 'ws:// oder wss:// Basis-URL des LAN-Servers. Der Bot verbindet sich hierüber '
       + 'zu /control, /uplink, /downlink. Wird beim Verbindungsaufbau gelesen — greift '
@@ -585,6 +926,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'CONTROL_WS_URL',
     label: 'Control-WS-URL (Alternative)', type: 'string', def: '', applyMode: 'reconnect',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: der Bot schickt CONTROL_BEARER an diese Adresse.',
     note: 'Alternative zu SERVER_BASE_URL; nur nötig, wenn der Control-Endpunkt separat liegt.',
     desc: 'Explizite WebSocket-URL des Control-Kanals, falls sie nicht aus SERVER_BASE_URL '
       + 'abgeleitet werden soll. Wird beim Verbindungsaufbau gelesen — greift beim Reconnect.',
@@ -599,6 +941,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_START_CMD',
     label: 'Server-Autostart-Kommando', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Optionales Shell-Kommando (z. B. SSH), das der Bot beim /join ausführt, wenn '
       + 'der Server per TCP-Probe nicht erreichbar ist, um ihn zu starten. Wird pro /join '
       + 'gelesen — Änderung sofort aktiv.',
@@ -615,6 +958,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_STOP_CMD',
     label: 'Server-Auto-Stop-Kommando', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Optionales Shell-Kommando (z. B. SSH), das der Bot nach einer Leerlaufzeit '
       + 'ohne aktive Session ausführt, um den Cloud-GPU-Server herunterzufahren bzw. die '
       + 'Instanz zu zerstören (Verda-Abrechnung endet). Gegenstück zu SERVER_START_CMD. '
@@ -645,6 +989,15 @@ export const CATALOG = [
     label: 'Session-Timeout (Stunden)', type: 'number', def: '4', applyMode: 'restart',
     desc: 'Stunden, nach denen eine inaktive Session automatisch beendet wird. Wird als '
       + 'Modul-Konstante beim Bot-Start gelesen — greift nach Bot-Neustart.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Daten & Session', key: 'AUTO_FINALIZE_AFTER_LEAVE',
+    label: 'Auto-Finalize nach /leave', type: 'boolean', def: 'true', applyMode: 'restart',
+    desc: 'Finalisiert eine verlassene Session (/leave, Voice-Abbruch) automatisch, sobald '
+      + 'SESSION_IDLE_HOURS seit der letzten Aktivität vergangen sind — auch nach einem '
+      + 'Bot-Neustart. Baut dafür die Server-Verbindung selbst auf und startet den Server '
+      + 'per SERVER_START_CMD, falls nötig (Cloud: startet also eine GPU-Instanz). '
+      + 'false = nur manuell per /finalize run.',
   },
 
   // ======================= BOT: Transkript-Live-Sync =========================
@@ -697,6 +1050,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Finalize-Upload', key: 'FINALIZE_UPLOAD_CMD',
     label: 'Upload-Kommando (WAV→Server, Legacy)', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Kommando-Template (scp/SSH), mit dem der Bot die Session-WAVs zum Server '
       + 'überträgt. Platzhalter: {src} = lokales chunks-Verzeichnis, {sessionId} = '
       + 'Session-ID. LEER (neuer Default) = HTTP-Upload über die bestehende '

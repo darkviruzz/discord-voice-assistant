@@ -12,12 +12,18 @@ import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
+import { ragConfig } from './rag/index.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
 import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
+import { FinalizeRegistry } from './finalize/inflight.js';
+import { llmConfig, defaultModel } from './providers/llm.js';
+import { sttConfig } from './providers/stt.js';
+import { ttsConfig } from './providers/tts.js';
+import { lastSessionContextEnabled, lastSessionContextMaxChars } from './lastSession.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 
@@ -25,9 +31,19 @@ import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 // the WAVs and runs the upload + finalize flow. Broadcast: only the bot that
 // owns the session will act.
 const autoTimer = new AutoFinalizeTimer({
-  onFire: (sessionId) => broadcastToAllBots({
-    type: 'finalize_request', cmdId: randomUUID(), sessionId, reason: 'idle',
-  }),
+  onFire: (sessionId) => {
+    const sent = broadcastToAllBots({
+      type: 'finalize_request', cmdId: randomUUID(), sessionId, reason: 'idle',
+    });
+    // No bot connected (it drops the link 60 s after /leave): nobody received
+    // the request, so don't leave the session locked as "finalizing" — the bot
+    // runs its own idle auto-finalize for left sessions and its finalize_session
+    // must not be refused/raced by a phantom lock here.
+    if (sent === 0) {
+      log(`autoFinalize: no bot connected for session ${sessionId} — left to the bot's own idle finalize`);
+      autoTimer.release(sessionId);
+    }
+  },
 });
 
 const PROTO_VERSION = 1;
@@ -77,9 +93,7 @@ function logSessionMeta(sessionId, msg) {
     botVersion: msg.botVersion ?? null,
     serverVersion: getVersion(),
     llm: {
-      provider: 'ollama',
-      url: process.env.OLLAMA_URL ?? 'http://localhost:11434',
-      model: process.env.OLLAMA_MODEL ?? 'llama3',
+      ...llmConfig(),
       historyTurns: Number(process.env.HISTORY_TURNS ?? 6),
       systemPromptFile: process.env.SYSTEM_PROMPT_FILE ?? null,
       systemPromptInline: !!process.env.SYSTEM_PROMPT,
@@ -90,25 +104,27 @@ function logSessionMeta(sessionId, msg) {
       foldChars: Number(process.env.LIVE_FOLD_CHARS ?? 3000),
       renderMaxChars: Number(process.env.LIVE_RENDER_MAX_CHARS ?? 6000),
       foldMinIntervalMs: Number(process.env.LIVE_FOLD_MIN_INTERVAL_MS ?? 0),
-      summaryModel: process.env.SUMMARY_MODEL || (process.env.OLLAMA_MODEL ?? 'llama3'),
+      summaryModel: (process.env.SUMMARY_MODEL || '').trim() || defaultModel(),
       summaryMaxChars: Number(process.env.SUMMARY_MAX_CHARS ?? 2000),
       campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
       campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),
     },
+    // Effective values as rag/index.js applies them (fallback timeout,
+    // sanitized threshold, embedding provider/model) plus the index stats at
+    // session start — not the raw env strings.
+    rag: ragConfig(),
+    lastSessionContext: {
+      enabled: lastSessionContextEnabled(),
+      maxChars: lastSessionContextMaxChars(),
+    },
     stt: {
-      provider: 'whisper.cpp',
-      url: process.env.WHISPER_URL ?? 'http://localhost:8080',
-      language: process.env.WHISPER_LANGUAGE ?? 'auto',
-      temperature: Number(process.env.WHISPER_TEMPERATURE ?? 0.2),
+      ...sttConfig(),
       noSpeechProbStored: true,
       noSpeechProbFiltersLive: false,
       maxChunkSeconds: Number(process.env.STT_MAX_CHUNK_SECONDS ?? 30),
       silenceThresh: Number(process.env.STT_SILENCE_THRESH ?? 300),
     },
-    tts: {
-      provider: process.env.TTS_PROVIDER ?? 'piper',
-      url: process.env.TTS_URL ?? 'http://localhost:5000',
-    },
+    tts: ttsConfig(),
     wakeword: {
       word: process.env.WAKE_WORD ?? 'Rabenauge',
       fuzzy: (process.env.WAKE_WORD_FUZZY ?? 'true') !== 'false',
@@ -141,18 +157,80 @@ export function ensureUploadDir(sessionId) {
   return dir;
 }
 
+// Deliver a finalize_result to one waiting request. Normally on the socket the
+// request came in on. If that socket closed while the run was going (the bot's
+// link dropped mid-finalize), hand the result to the currently registered bot
+// connection(s) instead: the bot keeps finalize_session pending across the
+// reconnect and re-sends it with the SAME cmdId, so this cmdId still matches
+// (a bot with no such pending cmdId ignores it). With no bot connected right
+// now, the re-send is answered from the registry's result cache. Exported for
+// tests.
+export function deliverFinalizeResult({ ws, cmdId }, payload) {
+  const msg = { ...payload, type: 'finalize_result', cmdId };
+  if (ws.readyState === ws.OPEN) { send(ws, msg); return; }
+  let n = 0;
+  for (const botWs of botConnections) {
+    if (botWs.readyState === botWs.OPEN) { send(botWs, msg); n++; }
+  }
+  log(`finalize: result for ${payload.sessionId} (cmdId ${cmdId}) — requesting socket closed, sent to ${n} current bot connection(s)`);
+}
+
+// One run per session; repeated requests join it (see finalize/inflight.js).
+const finalizeRuns = new FinalizeRegistry({ deliver: deliverFinalizeResult });
+
+// Progress of a running finalize → every connected bot (keyed by sessionId, so
+// it still reaches the bot after a reconnect or when the request was a joined
+// re-send). Throttled: phase changes and the last utterance always go out,
+// per-utterance ticks at most every FINALIZE_PROGRESS_MS (default 3 s) — the
+// bot edits a Discord message per tick and Discord rate-limits edits anyway.
+export function finalizeProgressReporter(sessionId, cmdId, {
+  emit = broadcastToAllBots, minIntervalMs = Number(process.env.FINALIZE_PROGRESS_MS) || 3000, now = () => Date.now(),
+} = {}) {
+  let lastPhase = null;
+  let lastAt = 0;
+  return (p = {}) => {
+    const t = now();
+    const phaseChanged = p.phase !== lastPhase;
+    const last = p.phase === 'stt' && p.total > 0 && p.done >= p.total;
+    if (!phaseChanged && !last && t - lastAt < minIntervalMs) return;
+    lastPhase = p.phase;
+    lastAt = t;
+    emit({ type: 'finalize_progress', cmdId, sessionId: String(sessionId), ...p });
+  };
+}
+
 // Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
 // archive, then reply with a checksum summary. Errors are reported back so the
-// bot keeps its local WAVs for a retry.
+// bot keeps its local WAVs for a retry. Idempotent per session: a request for a
+// session whose finalize is already running joins that run (no 2nd re-STT on
+// the same upload dir); a re-send of a request that just completed gets the
+// cached result instead of NO_MANIFEST (the upload dir is gone by then).
 async function handleFinalize(ws, msg) {
   const sessionId = msg.sessionId;
+  const waiter = { ws, cmdId: msg.cmdId };
+
+  // NOTE: no await from here until finalizeRuns.start() — the attach check and
+  // the run registration must be atomic (all source resolution below is sync).
+  const attached = finalizeRuns.attach(sessionId, waiter);
+  if (attached === 'joined') {
+    log('finalize: session', String(sessionId), 'already finalizing — request', msg.cmdId, 'joins the running finalize');
+    send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, sessionId: String(sessionId), phase: 'joined' });
+    return;
+  }
+  if (attached === 'cached') {
+    log('finalize: session', String(sessionId), 'just finalized — answered re-sent request', msg.cmdId, 'from cache');
+    return;
+  }
 
   // Source resolution: a fresh finalize reads the freshly-uploaded WAVs from the
   // transient upload dir; a re-finalize (no upload) reads the originals back from
   // the session's archive (audio/) — the archive is never cleaned up.
   const transientDir = path.join(uploadRootDir(), String(sessionId));
   const archiveRoot = (process.env.ARCHIVE_DIR ?? './archive').replace(/\/+$/, '');
-  const archiveName = typeof msg.sessionName === 'string' ? msg.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  let archiveName = typeof msg.sessionName === 'string' ? msg.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  // '.'/'..' survive the charset filter but would read manifest + audio from the
+  // archive root itself or its parent (same guard as finalize/archiveDirName).
+  if (archiveName === '.' || archiveName === '..') archiveName = '';
   const archiveAudioDir = archiveName ? path.join(archiveRoot, archiveName, 'audio') : null;
 
   let manifest;
@@ -177,13 +255,29 @@ async function handleFinalize(ws, msg) {
 
   // Lock against the idle timer so manual + auto finalize never both run.
   autoTimer.markFinalizing(sessionId);
-  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
+  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, sessionId: String(sessionId), phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
+  const onProgress = finalizeProgressReporter(sessionId, msg.cmdId);
 
-  try {
-    const result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir });
-    send(ws, {
-      type: 'finalize_result',
-      cmdId: msg.cmdId,
+  // The registry delivers the outcome to this request and to every request
+  // that joined meanwhile; a throw becomes { ok: false, error } (not cached).
+  await finalizeRuns.start(sessionId, waiter, async () => {
+    let result;
+    try {
+      result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir, onProgress });
+    } catch (e) {
+      warn('finalize: failed for', String(sessionId), '-', e.message);
+      autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
+      throw e;
+    }
+    // The session is done: drop the RAM state (snapshots rebuild from the
+    // JSONL) and tell the transcript UI to flip it from active to past. Once
+    // per run — joined/re-sent requests never get here. Bookkeeping only: it
+    // must not turn a built transcript into a failure result.
+    try {
+      dropSession(sessionId);
+      publishSessionEnded(sessionId);
+    } catch (e) { warn('finalize: post-finalize cleanup failed:', e.message); }
+    return {
       ok: true,
       sessionId: String(sessionId),
       transcriptPath: result.transcriptPath,
@@ -196,16 +290,9 @@ async function handleFinalize(ws, msg) {
       files: result.files,            // small: archive-root files only
       audioOk: result.audio?.ok ?? false,
       audioCount: result.audio?.files?.length ?? 0,
-    });
-    // The session is done: drop the RAM state (snapshots rebuild from the
-    // JSONL) and tell the transcript UI to flip it from active to past.
-    dropSession(sessionId);
-    publishSessionEnded(sessionId);
-  } catch (e) {
-    warn('finalize: failed for', String(sessionId), '-', e.message);
-    autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
-    send(ws, { type: 'finalize_result', cmdId: msg.cmdId, ok: false, sessionId: String(sessionId), error: e.message });
-  }
+      summary: result.summary ?? null, // short session recap (LLM; null when off/failed)
+    };
+  });
 }
 
 export function initControlWSS({ bearer } = {}) {
@@ -277,8 +364,11 @@ export function initControlWSS({ bearer } = {}) {
             log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId, msg.resume ? '(resume)' : '(new)');
             // Rebuild the live-transcript context from the JSONL (resume, or any
             // start where the buffer is still empty). Fire-and-forget — must not
-            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off.
-            rebuildLiveContext(startedSession, activeSessionId).catch((e) => warn('live-context rebuild failed:', e.message));
+            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. (No /join
+            // briefing any more: "what happened last time" is answered on request
+            // from the last session's summary, see pipeline.buildSystemBlocks.)
+            rebuildLiveContext(startedSession, activeSessionId)
+              .catch((e) => warn('live-context rebuild failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

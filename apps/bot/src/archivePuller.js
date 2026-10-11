@@ -71,6 +71,12 @@ export async function pullArchive({ archiveName } = {}) {
     debug('archivePuller: no archiveName — skipping');
     return { skipped: true };
   }
+  // archiveName (from the server's finalize result) becomes the destination
+  // dir under DIR — same rule as the server's isSafeArchiveName: one plain
+  // directory name, never '.'/'..' or anything with a separator.
+  if (archiveName === '.' || archiveName === '..' || archiveName.replace(/[^A-Za-z0-9._-]/g, '') !== archiveName) {
+    throw new Error(`unsafe archiveName ${JSON.stringify(archiveName).slice(0, 80)}`);
+  }
 
   const bearer = process.env.CONTROL_BEARER || '';
   const headers = { Authorization: `Bearer ${bearer}` };

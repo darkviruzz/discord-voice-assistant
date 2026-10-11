@@ -1,4 +1,5 @@
 import { transcribe } from './stt.js';
+import { sttProviderLabel } from './providers/stt.js';
 import { debug, warn } from './logger.js';
 import opus from '@discordjs/opus';
 
@@ -34,6 +35,10 @@ export function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
 // pieces like " Ab"+"brechen") or glues punctuation ("Witz"+"."). Merging
 // tokens into display words gives LocalAgreement stable units — token
 // boundaries jitter between runs, word text does not.
+//
+// Word-level providers (OpenAI-compatible servers returning whole words
+// without leading spaces) are normalised to the same convention in
+// providers/stt.js (normalizeWordList) — every token arriving here follows it.
 
 export function normWord(text) {
   return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -113,7 +118,8 @@ function numberEnv(name, fallback, min = 0) {
 }
 
 // ── Streaming transcriber (LocalAgreement-2) ─────────────────────────────────
-// True streaming STT against the batch whisper.cpp server: every tick re-
+// True streaming STT against a batch STT server (whisper.cpp or any
+// OpenAI-compatible one, see providers/stt.js): every tick re-
 // transcribes the speaker's active window (start of utterance → now, minus
 // already-locked audio). Words that two consecutive hypotheses agree on are
 // COMMITTED (shown live, never retracted); once committed audio spans
@@ -223,7 +229,9 @@ export function createSttStream({
       if (typeof m === 'number') max = max === null ? m : Math.max(max, m);
     }
     return {
-      provider: 'whisper.cpp',
+      // Stamped by providers/stt.js on each result; injected test
+      // transcribers return none → the current setting.
+      provider: [...parts.map((p) => p.meta), st.lastMeta].find((m) => m?.provider)?.provider ?? sttProviderLabel(),
       mode: 'stream',
       ticks: st.ticks,
       noSpeechProbAvg: weight > 0 ? weighted / weight : null,

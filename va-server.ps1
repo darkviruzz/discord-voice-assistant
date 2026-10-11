@@ -2,7 +2,8 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Set-Location C:\Users\nogar\Programme\discord-voice-assistant
+# Repo-Wurzel = Ordner dieses Skripts (kein fest verdrahteter Benutzerpfad).
+Set-Location $PSScriptRoot
 
 Write-Host "Fetching latest (pruning stale)..." -ForegroundColor Cyan
 git fetch --prune 2>&1 | Out-Null

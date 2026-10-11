@@ -6,11 +6,20 @@
 .PARAMETER Mode
     server  (Standard) – Whisper + Piper im Hintergrund (hidden, Logs in %TEMP%\va-logs\),
                          Node-Server im aktuellen Fenster. Strg+C beendet alles graceful.
-    silent  – Alle Prozesse hidden (Autostart-tauglich). Beenden mit "-Mode stop".
+    silent  – Alle Prozesse hidden (Autostart-tauglich, so ruft der Bot per SSH auf).
+              Beenden mit "-Mode stop".
     all     – Windows Terminal mit 3 Panes (Server / Whisper / Piper).
                          Live-Output + Logs (Tee). [X] killt hart, Ctrl+C im Server-Pane graceful.
     stop    – Beendet alle Services (Whisper, Piper, Server). Ollama bleibt laufen.
     check   – Führt check-services.ps1 aus (Health-Status aller Dienste).
+
+.NOTES
+    Pfade, Modelle und Ports stehen NICHT mehr in diesem Skript, sondern in
+    %USERPROFILE%\.config\va\deploy.env (Layering: scripts\lib\VaLocalConfig.ps1).
+    Einrichten/prüfen:  .\scripts\Setup-VoiceAssistant.ps1   bzw.   -Check
+
+    Die Vault-Suche (RAG) ist kein eigener Prozess: sie läuft im Node-Server
+    (Index in apps\server\data\rag), Embeddings liefert Ollama.
 
 .EXAMPLE
     .\scripts\Start-VoiceAssistant.ps1
@@ -28,41 +37,44 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
-# Konfiguration
+# Konfiguration (Quelle: scripts\lib\VaLocalConfig.ps1)
 # ============================================================
-$WhisperDir    = "C:\Users\nogar\Programme\whisper-vulkan"
-$WhisperExe    = "whisper-server.exe"
-$WhisperModel  = "models\ggml-medium-q5_0.bin"
-$WhisperPort   = 8080
+$RepoRoot = $PSScriptRoot | Split-Path -Parent
+. (Join-Path $PSScriptRoot 'lib\VaLocalConfig.ps1')
 
-$PiperForkDir  = "C:\Users\nogar\Programme\piper-directml-fork"
-$PiperVenv     = "$PiperForkDir\venv\Scripts"
-$PiperPython   = "$PiperVenv\python.exe"
-$PiperPort     = 5000
+$VaConfig = Get-VaLocalConfig -RepoRoot $RepoRoot
+$Svc      = Resolve-VaServices -Config $VaConfig -RepoRoot $RepoRoot
 
-$OllamaUrl     = "http://localhost:11434"
-$OllamaPort    = 11434
-$PiperUrl      = "http://localhost:$PiperPort"
-$WhisperUrl    = "http://localhost:$WhisperPort"
-$ServerPort    = 7440
+$WhisperDir    = $Svc.WhisperDir
+$WhisperExe    = $Svc.WhisperExe
+$WhisperModel  = $Svc.WhisperModel
+$WhisperLang   = $Svc.WhisperLang
+$WhisperPort   = $Svc.WhisperPort
+$WhisperUrl    = $Svc.WhisperUrl
 
-$RepoRoot      = $PSScriptRoot | Split-Path -Parent
-$PiperSvcDir   = "$RepoRoot\services\piper"
-$ServerDir     = "$RepoRoot\apps\server"
+$PiperPython   = $Svc.PiperPython
+$PiperPort     = $Svc.PiperPort
+$PiperUrl      = $Svc.PiperUrl
+
+$OllamaPort    = $Svc.OllamaPort
+$ServerPort    = $Svc.ServerPort
+
+$PiperSvcDir   = $Svc.PiperSvcDir
+$ServerDir     = $Svc.ServerDir
+
+# Env für Kindprozesse (Piper/Node). Gilt für diesen Prozess und wird in
+# Hidden-/Pane-Skripte injiziert (die erben die Env nicht).
+$ChildEnv = Get-VaChildEnv -Config $VaConfig -Services $Svc
+Set-VaProcessEnv -EnvMap $ChildEnv
 
 # ============================================================
 # Logs
 # ============================================================
-$LogDir     = "$env:TEMP\va-logs"
-$WhisperLog = "$LogDir\whisper.log"
-$PiperLog   = "$LogDir\piper.log"
-$ServerLog  = "$LogDir\server.log"
+$LogDir     = $Svc.LogDir
+$WhisperLog = Join-Path $LogDir 'whisper.log'
+$PiperLog   = Join-Path $LogDir 'piper.log'
+$ServerLog  = Join-Path $LogDir 'server.log'
 if (-not (Test-Path $LogDir)) { $null = New-Item -ItemType Directory -Path $LogDir -Force }
-
-# Env-Vars für services/piper/server.py (werden an Kindprozesse vererbt)
-$env:PIPER_VOICES_DIR      = "C:\Users\nogar\Programme\piper\voices"
-$env:PIPER_USE_DIRECTML    = "1"
-$env:PIPER_DIRECTML_DEVICE = "0"
 
 # ============================================================
 # Hilfsfunktionen
@@ -71,6 +83,7 @@ function Write-Step { param([string]$Msg) Write-Host ">> $Msg" -ForegroundColor 
 function Write-Ok   { param([string]$Msg) Write-Host "   OK  $Msg" -ForegroundColor Green }
 function Write-Warn { param([string]$Msg) Write-Host "   !!  $Msg" -ForegroundColor Yellow }
 function Write-Info { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor DarkGray }
+function Write-Fail { param([string]$Msg) Write-Host "   XX  $Msg" -ForegroundColor Red }
 
 function Test-Port {
     param([int]$Port)
@@ -218,6 +231,10 @@ function Stop-AllServices {
 # ============================================================
 
 function Ensure-Ollama {
+    if (-not $Svc.OllamaNeeded) {
+        Write-Info "Ollama nicht benötigt (LLM_PROVIDER=openai, keine Ollama-Embeddings)."
+        return
+    }
     Write-Step "Prüfe Ollama..."
     if (Test-Port $OllamaPort) {
         Write-Ok "Ollama läuft bereits"
@@ -269,13 +286,9 @@ function Start-ServiceHidden {
     param([string]$Name, [string[]]$ScriptLines, [string]$LogFile)
     $tmpScript = "$env:TEMP\va-hidden-$($Name.ToLower()).ps1"
 
-    # Re-inject env-vars, die der Task-Prozess sonst nicht sieht.
-    # Nur die für Piper relevanten — Whisper braucht keine, Node liest dotenv.
-    $envBlock = @(
-        ('$env:PIPER_VOICES_DIR = ''' + $env:PIPER_VOICES_DIR + '''')
-        ('$env:PIPER_USE_DIRECTML = ''' + $env:PIPER_USE_DIRECTML + '''')
-        ('$env:PIPER_DIRECTML_DEVICE = ''' + $env:PIPER_DIRECTML_DEVICE + '''')
-    )
+    # Re-inject env-vars, die der Task-Prozess sonst nicht sieht (Piper-
+    # Stimmen, Vault-Pfad, Server-URLs — siehe Get-VaChildEnv).
+    $envBlock = @(ConvertTo-VaEnvAssignments -EnvMap $ChildEnv)
     ($envBlock + $ScriptLines) | Set-Content -Path $tmpScript -Encoding UTF8
 
     $taskName    = "VA-Spawn-$($Name.ToLower())"
@@ -309,23 +322,40 @@ function Start-ServiceHidden {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
+# Lokale Backends, die laut Provider-Wahl gebraucht werden, alle erreichbar?
+function Test-LocalBackendsUp {
+    ((-not $Svc.WhisperEnabled) -or (Test-Port $WhisperPort)) -and
+    ((-not $Svc.PiperEnabled) -or (Test-Port $PiperPort)) -and
+    (Test-Port $ServerPort)
+}
+
+function Wait-LocalBackends {
+    if ($Svc.WhisperEnabled) { $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60 }
+    if ($Svc.PiperEnabled)   { $null = Wait-ForHttp "Piper"   "$PiperUrl/health" }
+}
+
 function Start-Whisper-Hidden {
+    if (-not $Svc.WhisperEnabled) { Write-Info "Whisper übersprungen (STT_PROVIDER=$($Svc.Providers.Stt))."; return }
     if (Test-Port $WhisperPort) { Write-Warn "Whisper läuft bereits auf Port $WhisperPort"; return }
     Write-Step "Starte Whisper hidden (Log: $WhisperLog)..."
     Start-ServiceHidden -Name "whisper" -LogFile $WhisperLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$WhisperDir'"
-        "& '.\$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language de 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$WhisperLog' -Encoding UTF8 -Append"
+        "& '$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language $WhisperLang 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$WhisperLog' -Encoding UTF8 -Append"
     )
 }
 
+# Piper lauscht nur auf 127.0.0.1: keine Authentifizierung (u. a. POST
+# /shutdown) und wird ausschließlich vom lokalen Node-Server angesprochen. Nach
+# außen ist nur der Node-Server (Bearer-geschützt) erreichbar.
 function Start-Piper-Hidden {
+    if (-not $Svc.PiperEnabled) { Write-Info "Piper übersprungen (TTS_PROVIDER=$($Svc.Providers.Tts))."; return }
     if (Test-Port $PiperPort) { Write-Warn "Piper läuft bereits auf Port $PiperPort"; return }
     Write-Step "Starte Piper hidden (Log: $PiperLog)..."
     Start-ServiceHidden -Name "piper" -LogFile $PiperLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$PiperSvcDir'"
-        "& '$PiperPython' -u -m uvicorn server:app --host 0.0.0.0 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$PiperLog' -Encoding UTF8 -Append"
+        "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$PiperLog' -Encoding UTF8 -Append"
     )
 }
 
@@ -362,12 +392,37 @@ if ($Mode -eq "stop") {
 }
 
 # ============================================================
+# Preflight: Konfiguration prüfen, BEVOR etwas hidden startet — sonst endet
+# ein falscher Pfad nur in einem stillen 60-s-Timeout und einer Log-Datei.
+# Fehler eines Dienstes, dessen Port schon belegt ist, blockieren nicht
+# (der läuft dann offenbar bereits, z. B. manuell gestartet).
+# ============================================================
+if (-not (Test-Path -LiteralPath $VaConfig.DeployEnvPath)) {
+    Write-Warn "Keine Host-Konfiguration ($($VaConfig.DeployEnvPath)) – nutze Defaults."
+    Write-Info "Einrichten: .\scripts\Setup-VoiceAssistant.ps1"
+}
+$portOf = @{ Whisper = $WhisperPort; Piper = $PiperPort }
+$preflight = @(Test-VaServiceConfig -Services $Svc -Config $VaConfig | Where-Object {
+    -not ($portOf.ContainsKey($_.Component) -and (Test-Port $portOf[$_.Component]))
+})
+foreach ($issue in $preflight) {
+    if ($issue.Level -eq 'Error') { Write-Fail "$($issue.Component): $($issue.Message)" }
+    else { Write-Warn "$($issue.Component): $($issue.Message)" }
+}
+if (@($preflight | Where-Object { $_.Level -eq 'Error' }).Count -gt 0) {
+    Write-Host ""
+    Write-Host "Start abgebrochen – Konfiguration unvollständig." -ForegroundColor Red
+    Write-Host "Behebung: .\scripts\Setup-VoiceAssistant.ps1   (nur prüfen: -Check)" -ForegroundColor Yellow
+    exit 1
+}
+
+# ============================================================
 # Modus: silent
 # ============================================================
 if ($Mode -eq "silent") {
     Ensure-Ollama
 
-    if ((Test-Port $WhisperPort) -and (Test-Port $PiperPort) -and (Test-Port $ServerPort)) {
+    if (Test-LocalBackendsUp) {
         Write-Ok "Alle Dienste laufen bereits."
         Write-Info "Logs: $LogDir"
         Write-Info "Stoppen mit: .\scripts\Start-VoiceAssistant.ps1 -Mode stop"
@@ -378,9 +433,8 @@ if ($Mode -eq "silent") {
     Start-Whisper-Hidden
     Start-Piper-Hidden
 
-    Write-Step "Warte auf Whisper und Piper..."
-    $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
-    $null = Wait-ForHttp "Piper"   "$PiperUrl/health"
+    Write-Step "Warte auf lokale Dienste..."
+    Wait-LocalBackends
 
     Start-Server-Hidden
 
@@ -413,12 +467,13 @@ if ($Mode -eq "all") {
     # Temporäre Pane-Skripte schreiben.
     # Grund: WT zerlegt Inline-Commands an Semikolons (auch wenn diese zur PowerShell-Syntax gehören)
     # → 7 Tabs statt 3 Panes. Pfade als -File-Argument umgehen das Problem komplett.
-    # env-Vars (PIPER_DIR etc.) sind bereits im aktuellen Prozess gesetzt und werden vererbt.
+    # Env-Block wird jedem Pane-Skript vorangestellt: ein bereits laufendes
+    # Windows Terminal öffnet neue Panes aus SEINER Env, nicht aus dieser.
 
     function New-PaneScript {
         param([string]$Name, [string[]]$Lines)
         $path = "$env:TEMP\va-pane-$Name.ps1"
-        $Lines | Set-Content -Path $path -Encoding UTF8
+        (@(ConvertTo-VaEnvAssignments -EnvMap $ChildEnv) + $Lines) | Set-Content -Path $path -Encoding UTF8
         return $path
     }
 
@@ -429,25 +484,22 @@ if ($Mode -eq "all") {
 
     $whisperPane = New-PaneScript "whisper" @(
         "Set-Location '$WhisperDir'"
-        "& '.\$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language de 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$WhisperLog'"
+        "& '$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language $WhisperLang 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$WhisperLog'"
     )
 
     $piperPane = New-PaneScript "piper" @(
         "Set-Location '$PiperSvcDir'"
-        "& '$PiperPython' -u -m uvicorn server:app --host 0.0.0.0 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
+        "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
     )
-
-    Write-Step "Öffne Windows Terminal mit 3 Panes..."
 
     # WT direkt aufrufen – Array-ArgumentList umgeht PowerShell-Reparsing.
     # Die einzigen ';' sind hier WT-Subcommand-Trenner (eigene Array-Elemente).
-    $wtArgs = @(
-        'new-tab',     '--title', 'Server',  '--', 'powershell', '-NoProfile', '-File', $serverPane
-        ';'
-        'split-pane',  '--title', 'Whisper', '--', 'powershell', '-NoProfile', '-File', $whisperPane
-        ';'
-        'split-pane',  '--title', 'Piper',   '--', 'powershell', '-NoProfile', '-File', $piperPane
-    )
+    # Panes nur für Dienste, die laut Provider-Wahl lokal laufen.
+    $wtArgs = @('new-tab', '--title', 'Server', '--', 'powershell', '-NoProfile', '-File', $serverPane)
+    if ($Svc.WhisperEnabled) { $wtArgs += @(';', 'split-pane', '--title', 'Whisper', '--', 'powershell', '-NoProfile', '-File', $whisperPane) }
+    if ($Svc.PiperEnabled)   { $wtArgs += @(';', 'split-pane', '--title', 'Piper',   '--', 'powershell', '-NoProfile', '-File', $piperPane) }
+    Write-Step "Öffne Windows Terminal mit $(1 + [int]$Svc.WhisperEnabled + [int]$Svc.PiperEnabled) Pane(s)..."
+
     Start-Process -FilePath wt -ArgumentList $wtArgs
 
     Write-Ok "Windows Terminal gestartet."
@@ -462,7 +514,7 @@ if ($Mode -eq "all") {
 # ============================================================
 Ensure-Ollama
 
-if ((Test-Port $WhisperPort) -and (Test-Port $PiperPort) -and (Test-Port $ServerPort)) {
+if (Test-LocalBackendsUp) {
     Write-Ok "Alle Dienste laufen bereits."
     Write-Info "Logs: $LogDir"
     exit
@@ -472,9 +524,8 @@ Clear-AllLogs
 Start-Whisper-Hidden
 Start-Piper-Hidden
 
-Write-Step "Warte auf Whisper und Piper..."
-$null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
-$null = Wait-ForHttp "Piper"   "$PiperUrl/health"
+Write-Step "Warte auf lokale Dienste..."
+Wait-LocalBackends
 
 Write-Step "Starte Node-Server (Port $ServerPort) – Strg+C beendet alle Dienste..."
 Write-Info "Logs: $LogDir"

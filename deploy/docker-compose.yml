@@ -115,10 +115,31 @@ services:
       WHISPER_URL: http://whisper:8080
       OLLAMA_URL: http://ollama:11434
       TTS_URL: http://piper:5000
-      RAG_URL: ${RAG_URL:-}
+      # Vault RAG runs inside the server (apps/server/src/rag/): it indexes the
+      # campaign volume (OBSIDIAN_VAULT_PATH below) with embeddings from the
+      # ollama service and keeps the vector index on the server-data volume.
+      RAG_ENABLED: ${RAG_ENABLED:-true}
+      RAG_INDEX_DIR: /data/rag
+      RAG_TIMEOUT_MS: ${RAG_TIMEOUT_MS:-800}
+      RAG_SCORE_THRESHOLD: ${RAG_SCORE_THRESHOLD:-}
+      RAG_MAX_CHUNK_CHARS: ${RAG_MAX_CHUNK_CHARS:-2000}
+      RAG_RESCAN_INTERVAL_MS: ${RAG_RESCAN_INTERVAL_MS:-300000}
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-ollama}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_KEEP_ALIVE: ${EMBED_KEEP_ALIVE:-30m}
+      EMBED_QUERY_PREFIX: ${EMBED_QUERY_PREFIX:-}
+      EMBED_DOC_PREFIX: ${EMBED_DOC_PREFIX:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-de}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      # LLM provider (default: the ollama service above via OLLAMA_URL).
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
       TTS_PROVIDER: ${TTS_PROVIDER:-piper}
       FINALIZE_UPLOAD_DIR: /data/uploads
       ARCHIVE_DIR: /data/archive
@@ -132,6 +153,22 @@ services:
       # Campaign context source (pulled into the campaign volume by start.sh).
       OBSIDIAN_VAULT_PATH: /data/campaign
       CAMPAIGN_CONTEXT_FILE: ${CAMPAIGN_CONTEXT_FILE:-CAMPAIGN.md}
+      # STT provider (default: the whisper service above via WHISPER_URL).
+      STT_PROVIDER: ${STT_PROVIDER:-whispercpp}
+      STT_BASE_URL: ${STT_BASE_URL:-}
+      STT_MODEL: ${STT_MODEL:-}
+      STT_API_KEY: ${STT_API_KEY:-}
+      STT_LANGUAGE: ${STT_LANGUAGE:-}
+      STT_TIMEOUT_MS: ${STT_TIMEOUT_MS:-120000}
+      # TTS provider settings (TTS_PROVIDER=openai etc.) — see deploy/.env.example.
+      TTS_TIMEOUT_MS: ${TTS_TIMEOUT_MS:-30000}
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_MODEL: ${TTS_MODEL:-}
+      TTS_VOICE: ${TTS_VOICE:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_RESPONSE_FORMAT: ${TTS_RESPONSE_FORMAT:-pcm}
+      TTS_SAMPLE_RATE: ${TTS_SAMPLE_RATE:-24000}
+      TTS_SPEED: ${TTS_SPEED:-}
     env_file:
       - path: ./server.env
         required: false
@@ -148,18 +185,6 @@ services:
         condition: service_started
       piper:
         condition: service_started
-
-  # ── RAG (Phase 4 — placeholder, not yet implemented) ──────────────────────
-  # Uncomment once apps/rag/ exists. The server already reads RAG_URL.
-  # rag:
-  #   build:
-  #     context: ..
-  #     dockerfile: apps/rag/Dockerfile
-  #   container_name: va-rag
-  #   restart: unless-stopped
-  #   environment:
-  #     NVIDIA_VISIBLE_DEVICES: ${RAG_VISIBLE_DEVICES:-0}
-  #   networks: [voice]
 
 networks:
   voice:

@@ -461,6 +461,9 @@ async function runFinalize(session, { channelName = null, guildName = null, onPr
     }
 
     if (sessions.active && sessions.active.id === session.id) detachActiveSession();
+    // Finalized = over for the server link too (no revival on the next
+    // reconnect, later /recap not logged into this session).
+    transport.endSessionIfCurrent(String(session.startedAt));
     return { result, fullyVerified, retentionNote: retentionNote + archiveNote };
   } catch (e) {
     session.status = prevStatus;

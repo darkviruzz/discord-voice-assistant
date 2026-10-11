@@ -21,15 +21,22 @@ export function llmProvider() {
   return p === 'openai' ? 'openai' : 'ollama';
 }
 
+// Same default as the settings catalog / .env.example / the launchers, which
+// pull llama3.2 — a server without OLLAMA_MODEL asked Ollama for an
+// unpulled 'llama3' before.
+const DEFAULT_OLLAMA_MODEL = 'llama3.2';
+
 // The model used when the caller does not override it.
 export function defaultModel() {
   return llmProvider() === 'openai'
-    ? env('LLM_MODEL', env('OLLAMA_MODEL', 'llama3'))
-    : env('OLLAMA_MODEL', 'llama3');
+    ? env('LLM_MODEL', env('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL))
+    : env('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL);
 }
 
+// Empty (a field cleared in the settings panel) → default: Ollama rejects
+// keep_alive "" with HTTP 400, which failed every answer.
 function ollamaKeepAlive() {
-  return process.env.OLLAMA_KEEP_ALIVE ?? '30m';
+  return env('OLLAMA_KEEP_ALIVE', '30m');
 }
 
 // Public description for the session_meta snapshot / logs.

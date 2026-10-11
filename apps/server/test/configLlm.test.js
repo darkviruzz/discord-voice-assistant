@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { catalogEntry, isSecretEntry } from '../src/configCatalog.js';
 import { coerce } from '../src/configStore.js';
+import { llmConfig, defaultModel, llmProvider } from '../src/providers/llm.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverDir = path.resolve(here, '..');
@@ -44,6 +45,41 @@ test('every key the LLM layer reads is a complete server catalog entry', () => {
   assert.equal(coerce('server', 'LLM_PROVIDER', 'openai'), 'openai');
   assert.throws(() => coerce('server', 'LLM_PROVIDER', 'vllm'), /ollama, openai/);
 });
+
+function withLlmEnvCleared(fn) {
+  const keys = llmKeysUsed();
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  try { return fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+// The code fell back to 'llama3' while catalog, .env.example, compose and the
+// launchers (Setup/start.sh pull it) say llama3.2: a server without
+// OLLAMA_MODEL asked Ollama for a model nobody pulled.
+test('LLM catalog defaults == code fallbacks', () => withLlmEnvCleared(() => {
+  const def = (k) => catalogEntry('server', k).def;
+  assert.equal(llmProvider(), def('LLM_PROVIDER'));
+  const c = llmConfig();
+  assert.equal(c.model, def('OLLAMA_MODEL'));
+  assert.equal(c.url, def('OLLAMA_URL'));
+  assert.equal(c.keepAlive, def('OLLAMA_KEEP_ALIVE'));
+  process.env.LLM_PROVIDER = 'openai';
+  assert.equal(defaultModel(), def('OLLAMA_MODEL'), 'LLM_MODEL empty → OLLAMA_MODEL default');
+  assert.equal(llmConfig().url, def('LLM_BASE_URL'));
+  const src = fs.readFileSync(path.join(serverDir, 'src/llm.js'), 'utf8');
+  assert.match(src, new RegExp(`Number\\(process\\.env\\.LLM_TIMEOUT_MS\\) \\|\\| ${Number(def('LLM_TIMEOUT_MS')).toLocaleString('en').replace(/,/g, '_')}\\b`));
+}));
+
+// A string field cleared in the settings panel is '' in process.env. Ollama
+// rejects keep_alive "" (HTTP 400) — every answer failed until a restart.
+test('a cleared OLLAMA_KEEP_ALIVE falls back to the default instead of sending ""', () => withLlmEnvCleared(() => {
+  process.env.OLLAMA_KEEP_ALIVE = '';
+  assert.equal(llmConfig().keepAlive, '30m');
+  process.env.OLLAMA_KEEP_ALIVE = ' -1 ';
+  assert.equal(llmConfig().keepAlive, '-1');
+}));
 
 test('LLM vars are documented in apps/server/.env.example with the catalog default', () => {
   const example = fs.readFileSync(path.join(serverDir, '.env.example'), 'utf8');

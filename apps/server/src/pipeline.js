@@ -3,6 +3,7 @@ import { sessions, ensureSession } from './state.js';
 import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
+import { sttProviderLabel } from './providers/stt.js';
 import { chat } from './llm.js';
 import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -240,7 +241,9 @@ function summarizeStt(chunks, chunkResults) {
   }
 
   return {
-    provider: 'whisper.cpp',
+    // Whoever actually answered (providers/stt.js stamps it on every chunk's
+    // meta); the current setting only when no chunk was transcribed.
+    provider: chunkResults.find((r) => r.meta?.provider)?.meta.provider ?? sttProviderLabel(),
     noSpeechProbAvg: totalWeight > 0 ? weightedNoSpeech / totalWeight : null,
     noSpeechProbMax,
     chunkDurationsMs: chunks.map((chunk) => Math.round((chunk.pcm.length / 2 / SAMPLE_RATE) * 1000)),

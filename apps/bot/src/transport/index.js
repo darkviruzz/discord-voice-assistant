@@ -352,9 +352,13 @@ export function finalizeSession(payload, opts) {
   return _instance.control.finalizeSession(payload, opts);
 }
 
+// Subscribe to server finalize_progress messages. Returns an unsubscribe
+// function (every finalize subscribes for its own duration).
 export function onFinalizeProgress(cb) {
-  if (!_instance) return;
-  _instance.control.on('finalizeProgress', cb);
+  if (!_instance) return () => {};
+  const control = _instance.control;
+  control.on('finalizeProgress', cb);
+  return () => control.off('finalizeProgress', cb);
 }
 
 export function getSpeakerMap(guildId) {

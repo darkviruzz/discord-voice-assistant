@@ -52,8 +52,14 @@ export function verifyUploads(manifest, uploadDir) {
 export async function buildFinalizeModel({
   sessionId, manifest, events = [], uploadDir,
   transcribeFn = null, speakerMap = {}, verified = null, assistantName = null,
+  onProgress = null,
 }) {
   const transcribe = transcribeFn || defaultTranscribe;
+  // Progress is reporting only — a throwing callback must never fail a finalize.
+  const report = (p) => { try { onProgress?.(p); } catch { /* ignore */ } };
+  const todo = (manifest.utterances || []).filter((u) => !verified || verified.has(u.file));
+  let doneCount = 0;
+  report({ phase: 'stt', done: 0, total: todo.length });
   const asstName = assistantName || manifest.wakeWord || manifest.assistantName || undefined;
   const sessionStartMs = Number(manifest.sessionStartMs ?? sessionId);
 
@@ -67,8 +73,10 @@ export async function buildFinalizeModel({
       ({ text, words } = await transcribe(abs));
     } catch (e) {
       warn('finalize: STT failed for', u.file, '-', e.message);
+      report({ phase: 'stt', done: ++doneCount, total: todo.length });
       continue;
     }
+    report({ phase: 'stt', done: ++doneCount, total: todo.length });
     if (!text || isBracketOnly(text)) continue;
     const startMs = sessionStartMs + (Number(u.startMs) || 0);
     userSpans.push({
@@ -124,8 +132,9 @@ export async function finalizeSession({
   transcribeFn = null, speakerMap = {},
   archiveRoot = process.env.ARCHIVE_DIR ?? './archive',
   transcriptRoot = process.env.TRANSCRIPT_DIR ?? './transcripts',
-  jsonlPath = null, opts = {}, cleanupUploadDir = true,
+  jsonlPath = null, opts = {}, cleanupUploadDir = true, onProgress = null,
 }) {
+  const report = (p) => { try { onProgress?.(p); } catch { /* reporting only */ } };
   const timeZone = opts.timeZone || process.env.FINALIZE_TZ || 'Europe/Berlin';
   const { verified, missing, mismatched } = verifyUploads(manifest, uploadDir);
   if (missing.length || mismatched.length) {
@@ -139,8 +148,9 @@ export async function finalizeSession({
 
   const model = await buildFinalizeModel({
     sessionId, manifest, events, uploadDir, transcribeFn,
-    speakerMap: mergedSpeakerMap, verified, assistantName: wakeWord,
+    speakerMap: mergedSpeakerMap, verified, assistantName: wakeWord, onProgress,
   });
+  report({ phase: 'merge' });
 
   const md = mergeTranscript(model, {
     timeZone,
@@ -177,6 +187,7 @@ export async function finalizeSession({
   fs.writeFileSync(path.join(archiveDir, 'speaker-map.json'), JSON.stringify(mergedSpeakerMap, null, 2));
 
   // Audio archive (OGG/Opus). Best-effort: a failure must not lose the transcript.
+  report({ phase: 'audio' });
   let audio = { files: [], ok: false, error: null };
   try {
     audio = await buildAudioArchive({ manifest, uploadDir, archiveDir, verified, opts });

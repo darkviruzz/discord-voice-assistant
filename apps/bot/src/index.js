@@ -16,6 +16,7 @@ import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import { pullArchive, startArchiveCleanup } from './archivePuller.js';
 import { LeaveFinalizeScheduler } from './leaveFinalize.js';
+import { FinalizeStatus, formatProgress } from './finalizeStatus.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -105,6 +106,11 @@ async function notifyOwner(content) {
 // on loss → warn the owner + one automatic SSH restart attempt; on recovery →
 // confirm. Local recording keeps running regardless (WAVs are written locally).
 async function handleServerLink(info) {
+  for (const st of _finalizeStatuses.values()) {
+    st.update(info.connected
+      ? '🔄 Server wieder verbunden — Finalize wird fortgesetzt …'
+      : '⚠️ Verbindung zum Server unterbrochen — der Finalize läuft serverseitig weiter, warte auf Reconnect (max. 30 min) …');
+  }
   if (!info.connected) {
     if (!hasActiveSession() || _outage.active) return;   // idle/expected, or already handling
     _outage.active = true;
@@ -191,12 +197,8 @@ async function autoFinalizeLeftSession(id) {
   // Nothing recorded → nothing to transcribe. Skip BEFORE performFinalize, which
   // would otherwise bring up (on cloud: launch) a server just to fail.
   if (!(session.timeline?.length > 0)) { log(`leave-finalize: ${id} has no utterances — left open`); return; }
-  const { result, retentionNote } = await performFinalize(session, {});
+  const { result } = await performFinalize(session, { reason: 'automatisch (Inaktivität nach /leave)' });
   log(`leave-finalize: ${id} finalized → ${result.transcriptPath}`);
-  if (_textChannel?.send) {
-    _textChannel.send(`🗄️ Session \`${session.id}\` automatisch finalisiert (Inaktivität nach /leave).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
-      .catch(() => {});
-  }
 }
 
 // On startup: open sessions on disk get the idle countdown re-armed from their
@@ -310,6 +312,31 @@ async function ensureFinalizeLink(onProgress = () => {}) {
     : 'Server nicht erreichbar. Session bleibt offen – später erneut mit `/finalize run` versuchen (ggf. vorher `/server restart`).');
 }
 
+// Live Discord status message per running finalize (session id → FinalizeStatus).
+const _finalizeStatuses = new Map();
+
+// Where a finalize reports: the channel the command came from, else the text
+// channel bound at /join (persisted in session.json, so it survives a bot
+// restart for auto-finalizes), else the last known text channel.
+async function resolveSessionTextChannel(session, preferred = null) {
+  if (preferred?.send) return preferred;
+  if (session?.textChannelId) {
+    const ch = await client.channels.fetch(session.textChannelId).catch(() => null);
+    if (ch?.send) return ch;
+  }
+  return _textChannel?.send ? _textChannel : null;
+}
+
+function finalizeResultText(session, result, retentionNote = '', { reFinalize = false } = {}) {
+  return [
+    `✅ ${reFinalize ? 'Neu finalisiert' : 'Finalisiert'}.`,
+    `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
+    `Transkript: \`${result.transcriptPath}\``,
+    `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
+    retentionNote.trim(),
+  ].filter(Boolean).join('\n');
+}
+
 // Session ids with a performFinalize in flight. The persisted FINALIZING
 // status is only set once the link is up (so an unreachable server leaves the
 // session untouched); this closes the window before that against a second
@@ -331,12 +358,34 @@ async function performFinalize(session, opts = {}) {
   // and its reply). Hold it: otherwise the idle release armed by /leave (60 s
   // grace) drops the socket in the middle of a re-STT that runs for minutes.
   const releaseLink = transport.holdLink(`finalize ${session.id}`);
+  // Live status in the session's text channel: bot-side steps (connect,
+  // upload) and the server's finalize_progress (x/N utterances, merge, audio),
+  // then the result or the error. Survives the 15-min interaction-token limit
+  // and covers auto-finalizes, which have no interaction at all.
+  const status = new FinalizeStatus({
+    resolveChannel: () => resolveSessionTextChannel(session, opts.channel),
+    header: `🗄️ **Finalize** Session \`${session.id}\`${opts.reason ? ` — ${opts.reason}` : ''}`,
+  });
+  _finalizeStatuses.set(session.id, status);
+  const wireId = String(session.startedAt);
+  const offProgress = transport.onFinalizeProgress((m) => {
+    if (String(m?.sessionId) === wireId) status.update(formatProgress(m));
+  });
+  const onProgress = (text) => { status.update(text); opts.onProgress?.(text); };
+  await status.start('⏳ Startet …');
   try {
     // Before touching status/manifest/upload: an unreachable server must leave
     // the session exactly as it was, so /finalize run can simply be retried.
-    await ensureFinalizeLink(opts.onProgress);
-    return await runFinalize(session, opts);
+    await ensureFinalizeLink(onProgress);
+    const out = await runFinalize(session, { ...opts, onProgress });
+    await status.done(finalizeResultText(session, out.result, out.retentionNote, { reFinalize: opts.fromArchive }));
+    return out;
+  } catch (e) {
+    await status.fail(`❌ Finalize fehlgeschlagen: ${e.message}\nDie lokalen Aufnahmen bleiben erhalten — erneut mit \`/finalize run session:${session.id}\`.`);
+    throw e;
   } finally {
+    offProgress?.();
+    _finalizeStatuses.delete(session.id);
     _finalizeInFlight.delete(session.id);
     // Last hold gone → the normal idle policy applies again: with no active
     // session the link is released after the grace period.
@@ -445,11 +494,8 @@ async function handleAutoFinalize({ sessionId }) {
 
   log('auto-finalize: finalizing idle session', session.id);
   try {
-    const { result, retentionNote } = await performFinalize(session, {});
-    if (_textChannel?.send) {
-      _textChannel.send(`🗄️ Session \`${session.id}\` automatisch finalisiert (Inaktivität).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
-        .catch(() => {});
-    }
+    // Result and errors show up in the session's status message (performFinalize).
+    await performFinalize(session, { reason: 'automatisch (Inaktivität)' });
   } catch (e) {
     warn('auto-finalize failed:', e.message);
   }
@@ -667,6 +713,12 @@ client.on('interactionCreate', async (i) => {
       leaveFinalizer.cancelAll();
       const { resumed } = sessions.resumeOrStart();
       _activeVoiceChannelId = channel.id;
+      // Remember where this session talks — finalize status messages (also
+      // auto-finalizes after a bot restart) go to this channel.
+      if (sessions.active && i.channelId && sessions.active.textChannelId !== i.channelId) {
+        sessions.active.textChannelId = i.channelId;
+        SessionManager.save(sessions.active);
+      }
       transport.sessionStart({
         sessionId: sessions.wireSessionId(),
         guildId: channel.guild.id,
@@ -890,25 +942,22 @@ client.on('interactionCreate', async (i) => {
       const reFinalize = session.status === SessionStatus.FINALIZED;
 
       await i.deferReply({ flags: MessageFlags.Ephemeral });
+      // Progress + result live in a channel message (see performFinalize); the
+      // ephemeral reply only points there. Its final edit is best-effort — the
+      // interaction token is dead after 15 min.
+      await i.editReply({ content: `⏳ Finalize gestartet — Fortschritt im Kanal ${i.channel ? `<#${i.channelId}>` : ''}.` }).catch(() => {});
       try {
         const { result, retentionNote } = await performFinalize(session, {
           channelName: i.channel?.name ?? null,
           guildName: i.guild?.name ?? null,
-          onProgress: (m) => { i.editReply({ content: m }).catch(() => {}); },
+          channel: i.channel,
           fromArchive: reFinalize,
+          reason: reFinalize ? 'neu (aus dem Archiv)' : null,
         });
-        await i.editReply({
-          content: [
-            `✅ Session \`${session.id}\` ${reFinalize ? 'neu finalisiert' : 'finalisiert'}.`,
-            `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
-            `Transkript: \`${result.transcriptPath}\``,
-            `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
-            retentionNote.trim(),
-          ].join('\n'),
-        });
+        await i.editReply({ content: finalizeResultText(session, result, retentionNote, { reFinalize }) }).catch(() => {});
       } catch (e) {
         error(e);
-        await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` });
+        await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` }).catch(() => {});
       }
     }
   } catch (e) {

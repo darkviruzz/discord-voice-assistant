@@ -178,6 +178,27 @@ export function deliverFinalizeResult({ ws, cmdId }, payload) {
 // One run per session; repeated requests join it (see finalize/inflight.js).
 const finalizeRuns = new FinalizeRegistry({ deliver: deliverFinalizeResult });
 
+// Progress of a running finalize → every connected bot (keyed by sessionId, so
+// it still reaches the bot after a reconnect or when the request was a joined
+// re-send). Throttled: phase changes and the last utterance always go out,
+// per-utterance ticks at most every FINALIZE_PROGRESS_MS (default 3 s) — the
+// bot edits a Discord message per tick and Discord rate-limits edits anyway.
+export function finalizeProgressReporter(sessionId, cmdId, {
+  emit = broadcastToAllBots, minIntervalMs = Number(process.env.FINALIZE_PROGRESS_MS) || 3000, now = () => Date.now(),
+} = {}) {
+  let lastPhase = null;
+  let lastAt = 0;
+  return (p = {}) => {
+    const t = now();
+    const phaseChanged = p.phase !== lastPhase;
+    const last = p.phase === 'stt' && p.total > 0 && p.done >= p.total;
+    if (!phaseChanged && !last && t - lastAt < minIntervalMs) return;
+    lastPhase = p.phase;
+    lastAt = t;
+    emit({ type: 'finalize_progress', cmdId, sessionId: String(sessionId), ...p });
+  };
+}
+
 // Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
 // archive, then reply with a checksum summary. Errors are reported back so the
 // bot keeps its local WAVs for a retry. Idempotent per session: a request for a
@@ -193,7 +214,7 @@ async function handleFinalize(ws, msg) {
   const attached = finalizeRuns.attach(sessionId, waiter);
   if (attached === 'joined') {
     log('finalize: session', String(sessionId), 'already finalizing — request', msg.cmdId, 'joins the running finalize');
-    send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: 'joined' });
+    send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, sessionId: String(sessionId), phase: 'joined' });
     return;
   }
   if (attached === 'cached') {
@@ -234,14 +255,15 @@ async function handleFinalize(ws, msg) {
 
   // Lock against the idle timer so manual + auto finalize never both run.
   autoTimer.markFinalizing(sessionId);
-  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
+  send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, sessionId: String(sessionId), phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
+  const onProgress = finalizeProgressReporter(sessionId, msg.cmdId);
 
   // The registry delivers the outcome to this request and to every request
   // that joined meanwhile; a throw becomes { ok: false, error } (not cached).
   await finalizeRuns.start(sessionId, waiter, async () => {
     let result;
     try {
-      result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir });
+      result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir, onProgress });
     } catch (e) {
       warn('finalize: failed for', String(sessionId), '-', e.message);
       autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)

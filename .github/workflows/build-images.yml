@@ -5,7 +5,6 @@ name: build-images
 #
 # Images:
 #   ghcr.io/<owner>/discord-voice-assistant/va-server
-#   ghcr.io/<owner>/discord-voice-assistant/va-rag
 #   ghcr.io/<owner>/discord-voice-assistant/va-piper
 #   ghcr.io/<owner>/discord-voice-assistant/va-whisper
 
@@ -14,7 +13,6 @@ on:
     branches: ["**"]
     paths:
       - "apps/server/**"
-      - "apps/rag/**"
       - "services/piper/**"
       - "deploy/whisper/**"
       - "package.json"
@@ -41,9 +39,6 @@ jobs:
           - name: va-server
             context: .
             dockerfile: apps/server/Dockerfile
-          - name: va-rag
-            context: .
-            dockerfile: apps/rag/Dockerfile
           - name: va-piper
             context: services/piper
             dockerfile: services/piper/Dockerfile

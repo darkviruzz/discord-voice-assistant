@@ -457,9 +457,9 @@ function discordPostRepliesEnabled() {
 // Assemble the extra `system` blocks for a voice session, in priority order:
 // campaign context → rolling summary → live transcript. Empty parts are skipped
 // so an unavailable block costs nothing. `query` is forwarded to the campaign
-// lookup (semantic RAG when RAG_URL is set, else the static CAMPAIGN.md).
-// Async because that lookup may be an HTTP call. Returns [] when live context
-// is disabled.
+// lookup (semantic vault RAG when enabled, else the static CAMPAIGN.md).
+// Async because that lookup may embed the query (an HTTP round-trip). Returns
+// [] when live context is disabled.
 async function buildSystemBlocks(session, query) {
   if (!liveContextEnabled()) return [];
   const blocks = [];

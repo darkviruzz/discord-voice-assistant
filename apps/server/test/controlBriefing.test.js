@@ -1,6 +1,7 @@
 // End-to-end: the real control-channel session_start path (control.js) →
 // live-context rebuild from the JSONL (summarize via a stub Ollama) → vault
-// briefing (stub RAG) → Discord post to the registered bot. Guards against the
+// briefing (the real in-process RAG over a tmp vault, embeddings from the same
+// stub Ollama) → Discord post to the registered bot. Guards against the
 // briefing being re-run by the session_start the bot re-emits after every
 // reconnect.
 
@@ -11,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { fakeVector } from '../test-support/rag.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ctl-briefing-'));
 const ENV = {
@@ -22,6 +24,9 @@ const ENV = {
   LIVE_RAW_WINDOW_CHARS: '60', // force the rebuild to fold older turns → summary
   RAG_BRIEFING_ENABLED: 'true',
   RAG_BRIEFING_POST_CHAT: 'true',
+  OBSIDIAN_VAULT_PATH: path.join(tmp, 'vault'),
+  RAG_INDEX_DIR: path.join(tmp, 'rag-index'),
+  RAG_ENABLED: 'true',
 };
 const saved = {};
 
@@ -33,33 +38,52 @@ let server;
 let wss;
 let url;
 let sessions;
+let stopRag;
+// The Discord post goes to whichever bot is connected at that moment; hold
+// the briefing text back until the reconnected bot has registered, so the
+// post can't fall into the gap between the two connections (in-process RAG
+// answers in a few ms — fast enough to hit that gap).
+let openBriefingGate;
+const briefingGate = new Promise((r) => { openBriefingGate = r; });
 const clients = []; // every bot socket, terminated in after() even when a test fails
 
 before(async () => {
-  for (const k of [...Object.keys(ENV), 'RAG_URL', 'OLLAMA_URL']) saved[k] = process.env[k];
+  for (const k of [...Object.keys(ENV), 'OLLAMA_URL', 'EMBED_PROVIDER', 'EMBED_MODEL']) saved[k] = process.env[k];
   Object.assign(process.env, ENV);
+  delete process.env.EMBED_PROVIDER;
+  delete process.env.EMBED_MODEL;
 
-  // Stub RAG (/query) + Ollama (/api/chat: summarizer and briefing text).
+  // Stub Ollama: /api/embed (vault index + RAG queries, deterministic vectors)
+  // and /api/chat (summarizer and briefing text).
   stub = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       const json = JSON.parse(body || '{}');
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (req.url === '/query') {
-        stubCalls.query.push(json);
-        res.end(JSON.stringify([{ text: 'Baron Kelthur herrscht über Greyhawk.', source: 'npcs/kelthur.md', distance: 0.2 }]));
+      if (req.url === '/api/embed') {
+        for (const t of json.input) {
+          if (t.startsWith('search_query: ')) stubCalls.query.push({ query: t.slice('search_query: '.length) });
+        }
+        res.end(JSON.stringify({ embeddings: json.input.map((t) => fakeVector(t)) }));
       } else {
         stubCalls.chat.push(json);
         const isBriefing = json.messages?.[0]?.content?.includes('Spielleiter-Assistenz');
-        res.end(JSON.stringify({ message: { content: isBriefing ? 'Ihr steht noch am Tor.' : SUMMARY } }));
+        const reply = () => res.end(JSON.stringify({ message: { content: isBriefing ? 'Ihr steht noch am Tor.' : SUMMARY } }));
+        if (isBriefing) briefingGate.then(reply); else reply();
       }
     });
   });
   await new Promise((r) => stub.listen(0, '127.0.0.1', r));
-  const stubBase = `http://127.0.0.1:${stub.address().port}`;
-  process.env.RAG_URL = stubBase;
-  process.env.OLLAMA_URL = stubBase;
+  process.env.OLLAMA_URL = `http://127.0.0.1:${stub.address().port}`;
+
+  // The vault the briefing searches, indexed by the real in-process RAG.
+  fs.mkdirSync(path.join(tmp, 'vault', 'npcs'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'vault', 'npcs', 'kelthur.md'), 'Baron Kelthur herrscht über Greyhawk.');
+  const rag = await import('../src/rag/index.js');
+  stopRag = rag.stopRag;
+  await rag.startRag({ watch: false, saveDelayMs: 10 });
+  await rag._activeIndexer().whenSynced();
 
   // A prior part of this session in the JSONL (resume after a server restart).
   fs.mkdirSync(ENV.TRANSCRIPT_DIR, { recursive: true });
@@ -79,7 +103,8 @@ before(async () => {
   url = `ws://127.0.0.1:${server.address().port}`;
 });
 
-after(() => {
+after(async () => {
+  await stopRag?.();
   for (const ws of clients) ws.terminate();
   for (const ws of wss?.clients ?? []) ws.terminate();
   wss?.close();
@@ -127,6 +152,7 @@ test('session_start re-emitted on reconnect does not repeat the briefing', async
   // bot re-emits the pending session_start on the new connection.
   a.ws.close();
   const b = await connectBot();
+  openBriefingGate();
   b.ws.send(sessionStart('s2', true));
   await waitFor(() => b.inbox.some((m) => m.type === 'ack' && m.cmdId === 's2'));
 

@@ -139,3 +139,14 @@ test('embedSignature changes with model and prefixes (index must rebuild)', () =
   assert.notEqual(a, b);
   assert.notEqual(b, c);
 });
+
+test('embed prefixes: unset/empty → model default, whitespace only → off, else verbatim', () => {
+  assert.deepEqual(embedPrefixes(), { query: 'search_query: ', doc: 'search_document: ' });
+  // '' is what an empty .env line, a compose `${EMBED_QUERY_PREFIX:-}` or a
+  // cleared settings field produces — it must not disable the nomic prefixes.
+  process.env.EMBED_QUERY_PREFIX = '';
+  process.env.EMBED_DOC_PREFIX = ' ';
+  assert.deepEqual(embedPrefixes(), { query: 'search_query: ', doc: '' });
+  process.env.EMBED_QUERY_PREFIX = 'query: ';
+  assert.equal(embedPrefixes().query, 'query: ');
+});

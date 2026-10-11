@@ -10,14 +10,16 @@ archive/
 __pycache__/
 *.pyc
 
-# Python virtualenvs (apps/rag/venv is what scripts/Start-VoiceAssistant.ps1
-# expects; .venv for local test runs) + pytest cache
+# Python virtualenvs (local runs of services/piper) + pytest cache
 venv/
 .venv/
 .pytest_cache/
 
-# RAG: persistent ChromaDB store (rebuilt from the vault on demand)
-apps/rag/chroma/
+# The vault RAG index lives in apps/server/data/rag/ (ignored above via
+# apps/server/data/) and is rebuilt from the vault on demand. apps/rag/ is a
+# leftover of the removed Python RAG service (venv + Chroma store) in older
+# checkouts — safe to delete.
+apps/rag/
 
 # Logs
 logs

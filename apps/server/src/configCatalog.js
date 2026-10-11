@@ -551,9 +551,10 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'OBSIDIAN_VAULT_PATH',
     label: 'Obsidian-Vault-Wurzel', type: 'string', def: '', applyMode: 'live',
-    desc: 'Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn CAMPAIGN_CONTEXT_FILE ein '
-      + 'relativer Pfad ist. Relativ ohne gesetzten Vault → Kampagnen-Kontext deaktiviert. '
-      + 'Wird beim Laden des Kontexts gelesen.',
+    desc: 'Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der semantischen Vault-Suche '
+      + '(RAG, siehe RAG_ENABLED) und Basis für ein relatives CAMPAIGN_CONTEXT_FILE. Relativ '
+      + 'ohne gesetzten Vault → Kampagnen-Kontext deaktiviert, leer → auch RAG aus. Wird beim '
+      + 'Laden des Kontexts bzw. pro RAG-Anfrage gelesen (neuer Pfad → Indexer startet neu).',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'CAMPAIGN_CONTEXT_FILE',
@@ -569,24 +570,114 @@ export const CATALOG = [
       + 'übernommen werden. Gilt genauso für die RAG-Treffer pro Wake-Word-Query und für '
       + 'den Vault-Kontext des /join-Briefings (beste Treffer zuerst). Wird beim Laden gelesen.',
   },
+
+  // ======================= SERVER: RAG (Vault-Suche) ========================
+  // Läuft im Server-Prozess (apps/server/src/rag/) — kein eigener Dienst.
   {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_URL',
-    label: 'RAG-Dienst-URL (semantische Vault-Suche)', type: 'string', def: '',
-    applyMode: 'live',
-    desc: 'Basis-URL des Python-RAG-Dienstes (apps/rag). Gesetzt → pro Wake-Word-Query '
-      + 'semantische Suche im Obsidian-Vault statt statischem CAMPAIGN.md; bei Fehler/'
-      + 'Timeout Fallback auf die Datei. Leer = RAG aus. Wird pro Anfrage gelesen.',
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_ENABLED',
+    label: 'Semantische Vault-Suche (RAG) aktiv', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'true', applyMode: 'live',
+    desc: 'true = der Server indexiert den Obsidian-Vault (OBSIDIAN_VAULT_PATH) im Hintergrund '
+      + 'und liefert pro Wake-Word-Query die passendsten Vault-Abschnitte statt des statischen '
+      + 'CAMPAIGN.md. Embeddings kommen vom EMBED_PROVIDER (Standard: Ollama mit '
+      + 'nomic-embed-text). Solange der Index noch nicht steht oder Embeddings fehlschlagen: '
+      + 'Fallback auf CAMPAIGN.md. Ohne gesetzten Vault ist RAG immer aus. false = nur '
+      + 'CAMPAIGN.md. Wird pro Anfrage geprüft — der Indexer startet/stoppt bei der nächsten Anfrage.',
   },
   {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_TIMEOUT_MS',
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_TIMEOUT_MS',
     label: 'RAG-Timeout (ms)', type: 'number', def: '800', applyMode: 'live',
-    desc: 'Timeout pro RAG-Abfrage in ms (Verbindung + Antwort); danach Fallback auf '
-      + 'CAMPAIGN.md, die Voice-Pipeline wartet also höchstens so lange auf RAG. Das '
-      + '/join-Briefing läuft abseits der Pipeline und bekommt mindestens 5000 ms. Wird '
+    desc: 'Zeitbudget pro RAG-Abfrage in ms (Embedding der Frage + Suche im Index); danach '
+      + 'Fallback auf CAMPAIGN.md, die Voice-Pipeline wartet also höchstens so lange auf RAG. '
+      + 'Das /join-Briefing läuft abseits der Pipeline und bekommt mindestens 5000 ms. Wird '
       + 'pro Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_ENABLED',
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_SCORE_THRESHOLD',
+    label: 'Max. Trefferdistanz (Score-Filter)', type: 'number', def: '', applyMode: 'live',
+    desc: 'Maximale Cosine-Distanz für RAG-Treffer (Distanz = 1 − Cosinus-Ähnlichkeit: '
+      + '0 = identisch, 1 = ohne Bezug, 2 = gegensätzlich). Treffer darüber werden verworfen, '
+      + 'bevor sie in den LLM-Kontext gehen. Leer = kein Filter (immer die Top-K-Treffer). Mit '
+      + 'nomic-embed-text liegen gute Treffer meist bei ~0.2–0.45, themenfremde ab ~0.55 — '
+      + 'sinnvoller Startwert ~0.5; mit DEBUG=1 stehen die Distanzen jeder Abfrage im Log. '
+      + 'Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_MAX_CHUNK_CHARS',
+    label: 'Max. Zeichen pro Vault-Abschnitt', type: 'number', def: '2000', applyMode: 'live',
+    desc: 'Notizen werden an jeder ##-Überschrift in Abschnitte geteilt; längere Abschnitte '
+      + 'zusätzlich an Absatz-/Zeilengrenzen auf höchstens so viele Zeichen, damit ein einzelner '
+      + 'Treffer den Prompt nicht flutet. Änderung → jede Notiz wird einmal neu eingebettet '
+      + '(Indexer startet bei der nächsten Anfrage neu).',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_INDEX_DIR',
+    label: 'Index-Verzeichnis', type: 'string', def: './data/rag', applyMode: 'live',
+    desc: 'Wo der Vektor-Index (index.bin) gespeichert wird, relativ zu apps/server (Standard: '
+      + 'DATA_DIR/rag bzw. ./data/rag; im Docker-Stack /data/rag auf dem server-data-Volume). '
+      + 'Übersteht Neustarts — unveränderte Notizen werden nicht neu eingebettet. Löschen ist '
+      + 'gefahrlos (wird aus dem Vault neu aufgebaut). Änderung greift bei der nächsten Anfrage.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_RESCAN_INTERVAL_MS',
+    label: 'Periodischer Vault-Abgleich (ms)', type: 'number', def: '300000', applyMode: 'live',
+    desc: 'Zusätzlich zum Datei-Watcher (Änderungen sofort, ~1 s entprellt) wird der Vault in '
+      + 'diesem Abstand komplett abgeglichen — Absicherung für Plattformen/Sync-Clients, bei '
+      + 'denen Datei-Ereignisse fehlen. Billig: nur geänderte Notizen werden neu eingebettet. '
+      + '0 = aus. Änderung greift bei der nächsten Anfrage.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_PROVIDER',
+    label: 'Embedding-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
+    applyMode: 'live',
+    desc: 'Backend für die Vektoren der Vault-Suche. ollama = /api/embed auf OLLAMA_URL '
+      + '(Standard). openai = beliebiger OpenAI-kompatibler /embeddings-Endpunkt auf '
+      + 'EMBED_BASE_URL (vLLM, llama.cpp-Server, LM Studio, AMD Lemonade …). Ein Wechsel '
+      + 'verwirft den Index und baut ihn mit dem neuen Modell komplett neu auf.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_BASE_URL',
+    label: 'Embedding-Server-URL (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL inkl. /v1 für EMBED_PROVIDER=openai, z. B. http://localhost:8000/v1. '
+      + 'Bei EMBED_PROVIDER=ollama ungenutzt (dann gilt OLLAMA_URL). Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_MODEL',
+    label: 'Embedding-Modell', type: 'string', def: 'nomic-embed-text', applyMode: 'live',
+    desc: 'Modell für die Vektoren (bei Ollama vorher: ollama pull <modell>). Ein Wechsel '
+      + 'verwirft den Index und bettet den ganzen Vault neu ein — Vektoren verschiedener '
+      + 'Modelle sind nicht vergleichbar. Bis dahin Fallback auf CAMPAIGN.md.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_API_KEY',
+    label: 'Embedding-API-Key (openai)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für EMBED_PROVIDER=openai. Secret — hier nur Status '
+      + 'sichtbar; Änderung über .env. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_KEEP_ALIVE',
+    label: 'Embedding-Modell-Verweildauer (Ollama)', type: 'string', def: '30m', applyMode: 'live',
+    desc: 'Wie lange Ollama das Embedding-Modell nach einem Aufruf geladen hält (z. B. 30m, '
+      + '-1 = dauerhaft). Sonst zahlt die erste Abfrage nach einer Pause das Nachladen und '
+      + 'reißt das RAG-Timeout. Nur bei EMBED_PROVIDER=ollama. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_QUERY_PREFIX',
+    label: 'Präfix für Suchanfragen', type: 'string', def: '', applyMode: 'live',
+    desc: 'Task-Präfix vor jeder Suchanfrage. Leer = automatisch (nomic-Modelle: '
+      + '„search_query: ", andere: keins); ein einzelnes Leerzeichen = kein Präfix. Änderung → '
+      + 'Index wird neu aufgebaut.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_DOC_PREFIX',
+    label: 'Präfix für Vault-Abschnitte', type: 'string', def: '', applyMode: 'live',
+    desc: 'Task-Präfix vor jedem indexierten Abschnitt. Leer = automatisch (nomic-Modelle: '
+      + '„search_document: ", andere: keins); ein einzelnes Leerzeichen = kein Präfix. '
+      + 'Änderung → Index wird neu aufgebaut.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_ENABLED',
     label: 'Session-Briefing beim /join', type: 'boolean', onValue: 'true', offValue: 'false',
     def: 'true', applyMode: 'next-session',
     desc: 'Session-Briefing beim /join (einmal pro Session) — RAG-Query mit der aus dem '
@@ -594,29 +685,21 @@ export const CATALOG = [
       + 'als system-Message an den Anfang der conversationHistory. Greift damit nur beim '
       + 'Fortsetzen einer Session mit bereits zusammengefasstem Verlauf (z. B. nach '
       + 'Server-Neustart); eine neue Session hat noch keine Zusammenfassung. Nur wirksam '
-      + 'wenn RAG_URL gesetzt. Wird beim Session-Start gelesen.',
+      + 'wenn RAG aktiv ist (RAG_ENABLED + OBSIDIAN_VAULT_PATH). Wird beim Session-Start gelesen.',
   },
   {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_TOP_K',
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_TOP_K',
     label: 'Vault-Chunks fürs Briefing', type: 'number', def: '3', applyMode: 'next-session',
-    desc: 'Anzahl Vault-Chunks fürs /join-Briefing (1–20, mehr lehnt der RAG-Dienst ab; '
-      + 'wird gekappt). Wird beim Session-Start gelesen.',
+    desc: 'Anzahl Vault-Abschnitte fürs /join-Briefing (1–20, mehr wird gekappt). Wird beim '
+      + 'Session-Start gelesen.',
   },
   {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_POST_CHAT',
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_POST_CHAT',
     label: 'Briefing als Chat-Nachricht posten', type: 'boolean', onValue: 'true', offValue: 'false',
     def: 'false', applyMode: 'next-session',
     desc: 'Briefing zusätzlich als kurze Discord-Textnachricht in den Join-Kanal posten '
       + '(LLM-generierter 2-3-Satz-Text). false = nur als LLM-Kontext injizieren. Wird '
       + 'beim Session-Start gelesen.',
-  },
-  {
-    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_SCORE_THRESHOLD',
-    label: 'Max. Trefferdistanz (Score-Filter)', type: 'number', def: '', applyMode: 'live',
-    desc: 'Maximale Cosine-Distanz (0–2, kleiner = ähnlicher) für RAG-Treffer; wird als '
-      + 'score_threshold im POST /query an den RAG-Dienst durchgereicht, der Treffer '
-      + 'darüber verwirft, bevor sie in den LLM-Kontext gehen. Leer = kein Filter (alle '
-      + 'Top-K-Treffer). Typisch sinnvoll ~0.6–0.9. Wird pro Anfrage gelesen.',
   },
 
   // ======================= SERVER: TTS ======================================

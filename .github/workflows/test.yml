@@ -1,8 +1,9 @@
 name: test
 
-# Unit tests for the Node workspaces (apps/server, apps/bot) and the Python RAG
-# service (apps/rag). No GPU, Ollama or Discord needed: the RAG suite stubs the
-# embedding call and uses a throwaway ChromaDB in a tmp dir.
+# Unit tests for the Node workspaces (apps/server, apps/bot) — including the
+# in-process vault RAG (apps/server/src/rag/) — and the PowerShell launcher
+# config. No GPU, Ollama or Discord needed: the RAG suites inject a
+# deterministic embedder or talk to a fake Ollama /api/embed, with a tmp vault.
 
 # push only on main: PR branches are covered by pull_request (otherwise every
 # push to a PR branch ran the whole suite twice).
@@ -34,27 +35,6 @@ jobs:
       - run: npm ci
 
       - run: npm test
-
-  rag:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      # Same Python minor as the va-rag image (apps/rag/Dockerfile).
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            apps/rag/requirements.txt
-            apps/rag/requirements-dev.txt
-
-      - name: Install dependencies
-        run: pip install -r apps/rag/requirements.txt -r apps/rag/requirements-dev.txt
-
-      - name: pytest
-        run: pytest apps/rag/tests -q
 
   # Windows-native launcher config (scripts/lib/VaLocalConfig.ps1): the
   # dependency-free self-test runs under pwsh 7 (preinstalled on the runner);

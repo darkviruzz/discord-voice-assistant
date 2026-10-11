@@ -12,6 +12,7 @@ import { registerDebugTtsRoute } from './debugTts.js';
 import { registerFinalizeHttpRoutes } from './finalizeHttp.js';
 import { registerTranscriptRoutes } from './transcriptApi.js';
 import { registerConfigRoutes } from './configApi.js';
+import { startRag, stopRag } from './rag/index.js';
 
 const HB_INTERVAL_MS = 15000;
 
@@ -100,7 +101,9 @@ function shutdown(reason) {
     }
     wss.close();
   }
-  server.close(() => process.exit(0));
+  // Flush the vault index before exiting (bounded by the hard exit below; the
+  // index is written atomically, so an interrupted save keeps the old file).
+  stopRag().finally(() => server.close(() => process.exit(0)));
   setTimeout(() => process.exit(0), 3000).unref?.();
 }
 process.on('SIGINT',  () => shutdown('SIGINT'));
@@ -109,4 +112,10 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = parseInt(process.env.PORT || '7440', 10);
 
-server.listen(PORT, HOST, () => log(`server v${getVersion()} listening on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => {
+  log(`server v${getVersion()} listening on http://${HOST}:${PORT}`);
+  // Vault RAG: load the persisted index, watch the vault and sync it in the
+  // background — never on the startup path (/health is up already), and
+  // until the index exists queries just fall back to CAMPAIGN.md.
+  startRag();
+});

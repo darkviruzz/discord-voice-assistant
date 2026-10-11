@@ -1,7 +1,0 @@
-# Test dependencies for apps/rag (not installed in the Docker image).
-#
-#   pip install -r apps/rag/requirements.txt -r apps/rag/requirements-dev.txt
-#   pytest apps/rag/tests -q
-pytest>=8,<10
-# FastAPI's TestClient is built on httpx.
-httpx>=0.27,<1

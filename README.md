@@ -195,6 +195,8 @@ SUMMARY_MAX_CHARS=2000
 # OBSIDIAN_VAULT_PATH=/pfad/zum/vault
 CAMPAIGN_CONTEXT_FILE=CAMPAIGN.md
 CAMPAIGN_CONTEXT_MAX_CHARS=6000
+RAG_ENABLED=true
+EMBED_MODEL=nomic-embed-text
 
 TTS_PROVIDER=piper
 TTS_URL=http://localhost:5000
@@ -268,20 +270,26 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `LIVE_FOLD_MIN_INTERVAL_MS` | `0` | Mindestabstand zwischen zwei Faltungen (Drosselung). `0` = keine Drosselung. |
 | `SUMMARY_MODEL` | *(= `OLLAMA_MODEL`)* | Optionales separates Ollama-Modell für die Zusammenfassung. Leer = dasselbe Modell wie für Antworten. |
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
-| `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn `CAMPAIGN_CONTEXT_FILE` ein relativer Pfad ist. |
-| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn `RAG_URL` nicht gesetzt oder der RAG-Dienst nicht erreichbar ist). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
+| `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der Vault-Suche (RAG) und Basis für ein relatives `CAMPAIGN_CONTEXT_FILE`. |
+| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn RAG aus ist, der Index noch nicht steht oder die Vault-Suche nichts liefert). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
 | `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für RAG-Treffer und den Vault-Kontext des `/join`-Briefings. |
 
 #### RAG (semantische Vault-Suche, Phase 4)
 
-Der Python-RAG-Dienst (`apps/rag/`) indiziert den Obsidian-Vault und liefert pro Wake-Word-Query die relevantesten Chunks. Bei gesetztem `RAG_URL` ersetzt die semantische Suche das statische `CAMPAIGN.md`; ist der Dienst aus/nicht erreichbar, degradiert der Server lautlos auf die Datei.
+Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines JavaScript — kein eigener Dienst, kein Python) und liefert pro Wake-Word-Query die relevantesten Abschnitte statt des statischen `CAMPAIGN.md`. Embeddings kommen von Ollama (`nomic-embed-text`) oder einem OpenAI-kompatiblen Server; der Vektor-Index liegt in `RAG_INDEX_DIR`, übersteht Neustarts und wird per Datei-Watcher aktuell gehalten. Solange der Index nicht steht oder Embeddings fehlschlagen, degradiert der Server lautlos auf die Datei. Details: [`docs/rag.md`](docs/rag.md).
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
-| `RAG_URL` | — | Basis-URL des RAG-Dienstes (z. B. `http://localhost:5001`). Leer = RAG aus, nur `CAMPAIGN.md`. |
-| `RAG_TIMEOUT_MS` | `800` | Timeout pro RAG-Abfrage (Verbindung + Antwort); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. Das `/join`-Briefing bekommt mindestens 5000 ms. |
-| `RAG_SCORE_THRESHOLD` | — | Maximale Cosine-Distanz (0–2, kleiner = ähnlicher) eines Treffers; wird als `score_threshold` an `POST /query` durchgereicht. Leer = kein Filter. Treffer werden wie `CAMPAIGN.md` auf `CAMPAIGN_CONTEXT_MAX_CHARS` gekappt. |
-| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join` (einmal pro Session): RAG-Query mit der aus dem JSONL dieser Session rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Greift nur beim Fortsetzen einer Session mit schon zusammengefasstem Verlauf (z. B. nach Server-Neustart); eine neue Session hat noch kein Summary. Nur wirksam bei gesetztem `RAG_URL`. |
+| `RAG_ENABLED` | `true` | Vault-Suche an/aus — wirksam nur mit gesetztem `OBSIDIAN_VAULT_PATH`. `false` = nur `CAMPAIGN.md`. |
+| `EMBED_PROVIDER` | `ollama` | `ollama` (`/api/embed` auf `OLLAMA_URL`) oder `openai` (OpenAI-kompatibles `/embeddings` auf `EMBED_BASE_URL` inkl. `/v1`, optional `EMBED_API_KEY`). |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding-Modell (bei Ollama vorher `ollama pull nomic-embed-text`). Wechsel → Index wird verworfen und neu aufgebaut. |
+| `EMBED_KEEP_ALIVE` | `30m` | Wie lange Ollama das Embedding-Modell geladen hält (sonst reißt die erste Abfrage nach einer Pause das Timeout). |
+| `RAG_TIMEOUT_MS` | `800` | Zeitbudget pro RAG-Abfrage (Embedding der Frage + Suche); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. Das `/join`-Briefing bekommt mindestens 5000 ms. |
+| `RAG_SCORE_THRESHOLD` | — | Maximale Cosine-Distanz (1 − Cosinus-Ähnlichkeit, 0–2, kleiner = ähnlicher) eines Treffers. Leer = kein Filter. Startwert ~0.5 (nomic-embed-text: gute Treffer meist ~0.2–0.45; `DEBUG=1` loggt die Distanzen). Treffer werden wie `CAMPAIGN.md` auf `CAMPAIGN_CONTEXT_MAX_CHARS` gekappt. |
+| `RAG_MAX_CHUNK_CHARS` | `2000` | Max. Zeichen pro Vault-Abschnitt (Notizen werden an `##` geteilt, lange Abschnitte zusätzlich). Änderung → jede Notiz wird einmal neu eingebettet. |
+| `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
+| `RAG_RESCAN_INTERVAL_MS` | `300000` | Kompletter Vault-Abgleich zusätzlich zum Datei-Watcher (`0` = aus). Unveränderte Notizen kosten keine Embeddings. |
+| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join` (einmal pro Session): RAG-Query mit der aus dem JSONL dieser Session rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Greift nur beim Fortsetzen einer Session mit schon zusammengefasstem Verlauf (z. B. nach Server-Neustart); eine neue Session hat noch kein Summary. Nur wirksam bei aktiver Vault-Suche. |
 | `RAG_BRIEFING_TOP_K` | `3` | Anzahl der Vault-Chunks fürs Briefing (1–20). |
 | `RAG_BRIEFING_POST_CHAT` | `false` | Briefing zusätzlich als kurze Discord-Textnachricht posten (einmal pro Session, nicht bei jedem Reconnect). `false` = nur als LLM-Kontext injizieren. |
 
@@ -410,18 +418,18 @@ WantedBy=multi-user.target
 
 ```powershell
 # im Repo-Root: geführte Einrichtung — erkennt vorhandene Installationen,
-# fragt fehlende Pfade ab (Whisper, Piper, Stimmen, Ollama-Modelle, Obsidian-
-# Vault, RAG-venv), prüft sie und schreibt %USERPROFILE%\.config\va\deploy.env
+# fragt fehlende Pfade ab (Whisper, Piper, Stimmen, Ollama-Modelle inkl.
+# Embedding-Modell, Obsidian-Vault), prüft sie und schreibt %USERPROFILE%\.config\va\deploy.env
 # sowie die passenden Werte in apps\server\.env (jeweils mit Sicherung).
 .\scripts\Setup-VoiceAssistant.ps1
 
 # Nur prüfen, nichts ändern (Doktor-Modus, Exit 1 bei Fehlern):
 .\scripts\Setup-VoiceAssistant.ps1 -Check
 
-# Alle Dienste starten (Whisper + Piper + RAG minimiert, Server im Vordergrund)
+# Alle Dienste starten (Whisper + Piper minimiert, Server inkl. Vault-Suche im Vordergrund)
 .\scripts\Start-VoiceAssistant.ps1
 
-# Alternativ: 4 Split-Panes in Windows Terminal (Debugging)
+# Alternativ: 3 Split-Panes in Windows Terminal (Debugging)
 .\scripts\Start-VoiceAssistant.ps1 -Mode all
 
 # Alternativ: Hintergrundprozesse ohne Fenster (Autostart, so startet der Bot per SSH)
@@ -520,9 +528,8 @@ Setup-Anleitung für die drei lokalen AI-Services.
 | Whisper | 8080 | Sprache → Text (STT) | whisper.cpp + Vulkan |
 | Ollama | 11434 | Text → Antwort (LLM) | llama3.2 |
 | Piper | 5000 | Text → Sprache (TTS) | Piper + FastAPI |
-| RAG | 5001 | Vault-Suche (optional) | FastAPI + ChromaDB + Ollama-Embeddings |
 
-Whisper, Ollama und Piper müssen laufen bevor der Discord-Server gestartet wird; der RAG-Dienst ist optional (Server degradiert ohne ihn auf `CAMPAIGN.md`).
+Whisper, Ollama und Piper müssen laufen bevor der Discord-Server gestartet wird. Die Vault-Suche (RAG) ist kein eigener Dienst: sie läuft im Discord-Server und braucht nur das Embedding-Modell in Ollama (`ollama pull nomic-embed-text`); ohne es degradiert der Server auf `CAMPAIGN.md`.
 
 ---
 
@@ -654,6 +661,9 @@ ollama pull llama3.2
 
 # Optional: Größeres Modell für bessere Antwortqualität (nutzt mehr VRAM)
 # ollama pull llama3.1:8b
+
+# Embedding-Modell für die Vault-Suche (RAG im Server, ~270 MB)
+ollama pull nomic-embed-text
 ```
 
 **3. Installierte Modelle prüfen**
@@ -996,7 +1006,7 @@ Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Mo
 1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Diagnostik.
 2. **Phase 2 — Core Workflows** *(implementiert, Praxistest ausstehend)*: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log mit Schema-v1-Struktur.
 3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
-4. **Phase 4 — RAG + Obsidian**: Python-RAG-Service (FastAPI + ChromaDB + Ollama-Embeddings), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
+4. **Phase 4 — RAG + Obsidian**: Vault-Suche im Node-Server (reines JS, Ollama-/OpenAI-kompatible Embeddings, persistenter Vektor-Index — ursprünglich als Python-Dienst mit FastAPI + ChromaDB gebaut), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
 5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).
 
 Die Stränge **Finalize (Phase 3)** und **RAG/Obsidian (Phase 4)** sind voneinander unabhängig und können parallel entwickelt werden.

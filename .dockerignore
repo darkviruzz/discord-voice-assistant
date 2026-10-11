@@ -1,4 +1,4 @@
-# Applies to builds whose context is the repository root (apps/server, apps/rag).
+# Applies to builds whose context is the repository root (apps/server).
 .git/
 **/node_modules/
 **/__pycache__/
@@ -15,7 +15,6 @@ apps/server/uploads/
 apps/server/archive/
 apps/server/transcripts/
 apps/server/data/
-apps/rag/chroma/
 uploads/
 archive/
 

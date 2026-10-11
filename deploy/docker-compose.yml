@@ -134,6 +134,12 @@ services:
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-de}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      # LLM provider (default: the ollama service above via OLLAMA_URL).
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
       TTS_PROVIDER: ${TTS_PROVIDER:-piper}
       FINALIZE_UPLOAD_DIR: /data/uploads
       ARCHIVE_DIR: /data/archive

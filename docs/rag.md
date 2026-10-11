@@ -140,4 +140,6 @@ letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
 letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Damit auch ältere
 Sessions über die Vault-Suche auffindbar sind, `SESSION_SUMMARY_VAULT_DIR`
 setzen: dann landet jede Zusammenfassung als Notiz im Vault und wird
-automatisch mitindiziert.
+automatisch mitindiziert. Im Docker-Stack geht das nicht: dort ist der Vault
+(`campaign`-Volume) read-only eingebunden (mit `CAMPAIGN_REMOTE` zieht
+`start.sh` ihn zudem bei jedem Start neu) — der Schreibversuch wird nur geloggt.

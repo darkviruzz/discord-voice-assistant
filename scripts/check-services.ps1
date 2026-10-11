@@ -8,16 +8,24 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
-# Konfiguration – muss zu Start-VoiceAssistant.ps1 passen
+# Konfiguration – dieselbe Quelle wie Start-VoiceAssistant.ps1
 # ============================================================
-$Services = @(
-    @{ Name = "Whisper"; Port = 8080;  HealthUrl = "http://localhost:8080/";          HealthMatch = $null }
-    @{ Name = "Piper";   Port = 5000;  HealthUrl = "http://localhost:5000/health";    HealthMatch = "ok"  }
-    @{ Name = "Ollama";  Port = 11434; HealthUrl = "http://localhost:11434/api/tags"; HealthMatch = $null }
-    @{ Name = "Server";  Port = 7440;  HealthUrl = $null;                             HealthMatch = $null }
-)
+$RepoRoot = $PSScriptRoot | Split-Path -Parent
+. (Join-Path $PSScriptRoot 'lib\VaLocalConfig.ps1')
+$VaConfig = Get-VaLocalConfig -RepoRoot $RepoRoot
+$Svc      = Resolve-VaServices -Config $VaConfig -RepoRoot $RepoRoot
 
-$LogDir = "$env:TEMP\va-logs"
+$Services = @(
+    @{ Name = "Whisper"; Port = $Svc.WhisperPort; HealthUrl = "$($Svc.WhisperUrl)/";        HealthMatch = $null }
+    @{ Name = "Piper";   Port = $Svc.PiperPort;   HealthUrl = "$($Svc.PiperUrl)/health";    HealthMatch = "ok"  }
+    @{ Name = "Ollama";  Port = $Svc.OllamaPort;  HealthUrl = "$($Svc.OllamaUrl)/api/tags"; HealthMatch = $null }
+)
+if ($Svc.RagEnabled) {
+    $Services += @{ Name = "RAG"; Port = $Svc.RagPort; HealthUrl = "$($Svc.RagUrl)/health"; HealthMatch = $null }
+}
+$Services += @{ Name = "Server"; Port = $Svc.ServerPort; HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
+
+$LogDir = $Svc.LogDir
 
 # ============================================================
 # Hilfsfunktionen
@@ -105,6 +113,12 @@ foreach ($svc in $Services) {
     }
 }
 
+if (-not $Svc.RagEnabled) {
+    Write-Host ("  {0,-9} {1,-7} " -f "RAG", "-") -NoNewline
+    Write-Host ("{0,-12}" -f "AUS") -ForegroundColor DarkGray -NoNewline
+    Write-Host (" {0,-8} {1}" -f "-", "kein Vault/venv konfiguriert (Setup-VoiceAssistant.ps1)") -ForegroundColor DarkGray
+}
+
 Write-Host ""
 if ($anyDown) {
     Write-Host "  Einige Dienste sind nicht verfügbar." -ForegroundColor Yellow
@@ -114,4 +128,6 @@ if ($anyDown) {
 } else {
     Write-Host "  Alle Dienste laufen." -ForegroundColor Green
 }
+Write-Host "  Konfiguration prüfen: .\scripts\Setup-VoiceAssistant.ps1 -Check" -ForegroundColor DarkGray
+if ($anyDown) { exit 1 }
 Write-Host ""

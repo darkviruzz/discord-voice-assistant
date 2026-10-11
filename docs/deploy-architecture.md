@@ -74,6 +74,17 @@ Prozess-Env-Variablen gewinnen (Datei füllt nur Lücken) — so funktioniert
 derselbe Aufruf via systemd (Env kommt vom Unit-File) und standalone/SSH
 (Env kommt aus der Datei).
 
+**Ausnahme `windows-native`:** Layer 1 entfällt — `deploy/.env.example` trägt
+Compose-Hostnamen (`RAG_URL=http://rag:5001`), die native Dienste verbiegen
+würden. Die Kette lautet dort: eingebaute Defaults
+(`scripts/lib/VaLocalConfig.ps1`) → `deploy/env/windows-native.env` →
+`%USERPROFILE%\.config\va\deploy.env` → Prozess-Env (nur für die
+Launcher-Keys). Ausgewertet wird sie von `Start-VoiceAssistant.ps1` selbst, damit
+der SSH-Autostart des Bots dieselben Werte sieht wie `va.ps1 up`. Host-Pfade
+(`VA_WHISPER_DIR`, `VA_WHISPER_MODEL`, `VA_PIPER_PYTHON`, `PIPER_VOICES_DIR`,
+`VA_VAULT_PATH`, …) schreibt `scripts/Setup-VoiceAssistant.ps1` (bzw.
+`va.ps1 setup`); `va.ps1 doctor` prüft sie ohne Änderungen.
+
 ## Secrets-Datei (Schema `~/.config/va/deploy.env`)
 
 ```ini
@@ -142,7 +153,9 @@ va env    show [--profile P] [--slot S]      # effektive Env, Secret-Werte maski
 - Bot-Code: `SERVER_START_CMD`/`SERVER_STOP_CMD` zeigen weiter auf
   `cloud-start.sh`/`cloud-stop.sh` (Default-Slot `prod`).
 - Der Windows-native Local-Stack behält sein Verhalten; `va.ps1` wrappt das
-  bestehende `Start-VoiceAssistant.ps1` statt es neu zu erfinden.
+  bestehende `Start-VoiceAssistant.ps1` statt es neu zu erfinden. Pfade/Ports
+  stehen nicht mehr im Skript, sondern in der Host-Konfiguration
+  (`va.ps1 setup` / `va.ps1 doctor`).
 
 ## Einmalige Übergangs-Schritte (User, in dieser Reihenfolge)
 

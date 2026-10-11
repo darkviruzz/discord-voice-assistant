@@ -4,13 +4,19 @@
     Startet/Stoppt alle lokalen Dienste des Discord Voice Assistant.
 
 .PARAMETER Mode
-    server  (Standard) – Whisper + Piper im Hintergrund (hidden, Logs in %TEMP%\va-logs\),
+    server  (Standard) – Whisper + Piper + RAG im Hintergrund (hidden, Logs in %TEMP%\va-logs\),
                          Node-Server im aktuellen Fenster. Strg+C beendet alles graceful.
-    silent  – Alle Prozesse hidden (Autostart-tauglich). Beenden mit "-Mode stop".
-    all     – Windows Terminal mit 3 Panes (Server / Whisper / Piper).
+    silent  – Alle Prozesse hidden (Autostart-tauglich, so ruft der Bot per SSH auf).
+              Beenden mit "-Mode stop".
+    all     – Windows Terminal mit 4 Panes (Server / Whisper / Piper / RAG).
                          Live-Output + Logs (Tee). [X] killt hart, Ctrl+C im Server-Pane graceful.
-    stop    – Beendet alle Services (Whisper, Piper, Server). Ollama bleibt laufen.
+    stop    – Beendet alle Services (Whisper, Piper, RAG, Server). Ollama bleibt laufen.
     check   – Führt check-services.ps1 aus (Health-Status aller Dienste).
+
+.NOTES
+    Pfade, Modelle und Ports stehen NICHT mehr in diesem Skript, sondern in
+    %USERPROFILE%\.config\va\deploy.env (Layering: scripts\lib\VaLocalConfig.ps1).
+    Einrichten/prüfen:  .\scripts\Setup-VoiceAssistant.ps1   bzw.   -Check
 
 .EXAMPLE
     .\scripts\Start-VoiceAssistant.ps1
@@ -28,57 +34,50 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
-# Konfiguration
+# Konfiguration (Quelle: scripts\lib\VaLocalConfig.ps1)
 # ============================================================
-$WhisperDir    = "C:\Users\nogar\Programme\whisper-vulkan"
-$WhisperExe    = "whisper-server.exe"
-$WhisperModel  = "models\ggml-medium-q5_0.bin"
-$WhisperPort   = 8080
+$RepoRoot = $PSScriptRoot | Split-Path -Parent
+. (Join-Path $PSScriptRoot 'lib\VaLocalConfig.ps1')
 
-$PiperForkDir  = "C:\Users\nogar\Programme\piper-directml-fork"
-$PiperVenv     = "$PiperForkDir\venv\Scripts"
-$PiperPython   = "$PiperVenv\python.exe"
-$PiperPort     = 5000
+$VaConfig = Get-VaLocalConfig -RepoRoot $RepoRoot
+$Svc      = Resolve-VaServices -Config $VaConfig -RepoRoot $RepoRoot
 
-$OllamaUrl     = "http://localhost:11434"
-$OllamaPort    = 11434
-$PiperUrl      = "http://localhost:$PiperPort"
-$WhisperUrl    = "http://localhost:$WhisperPort"
-$ServerPort    = 7440
+$WhisperDir    = $Svc.WhisperDir
+$WhisperExe    = $Svc.WhisperExe
+$WhisperModel  = $Svc.WhisperModel
+$WhisperLang   = $Svc.WhisperLang
+$WhisperPort   = $Svc.WhisperPort
+$WhisperUrl    = $Svc.WhisperUrl
 
-# RAG-Dienst (Obsidian-Vault → semantische Suche). Eigenes venv in apps\rag.
-$RagPort       = 5001
-$RagUrl        = "http://localhost:$RagPort"
+$PiperPython   = $Svc.PiperPython
+$PiperPort     = $Svc.PiperPort
+$PiperUrl      = $Svc.PiperUrl
 
-$RepoRoot      = $PSScriptRoot | Split-Path -Parent
-$PiperSvcDir   = "$RepoRoot\services\piper"
-$ServerDir     = "$RepoRoot\apps\server"
-$RagSvcDir     = "$RepoRoot\apps\rag"
-$RagVenv       = "$RagSvcDir\venv\Scripts"
-$RagPython     = "$RagVenv\python.exe"
+$OllamaPort    = $Svc.OllamaPort
+$ServerPort    = $Svc.ServerPort
+
+$RagPort       = $Svc.RagPort
+$RagUrl        = $Svc.RagUrl
+$RagPython     = $Svc.RagPython
+
+$PiperSvcDir   = $Svc.PiperSvcDir
+$ServerDir     = $Svc.ServerDir
+$RagSvcDir     = $Svc.RagSvcDir
+
+# Env für Kindprozesse (Piper/RAG/Node). Gilt für diesen Prozess und wird in
+# Hidden-/Pane-Skripte injiziert (die erben die Env nicht).
+$ChildEnv = Get-VaChildEnv -Config $VaConfig -Services $Svc
+Set-VaProcessEnv -EnvMap $ChildEnv
 
 # ============================================================
 # Logs
 # ============================================================
-$LogDir     = "$env:TEMP\va-logs"
-$WhisperLog = "$LogDir\whisper.log"
-$PiperLog   = "$LogDir\piper.log"
-$ServerLog  = "$LogDir\server.log"
-$RagLog     = "$LogDir\rag.log"
+$LogDir     = $Svc.LogDir
+$WhisperLog = Join-Path $LogDir 'whisper.log'
+$PiperLog   = Join-Path $LogDir 'piper.log'
+$ServerLog  = Join-Path $LogDir 'server.log'
+$RagLog     = Join-Path $LogDir 'rag.log'
 if (-not (Test-Path $LogDir)) { $null = New-Item -ItemType Directory -Path $LogDir -Force }
-
-# Env-Vars für services/piper/server.py (werden an Kindprozesse vererbt)
-$env:PIPER_VOICES_DIR      = "C:\Users\nogar\Programme\piper\voices"
-$env:PIPER_USE_DIRECTML    = "1"
-$env:PIPER_DIRECTML_DEVICE = "0"
-
-# Env-Vars für apps/rag/server.py. VAULT_PATH auf den Obsidian-Vault zeigen
-# lassen (hier den realen Pfad eintragen); leer = RAG indiziert nichts, der
-# Dienst läuft trotzdem und /health meldet indexed:0.
-$env:VAULT_PATH = "C:\Users\nogar\Obsidian\Kampagne"
-$env:CHROMA_DIR = "$RagSvcDir\chroma"
-$env:OLLAMA_URL = $OllamaUrl
-$env:RAG_PORT   = "$RagPort"
 
 # ============================================================
 # Hilfsfunktionen
@@ -87,6 +86,7 @@ function Write-Step { param([string]$Msg) Write-Host ">> $Msg" -ForegroundColor 
 function Write-Ok   { param([string]$Msg) Write-Host "   OK  $Msg" -ForegroundColor Green }
 function Write-Warn { param([string]$Msg) Write-Host "   !!  $Msg" -ForegroundColor Yellow }
 function Write-Info { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor DarkGray }
+function Write-Fail { param([string]$Msg) Write-Host "   XX  $Msg" -ForegroundColor Red }
 
 function Test-Port {
     param([int]$Port)
@@ -286,17 +286,9 @@ function Start-ServiceHidden {
     param([string]$Name, [string[]]$ScriptLines, [string]$LogFile)
     $tmpScript = "$env:TEMP\va-hidden-$($Name.ToLower()).ps1"
 
-    # Re-inject env-vars, die der Task-Prozess sonst nicht sieht.
-    # Nur die für Piper relevanten — Whisper braucht keine, Node liest dotenv.
-    $envBlock = @(
-        ('$env:PIPER_VOICES_DIR = ''' + $env:PIPER_VOICES_DIR + '''')
-        ('$env:PIPER_USE_DIRECTML = ''' + $env:PIPER_USE_DIRECTML + '''')
-        ('$env:PIPER_DIRECTML_DEVICE = ''' + $env:PIPER_DIRECTML_DEVICE + '''')
-        ('$env:VAULT_PATH = ''' + $env:VAULT_PATH + '''')
-        ('$env:CHROMA_DIR = ''' + $env:CHROMA_DIR + '''')
-        ('$env:OLLAMA_URL = ''' + $env:OLLAMA_URL + '''')
-        ('$env:RAG_PORT = ''' + $env:RAG_PORT + '''')
-    )
+    # Re-inject env-vars, die der Task-Prozess sonst nicht sieht (Piper-
+    # Stimmen, RAG-Vault, Server-URLs — siehe Get-VaChildEnv).
+    $envBlock = @(ConvertTo-VaEnvAssignments -EnvMap $ChildEnv)
     ($envBlock + $ScriptLines) | Set-Content -Path $tmpScript -Encoding UTF8
 
     $taskName    = "VA-Spawn-$($Name.ToLower())"
@@ -336,7 +328,7 @@ function Start-Whisper-Hidden {
     Start-ServiceHidden -Name "whisper" -LogFile $WhisperLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$WhisperDir'"
-        "& '.\$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language de 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$WhisperLog' -Encoding UTF8 -Append"
+        "& '$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language $WhisperLang 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$WhisperLog' -Encoding UTF8 -Append"
     )
 }
 
@@ -351,12 +343,11 @@ function Start-Piper-Hidden {
 }
 
 function Start-Rag-Hidden {
-    if (Test-Port $RagPort) { Write-Warn "RAG läuft bereits auf Port $RagPort"; return }
-    if (-not (Test-Path $RagPython)) {
-        Write-Warn "RAG-venv nicht gefunden ($RagPython) – RAG-Dienst übersprungen."
-        Write-Info "Setup: cd apps\rag; python -m venv venv; venv\Scripts\pip install -r requirements.txt"
+    if (-not $Svc.RagEnabled) {
+        Write-Info "RAG aus (kein Vault oder kein venv konfiguriert) – Server nutzt den CAMPAIGN.md-Fallback."
         return
     }
+    if (Test-Port $RagPort) { Write-Warn "RAG läuft bereits auf Port $RagPort"; return }
     Write-Step "Starte RAG hidden (Log: $RagLog)..."
     Start-ServiceHidden -Name "rag" -LogFile $RagLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
@@ -395,6 +386,31 @@ if ($Mode -eq "check") {
 if ($Mode -eq "stop") {
     Stop-AllServices
     exit
+}
+
+# ============================================================
+# Preflight: Konfiguration prüfen, BEVOR etwas hidden startet — sonst endet
+# ein falscher Pfad nur in einem stillen 60-s-Timeout und einer Log-Datei.
+# Fehler eines Dienstes, dessen Port schon belegt ist, blockieren nicht
+# (der läuft dann offenbar bereits, z. B. manuell gestartet).
+# ============================================================
+if (-not (Test-Path -LiteralPath $VaConfig.DeployEnvPath)) {
+    Write-Warn "Keine Host-Konfiguration ($($VaConfig.DeployEnvPath)) – nutze Defaults."
+    Write-Info "Einrichten: .\scripts\Setup-VoiceAssistant.ps1"
+}
+$portOf = @{ Whisper = $WhisperPort; Piper = $PiperPort; RAG = $RagPort }
+$preflight = @(Test-VaServiceConfig -Services $Svc -Config $VaConfig | Where-Object {
+    -not ($portOf.ContainsKey($_.Component) -and (Test-Port $portOf[$_.Component]))
+})
+foreach ($issue in $preflight) {
+    if ($issue.Level -eq 'Error') { Write-Fail "$($issue.Component): $($issue.Message)" }
+    else { Write-Warn "$($issue.Component): $($issue.Message)" }
+}
+if (@($preflight | Where-Object { $_.Level -eq 'Error' }).Count -gt 0) {
+    Write-Host ""
+    Write-Host "Start abgebrochen – Konfiguration unvollständig." -ForegroundColor Red
+    Write-Host "Behebung: .\scripts\Setup-VoiceAssistant.ps1   (nur prüfen: -Check)" -ForegroundColor Yellow
+    exit 1
 }
 
 # ============================================================
@@ -452,12 +468,13 @@ if ($Mode -eq "all") {
     # Temporäre Pane-Skripte schreiben.
     # Grund: WT zerlegt Inline-Commands an Semikolons (auch wenn diese zur PowerShell-Syntax gehören)
     # → 7 Tabs statt 3 Panes. Pfade als -File-Argument umgehen das Problem komplett.
-    # env-Vars (PIPER_DIR etc.) sind bereits im aktuellen Prozess gesetzt und werden vererbt.
+    # Env-Block wird jedem Pane-Skript vorangestellt: ein bereits laufendes
+    # Windows Terminal öffnet neue Panes aus SEINER Env, nicht aus dieser.
 
     function New-PaneScript {
         param([string]$Name, [string[]]$Lines)
         $path = "$env:TEMP\va-pane-$Name.ps1"
-        $Lines | Set-Content -Path $path -Encoding UTF8
+        (@(ConvertTo-VaEnvAssignments -EnvMap $ChildEnv) + $Lines) | Set-Content -Path $path -Encoding UTF8
         return $path
     }
 
@@ -468,7 +485,7 @@ if ($Mode -eq "all") {
 
     $whisperPane = New-PaneScript "whisper" @(
         "Set-Location '$WhisperDir'"
-        "& '.\$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language de 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$WhisperLog'"
+        "& '$WhisperExe' --model '$WhisperModel' --port $WhisperPort --language $WhisperLang 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$WhisperLog'"
     )
 
     $piperPane = New-PaneScript "piper" @(

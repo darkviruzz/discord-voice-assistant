@@ -18,6 +18,7 @@ import { pullArchive, startArchiveCleanup } from './archivePuller.js';
 import { LeaveFinalizeScheduler } from './leaveFinalize.js';
 import { FinalizeStatus, formatProgress, finalizeResultText } from './finalizeStatus.js';
 import { chatMessageText, splitDiscordMessage } from './discordText.js';
+import { AnswerHolds } from './answerHolds.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -163,6 +164,10 @@ function displayNameFor(member, user) {
   return member?.displayName || member?.nick || user?.globalName || user?.username || user?.id || 'Spieler';
 }
 
+// Typed questions keep the on-demand link up until their chat answer is in
+// (see answerHolds.js) — the idle release would otherwise drop it first.
+const answerHolds = new AnswerHolds({ hold: (reason) => transport.holdLink(reason) });
+
 function askServer({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
   // Share voice-session history only when the question comes from the same
   // channel the bot is currently joined to. Other text channels keep their
@@ -170,7 +175,7 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
   const sessionId = (channelId && channelId === _activeVoiceChannelId)
     ? sessions.wireSessionId()
     : null;
-  return transport.textQuery({
+  const sent = transport.textQuery({
     sessionId,
     question,
     tts,
@@ -179,6 +184,8 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
     userDisplayName,
     source,
   });
+  if (sent) answerHolds.add(channelId);
+  return sent;
 }
 
 // Idle auto-finalize for LEFT sessions (see leaveFinalize.js for why the bot
@@ -243,6 +250,7 @@ client.once('clientReady', async () => {
   transport.onFinalizeRequest((req) => { handleAutoFinalize(req).catch((e) => warn('auto-finalize:', e.message)); });
 
   transport.onChatMessage(async (msg) => {
+    answerHolds.settle(msg.channelId);
     const targetChannel = msg.channelId
       ? await client.channels.fetch(msg.channelId).catch(() => null)
       : _textChannel;

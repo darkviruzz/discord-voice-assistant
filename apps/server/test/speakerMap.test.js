@@ -7,8 +7,13 @@ import { loadSpeakerMap, setSpeakerMapping, removeSpeakerMapping } from '../src/
 
 function withTempMap(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spkmap-'));
-  process.env.SPEAKER_MAP_FILE = path.join(dir, 'speaker-map.json');
-  try { return fn(); } finally { delete process.env.SPEAKER_MAP_FILE; }
+  const saved = process.env.SPEAKER_MAP_FILE;
+  // Nested path: the store must create missing parent dirs itself.
+  process.env.SPEAKER_MAP_FILE = path.join(dir, 'data', 'speaker-map.json');
+  try { return fn(); } finally {
+    if (saved === undefined) delete process.env.SPEAKER_MAP_FILE; else process.env.SPEAKER_MAP_FILE = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test('set / load / merge / remove speaker mappings per guild', () => {
@@ -37,10 +42,22 @@ test('set / load / merge / remove speaker mappings per guild', () => {
   });
 });
 
-test('mappings persist across reloads (separate file reads)', () => {
+test('mappings persist on disk in the documented { guild: { user: entry } } shape', () => {
   withTempMap(() => {
-    setSpeakerMapping('g1', '111', { player: 'Hauke' });
-    // loadSpeakerMap re-reads the file each call → simulates a fresh process.
+    setSpeakerMapping('g1', 111, { player: 'Hauke' }); // numeric ids are stringified
+    const onDisk = JSON.parse(fs.readFileSync(process.env.SPEAKER_MAP_FILE, 'utf8'));
+    assert.deepEqual(onDisk, { g1: { '111': { player: 'Hauke' } } });
     assert.equal(loadSpeakerMap('g1')['111'].player, 'Hauke');
+  });
+});
+
+test('a corrupt map file reads as empty; null ids are ignored', () => {
+  withTempMap(() => {
+    fs.mkdirSync(path.dirname(process.env.SPEAKER_MAP_FILE), { recursive: true });
+    fs.writeFileSync(process.env.SPEAKER_MAP_FILE, '{"g1": ');
+    assert.deepEqual(loadSpeakerMap('g1'), {});
+    assert.equal(setSpeakerMapping(null, '1', { player: 'x' }), undefined);
+    assert.equal(setSpeakerMapping('g1', null, { player: 'x' }), undefined);
+    assert.equal(fs.readFileSync(process.env.SPEAKER_MAP_FILE, 'utf8'), '{"g1": ', 'ignored calls do not rewrite the file');
   });
 });

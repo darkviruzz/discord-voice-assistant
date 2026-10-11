@@ -46,14 +46,24 @@ test('jeder explizit geflaggte Katalog-Secret wird auch von der Blacklist erfass
   }
 });
 
-test('coerce verweigert Blacklist-Keys auch ohne secret-Flag', () => {
-  // TRANSCRIPT_UI_PASS ist im Katalog geflaggt — der Fehltext ist derselbe
-  // Pfad, den ein NUR per Blacklist erkannter Key nähme (isSecretEntry).
-  assert.throws(() => coerce('server', 'TRANSCRIPT_UI_PASS', 'x'), /Secret/);
+test('Blacklist greift auch ohne secret-Flag (isSecretEntry, worauf coerce/itemFor bauen)', () => {
+  // Der Katalog hat derzeit keinen ungeflaggten Secret-Namen, über den sich der
+  // Blacklist-Pfad in coerce() End-to-End prüfen ließe — daher direkt:
+  for (const key of ['NEW_SERVICE_API_KEY', 'SMTP_PASSWORD', 'OAUTH_CLIENT_SECRET', 'GITHUB_TOKEN']) {
+    assert.equal(isSecretEntry({ key, secret: false }), true, key);
+  }
+  assert.equal(isSecretEntry({ key: 'WAKE_WORD', secret: false }), false);
+  assert.equal(isSecretEntry(null), false);
 });
 
-test('GET /transcript/config liefert nie Secret-Werte, PUT lehnt sie ab', async () => {
+test('coerce verweigert geflaggte Secrets mit klarer Meldung', () => {
+  assert.throws(() => coerce('server', 'TRANSCRIPT_UI_PASS', 'x'), /TRANSCRIPT_UI_PASS ist ein Secret/);
+  assert.throws(() => coerce('bot', 'CONTROL_BEARER', 'x'), /Secret/);
+});
+
+test('GET /transcript/config liefert nie Secret-Werte, PUT lehnt sie ab', async (t) => {
   process.env.SESSION_SECRET = 'super-geheim';
+  t.after(() => { delete process.env.SESSION_SECRET; });
   const res = await fetch(`${base}/transcript/config`);
   const data = await res.json();
   const items = data.groups.flatMap((g) => g.items);
@@ -71,9 +81,10 @@ test('GET /transcript/config liefert nie Secret-Werte, PUT lehnt sie ab', async 
     body: JSON.stringify({ updates: [{ scope: 'server', key: 'SESSION_SECRET', value: 'neu' }] }),
   });
   const out = await put.json();
+  assert.equal(put.status, 400, 'nothing applied → 400');
   assert.equal(out.ok, false);
   assert.match(out.errors.join(' '), /Secret/);
-  delete process.env.SESSION_SECRET;
+  assert.equal(process.env.SESSION_SECRET, 'super-geheim', 'Wert unverändert');
 });
 
 test('config_state-Report: Werte gecacht, Secrets doppelt gefiltert, API zeigt Ist + Drift', async () => {

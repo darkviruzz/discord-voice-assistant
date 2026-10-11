@@ -30,9 +30,9 @@ test('renderForLlm drops OLDEST lines when over the char budget', () => {
   ];
   // Budget large enough for only the last two lines.
   const budget = lineFor(entries[1]).length + 1 + lineFor(entries[2]).length + 1;
-  const out = renderForLlm(entries, budget);
-  assert.ok(!out.includes('erste-zeile'), 'oldest line must be dropped');
-  assert.ok(out.includes('zweite-zeile') && out.includes('dritte-zeile'));
+  assert.equal(renderForLlm(entries, budget), '[B] zweite-zeile\n[C] dritte-zeile', 'oldest line dropped');
+  assert.equal(renderForLlm(entries, budget - 1), '[C] dritte-zeile', 'one char less → only the newest fits');
+  assert.equal(renderForLlm(entries, 3), '', 'not even the newest line fits');
 });
 
 test('renderForLlm returns empty string for non-positive budget', () => {
@@ -53,10 +53,11 @@ test('selectFoldSegment returns oldest entries up to target, never the whole buf
     entry('B', 'y'.repeat(50), 2),
     entry('C', 'z'.repeat(50), 3),
   ];
-  const seg = selectFoldSegment(entries, 60);
-  assert.ok(seg.length >= 1, 'at least one entry');
-  assert.ok(seg.length < entries.length, 'never the entire buffer');
-  assert.equal(seg[0], entries[0], 'starts at the oldest entry');
+  // Each line renders to 55 chars incl. newline: 60 needs the two oldest.
+  assert.deepEqual(selectFoldSegment(entries, 60), [entries[0], entries[1]]);
+  assert.deepEqual(selectFoldSegment(entries, 55), [entries[0]], 'stops as soon as the target is reached');
+  assert.deepEqual(selectFoldSegment(entries, 1e9), [entries[0], entries[1]], 'never the newest entry');
+  assert.equal(selectFoldSegment(entries, 60)[0], entries[0], 'identity preserved (removeEntries relies on it)');
 });
 
 test('selectFoldSegment returns [] when one or zero entries', () => {
@@ -71,10 +72,9 @@ test('splitForRebuild keeps youngest within budget, folds the rest', () => {
     entry('C', 'c'.repeat(30), 3),
   ];
   const keep = lineFor(entries[2]).length + 1; // room for only the youngest
-  const { older, younger } = splitForRebuild(entries, keep);
-  assert.ok(younger.length >= 1);
-  assert.equal(younger[younger.length - 1], entries[2]);
-  assert.equal(older.length + younger.length, entries.length);
+  assert.deepEqual(splitForRebuild(entries, keep), { older: [entries[0], entries[1]], younger: [entries[2]] });
+  assert.deepEqual(splitForRebuild(entries, keep * 3), { older: [], younger: entries }, 'everything fits');
+  assert.deepEqual(splitForRebuild(entries, 0), { older: entries, younger: [] }, 'zero budget folds all');
 });
 
 // ── makeEntry normalization ───────────────────────────────────────────────────
@@ -90,6 +90,15 @@ test('makeEntry normalizes whitespace and sets kind', () => {
 test('makeEntry drops bracket-only / empty text', () => {
   assert.equal(makeEntry({ label: 'A', text: '[Musik]', startMs: 1 }), null);
   assert.equal(makeEntry({ label: 'A', text: '   ', startMs: 1 }), null);
+  assert.equal(makeEntry({ label: 'A', text: null, startMs: 1 }), null);
+});
+
+test('makeEntry defaults: label "Spieler", kind "user", missing startMs → now', () => {
+  const before = Date.now();
+  const e = makeEntry({ text: 'hallo', kind: 'system', startMs: NaN });
+  assert.equal(e.label, 'Spieler');
+  assert.equal(e.kind, 'user', 'only "assistant" is kept as a distinct kind');
+  assert.ok(e.startMs >= before && e.startMs <= Date.now());
 });
 
 // ── stateful ops over a session ───────────────────────────────────────────────
@@ -134,9 +143,21 @@ test('renderLiveContext serializes the current buffer', () => {
   assert.equal(renderLiveContext(s), '[Greta] Hallo');
 });
 
-test('env getters return sane defaults', () => {
-  delete process.env.LIVE_CONTEXT_ENABLED;
-  assert.equal(liveContextEnabled(), true);
-  assert.equal(rawWindowChars(), 6000);
-  assert.equal(foldChars(), 3000);
+test('env getters return sane defaults and survive bad values', () => {
+  const keys = ['LIVE_CONTEXT_ENABLED', 'LIVE_RAW_WINDOW_CHARS', 'LIVE_FOLD_CHARS'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    for (const k of keys) delete process.env[k]; // independent of the caller's shell env
+    assert.equal(liveContextEnabled(), true);
+    assert.equal(rawWindowChars(), 6000);
+    assert.equal(foldChars(), 3000);
+    process.env.LIVE_RAW_WINDOW_CHARS = 'viel';
+    assert.equal(rawWindowChars(), 6000, 'non-numeric → default');
+    process.env.LIVE_FOLD_CHARS = '-5';
+    assert.equal(foldChars(), 0, 'negative clamped to 0');
+    process.env.LIVE_CONTEXT_ENABLED = 'nein';
+    assert.equal(liveContextEnabled(), true, 'only the literal "false" disables');
+  } finally {
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
 });

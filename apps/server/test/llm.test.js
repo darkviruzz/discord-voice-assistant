@@ -70,7 +70,7 @@ test('request: base system prompt, non-blank system blocks in order, trimmed his
   const body = requests[0];
   assert.equal(body.model, 'qwen2.5');
   assert.equal(body.stream, false);
-  assert.equal(body.keep_alive, '-1');
+  assert.equal(body.keep_alive, -1); // a bare number goes out as a number (Ollama: string "-1" = 400)
   const roles = body.messages.map((m) => `${m.role}:${m.role === 'system' && m === body.messages[0] ? 'BASE' : m.content}`);
   assert.deepEqual(roles, [
     'system:BASE',

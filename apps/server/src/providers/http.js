@@ -20,6 +20,14 @@ export function env(key, fallback = '') {
   return (typeof v === 'string' && v.trim() !== '') ? v.trim() : fallback;
 }
 
+// Ollama keep_alive as sent in a request body. Ollama parses a string with
+// Go's time.ParseDuration, which rejects a bare number ("-1", "0", "3600" →
+// HTTP 400); the documented "-1 = forever" only works as a JSON number
+// (seconds, negative = forever). Durations with a unit stay strings.
+export function keepAliveParam(raw) {
+  return /^-?\d+$/.test(String(raw).trim()) ? Number(raw) : raw;
+}
+
 export function authHeaders(apiKey) {
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 }

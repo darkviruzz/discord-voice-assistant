@@ -1,4 +1,4 @@
-import { baseUrl, env, authHeaders, postJson } from './http.js';
+import { baseUrl, env, authHeaders, postJson, keepAliveParam } from './http.js';
 
 // Embedding provider (vault RAG).
 //
@@ -76,7 +76,7 @@ export async function embed(texts, { kind = 'document', timeoutMs, signal } = {}
   } else {
     const base = baseUrl(env('OLLAMA_URL'), 'http://localhost:11434');
     const data = await postJson('embed', `${base}/api/embed`, {
-      model, input, keep_alive: env('EMBED_KEEP_ALIVE', '30m'),
+      model, input, keep_alive: keepAliveParam(env('EMBED_KEEP_ALIVE', '30m')),
     }, { signal, timeoutMs });
     vectors = data?.embeddings ?? null;
   }

@@ -108,6 +108,27 @@ test('embed (ollama): /api/embed, nomic prefixes per kind, keep_alive', async ()
   assert.deepEqual(seen[1].body.input, ['search_query: frage']);
 });
 
+// .env.example documents "-1 = dauerhaft" for both keep-alives. Ollama reads
+// a string keep_alive with time.ParseDuration — "-1" (no unit) is a 400 —
+// so bare numbers must go out as JSON numbers.
+test('keep_alive: bare numbers are sent as numbers, durations as strings', async () => {
+  process.env.OLLAMA_URL = BASE;
+  process.env.OLLAMA_KEEP_ALIVE = '-1';
+  process.env.EMBED_KEEP_ALIVE = '0';
+  reply = (req, body) => [200, req.url === '/api/embed'
+    ? { embeddings: body.input.map(() => [1]) }
+    : { message: { content: 'ok' } }];
+  await complete({ messages: [{ role: 'user', content: 'x' }] });
+  await warmUp();
+  await embed('a');
+  assert.equal(seen[0].body.keep_alive, -1);
+  assert.equal(seen[1].body.keep_alive, -1);
+  assert.equal(seen[2].body.keep_alive, 0);
+  process.env.OLLAMA_KEEP_ALIVE = '24h';
+  await complete({ messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(seen[3].body.keep_alive, '24h');
+});
+
 test('embed (openai): /embeddings, results re-ordered by index, no prefixes for other models', async () => {
   process.env.EMBED_PROVIDER = 'openai';
   process.env.EMBED_BASE_URL = `${BASE}/v1`;

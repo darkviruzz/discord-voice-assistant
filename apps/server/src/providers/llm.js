@@ -1,5 +1,5 @@
 import { debug, warn } from '../logger.js';
-import { baseUrl, env, authHeaders, postJson } from './http.js';
+import { baseUrl, env, authHeaders, postJson, keepAliveParam } from './http.js';
 
 // LLM provider — one chat-completion call for every LLM use in the server
 // (wake-word/text answers, rolling summary, finalize session summary).
@@ -69,7 +69,7 @@ export async function complete({ messages, model, temperature, maxTokens, timeou
   }
 
   const base = baseUrl(env('OLLAMA_URL'), 'http://localhost:11434');
-  const body = { model: m, messages, keep_alive: ollamaKeepAlive(), stream: false };
+  const body = { model: m, messages, keep_alive: keepAliveParam(ollamaKeepAlive()), stream: false };
   const options = {};
   if (Number.isFinite(temperature)) options.temperature = temperature;
   if (Number.isFinite(maxTokens) && maxTokens > 0) options.num_predict = maxTokens;
@@ -88,7 +88,7 @@ export async function warmUp() {
   const base = baseUrl(env('OLLAMA_URL'), 'http://localhost:11434');
   const model = defaultModel();
   try {
-    await postJson('llm', `${base}/api/chat`, { model, messages: [], keep_alive: ollamaKeepAlive(), stream: false }, { timeoutMs: 120_000 });
+    await postJson('llm', `${base}/api/chat`, { model, messages: [], keep_alive: keepAliveParam(ollamaKeepAlive()), stream: false }, { timeoutMs: 120_000 });
     debug(`llm: warm-up ok (model=${model}, keep_alive=${ollamaKeepAlive()})`);
     return true;
   } catch (e) {

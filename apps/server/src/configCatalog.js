@@ -622,17 +622,88 @@ export const CATALOG = [
   // ======================= SERVER: TTS ======================================
   {
     scope: 'server', group: 'Server · TTS', key: 'TTS_PROVIDER',
-    label: 'TTS-Anbieter', type: 'enum', enumValues: ['piper', 'elevenlabs'], def: 'piper',
+    label: 'TTS-Anbieter', type: 'enum', enumValues: ['piper', 'openai', 'elevenlabs'], def: 'piper',
     applyMode: 'live',
-    desc: 'Sprachsynthese-Backend. piper = lokaler Piper-Server (Standard). elevenlabs = '
-      + 'Cloud-Stimmen (benötigt ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID). Wird pro '
+    desc: 'Sprachsynthese-Backend. piper = lokaler Piper-Server (Standard, TTS_URL). '
+      + 'openai = beliebiger OpenAI-kompatibler /audio/speech-Endpunkt (z. B. vLLM-Omni mit '
+      + 'Qwen3-TTS, AMD Lemonade/Kokoro, Speaches oder OpenAI selbst; TTS_BASE_URL, '
+      + 'TTS_MODEL, TTS_VOICE). elevenlabs = Cloud-Stimmen (benötigt ELEVENLABS_API_KEY + '
+      + 'ELEVENLABS_VOICE_ID). Stimmung (speaker_id 0–7) und Modell „emotional/high" aus der '
+      + 'LLM-Antwort wirken nur bei piper — die anderen Anbieter sprechen immer mit der '
+      + 'konfigurierten Stimme. Wird pro TTS-Anfrage gelesen: Umschalten greift bei der '
+      + 'nächsten Antwort.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_TIMEOUT_MS',
+    label: 'TTS-Timeout (ms)', type: 'number', def: '30000', applyMode: 'live',
+    desc: 'Gilt für alle Anbieter: maximale Wartezeit bis der TTS-Server antwortet und '
+      + 'zwischen zwei Audio-Datenpaketen. Stockt der Server mitten im Satz länger, endet die '
+      + 'Wiedergabe mit einem Fehler, statt ewig zu hängen. Begrenzt NICHT die Gesamtdauer — '
+      + 'ein langer Satz, der stetig weiterstreamt, läuft durch. 0 = kein Timeout. Wird pro '
       + 'TTS-Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · TTS', key: 'TTS_URL',
     label: 'Piper-Server-URL', type: 'string', def: 'http://localhost:5000', applyMode: 'live',
-    desc: 'Basis-URL des lokalen Piper-TTS-Servers (bei TTS_PROVIDER=piper). Wird pro '
-      + 'TTS-Anfrage gelesen.',
+    desc: 'Basis-URL des lokalen Piper-TTS-Servers (bei TTS_PROVIDER=piper); angefragt wird '
+      + '<URL>/tts/synthesize. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_BASE_URL',
+    label: 'OpenAI-kompatible TTS-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL des OpenAI-kompatiblen TTS-Servers inklusive /v1 (bei '
+      + 'TTS_PROVIDER=openai), z. B. http://localhost:8000/v1 oder https://api.openai.com/v1. '
+      + 'Angefragt wird <URL>/audio/speech. Pflicht bei openai. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_MODEL',
+    label: 'TTS-Modell (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Wert für das Feld "model" der /audio/speech-Anfrage (bei TTS_PROVIDER=openai): der '
+      + 'Modellname, unter dem der Server das TTS-Modell anbietet (siehe dessen /v1/models), '
+      + 'z. B. gpt-4o-mini-tts bei OpenAI oder kokoro bei Kokoro-Servern. Leer = Feld wird '
+      + 'weggelassen (Server-Standard). Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_VOICE',
+    label: 'TTS-Stimme (openai)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Wert für das Feld "voice" (bei TTS_PROVIDER=openai): Stimmen- bzw. Sprecher-Name '
+      + 'laut Doku des Servers, z. B. alloy bei OpenAI. Leer = Feld wird weggelassen '
+      + '(Server-Standard). Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_API_KEY',
+    label: 'TTS-API-Key (openai)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'API-Schlüssel (Bearer) für den OpenAI-kompatiblen TTS-Server. Optional — lokale '
+      + 'Server brauchen meist keinen. Secret — hier nur Status sichtbar; Änderung über .env. '
+      + 'Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_RESPONSE_FORMAT',
+    label: 'Audioformat (openai)', type: 'enum', enumValues: ['pcm', 'wav'], def: 'pcm',
+    applyMode: 'live',
+    desc: 'Feld "response_format" (bei TTS_PROVIDER=openai). pcm = rohes 16-Bit-Mono-PCM ohne '
+      + 'Header, Abtastrate laut TTS_SAMPLE_RATE (OpenAI-Standard). wav = WAV mit Header — '
+      + 'Abtastrate und Kanäle stehen im Header (Stereo wird zu Mono gemischt); robuster, wenn '
+      + 'unklar ist, mit welcher Rate der Server PCM liefert. Komprimierte Formate (mp3, opus …) '
+      + 'werden nicht unterstützt und mit klarer Fehlermeldung abgelehnt. Wird pro TTS-Anfrage '
+      + 'gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_SAMPLE_RATE',
+    label: 'PCM-Abtastrate (Hz, openai)', type: 'number', def: '24000', applyMode: 'live',
+    desc: 'Abtastrate, mit der rohes PCM (TTS_RESPONSE_FORMAT=pcm) interpretiert wird. Laut '
+      + 'OpenAI-Spezifikation 24000. Ein falscher Wert lässt die Stimme zu hoch und schnell '
+      + 'bzw. zu tief und langsam klingen — im Zweifel TTS_RESPONSE_FORMAT=wav verwenden. Bei '
+      + 'wav ohne Bedeutung. Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'TTS_SPEED',
+    label: 'Sprechtempo (openai)', type: 'number', def: '', applyMode: 'live',
+    desc: 'Feld "speed" (bei TTS_PROVIDER=openai), 0.25–4.0, 1 = normal. Leer = Feld wird '
+      + 'weggelassen (Server-Standard); nicht jeder Server wertet es aus. Fordert eine Anfrage '
+      + 'ein Piper-Tempo (lengthScale) an, wird dessen Kehrwert mit diesem Wert '
+      + 'multipliziert. Wird pro TTS-Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · TTS', key: 'ELEVENLABS_API_KEY',
@@ -646,6 +717,13 @@ export const CATALOG = [
     label: 'ElevenLabs Voice-ID', type: 'string', def: 'EXAVITQu4vr4xnSDxMaL', applyMode: 'live',
     desc: 'ID der ElevenLabs-Stimme (bei TTS_PROVIDER=elevenlabs). Keine geheime Angabe. '
       + 'Wird pro TTS-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · TTS', key: 'ELEVENLABS_BASE_URL',
+    label: 'ElevenLabs-API-URL', type: 'string', def: 'https://api.elevenlabs.io',
+    applyMode: 'live',
+    desc: 'Basis-URL der ElevenLabs-API ohne /v1 (bei TTS_PROVIDER=elevenlabs). Nur ändern für '
+      + 'einen regionalen Endpunkt oder einen Proxy. Wird pro TTS-Anfrage gelesen.',
   },
 
   // ======================= SERVER: Wake- / Stop-Word ========================

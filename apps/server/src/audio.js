@@ -66,7 +66,13 @@ export class StreamingAudioPipeline {
       ? Buffer.concat([this._srcCarry, src])
       : src;
     const srcSamples = input.length >>> 1;
-    if (srcSamples === 0) return Buffer.alloc(0);
+    if (srcSamples === 0) {
+      // Less than one whole sample (a 1-byte chunk with nothing carried):
+      // keep the byte — dropping it would shift every later sample by one
+      // byte and turn the rest of the stream into noise.
+      this._srcCarry = Buffer.from(input);
+      return Buffer.alloc(0);
+    }
 
     const step = this._fromRate / this._toRate;
     let pos = this._srcPos;

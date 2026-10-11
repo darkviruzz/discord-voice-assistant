@@ -1,7 +1,10 @@
-# Applies to builds whose context is the repository root (apps/server).
+# Applies to builds whose context is the repository root (apps/server, apps/rag).
 .git/
 **/node_modules/
 **/__pycache__/
+**/.venv/
+**/venv/
+**/.pytest_cache/
 *.log
 **/.env
 **/.env.*
@@ -12,6 +15,7 @@ apps/server/uploads/
 apps/server/archive/
 apps/server/transcripts/
 apps/server/data/
+apps/rag/chroma/
 uploads/
 archive/
 

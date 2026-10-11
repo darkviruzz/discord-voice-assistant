@@ -88,7 +88,7 @@ GPU must run unchanged on a big one) and **security** (no public exposure,
 ideally EU jurisdiction for the P&P data).
 
 **Portability is solved by version-pinned images, not by the provider.** CI
-publishes `va-server` / `va-piper` / `va-whisper` to GHCR; you pin `IMAGE_TAG`
+publishes `va-server` / `va-rag` / `va-piper` / `va-whisper` to GHCR; you pin `IMAGE_TAG`
 and `docker compose pull` the *exact same bytes* on any host — RTX 4090 today,
 H100/H200 next month. See [Portable images](#portable-images-the-transfer-guarantee).
 
@@ -124,12 +124,13 @@ it trades portability and the simple WireGuard story for ~$0.30/hr.
 
 ## Portable images (the transfer guarantee)
 
-CI (`.github/workflows/build-images.yml`) builds and pushes three images to GHCR
+CI (`.github/workflows/build-images.yml`) builds and pushes four images to GHCR
 on every branch push (`branch-<slug>` tags) and on `v*` tags — see the tag
 scheme in `docs/deploy-architecture.md`:
 
 ```
 ghcr.io/darkviruzz/discord-voice-assistant/va-server:<tag>
+ghcr.io/darkviruzz/discord-voice-assistant/va-rag:<tag>
 ghcr.io/darkviruzz/discord-voice-assistant/va-piper:<tag>
 ghcr.io/darkviruzz/discord-voice-assistant/va-whisper:<tag>
 ```

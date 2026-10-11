@@ -1,0 +1,54 @@
+name: test
+
+# Unit tests for the Node workspaces (apps/server, apps/bot) and the Python RAG
+# service (apps/rag). No GPU, Ollama or Discord needed: the RAG suite stubs the
+# embedding call and uses a throwaway ChromaDB in a tmp dir.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+  rag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same Python minor as the va-rag image (apps/rag/Dockerfile).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            apps/rag/requirements.txt
+            apps/rag/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r apps/rag/requirements.txt -r apps/rag/requirements-dev.txt
+
+      - name: pytest
+        run: pytest apps/rag/tests -q

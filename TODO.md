@@ -1,8 +1,8 @@
 # TODO & Ideen
 
-Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Mental Model und Operating Modes: siehe [`README.md`](README.md).
+Backlog/Brainstorm. Aktueller Plan und Live-Test-Checkliste: [`docs/plans/next.md`](docs/plans/next.md) (erledigte Pläne: `docs/plans/archive/`, Betriebswissen: [`docs/ops-notes.md`](docs/ops-notes.md)). Mental Model und Operating Modes: siehe [`README.md`](README.md).
 
-> **Versionierung**: Bot + Server teilen `MAJOR.PHASE.PATCH` (z. B. `1.1.0` = nach Phase 1). Bump am Ende jeder Phase. Details im Plan-File.
+> **Versionierung**: Bot + Server teilen `MAJOR.PHASE.PATCH` (z. B. `1.1.0` = nach Phase 1). Bump am Ende jeder Phase.
 
 ---
 

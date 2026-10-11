@@ -576,6 +576,20 @@ async function answerQuestion({
     response = await chat(history, query, { systemBlocks });
   } catch (e) {
     warn('pipeline: llm error:', e.message);
+    // A typed question is answered in its channel (see below) — on an LLM
+    // failure too, otherwise the asker only ever sees "Frage gesendet."
+    if (source !== 'voice') {
+      broadcastToAllBots({
+        type: 'chat_message',
+        cmdId: randomUUID(),
+        channelId,
+        question: transcript ?? query,
+        answer: '⚠️ Keine Antwort — das Sprachmodell ist gerade nicht erreichbar oder hat nicht rechtzeitig geantwortet. Bitte später erneut fragen.',
+        userDisplayName,
+        assistantName: wakeWordName(),
+        isStop: false,
+      });
+    }
     return;
   }
 

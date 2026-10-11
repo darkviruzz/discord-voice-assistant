@@ -288,10 +288,13 @@ export function initControlWSS({ bearer } = {}) {
             // start where the buffer is still empty). Fire-and-forget — must not
             // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. Once the
             // rolling summary is reconstructed, use it to pull a vault briefing
-            // (Phase 4); also best-effort, never blocks the ack.
-            rebuildLiveContext(startedSession, activeSessionId)
-              .then(() => maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId }))
-              .catch((e) => warn('live-context rebuild/briefing failed:', e.message));
+            // (Phase 4); also best-effort, never blocks the ack. The briefing
+            // claims its once-per-session slot right here (synchronously), so
+            // the session_start the bot re-emits after a reconnect is a no-op.
+            const rebuilt = rebuildLiveContext(startedSession, activeSessionId);
+            rebuilt.catch((e) => warn('live-context rebuild failed:', e.message));
+            maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId, after: rebuilt })
+              .catch((e) => warn('session briefing failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

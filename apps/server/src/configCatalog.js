@@ -436,7 +436,8 @@ export const CATALOG = [
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'CAMPAIGN_CONTEXT_MAX_CHARS',
     label: 'Max. Zeichen Kampagnen-Kontext', type: 'number', def: '6000', applyMode: 'live',
     desc: 'Obergrenze der Zeichen (vom Dateianfang), die aus der Kampagnen-Kontext-Datei '
-      + 'übernommen werden. Wird beim Laden gelesen.',
+      + 'übernommen werden. Gilt genauso für die RAG-Treffer pro Wake-Word-Query und für '
+      + 'den Vault-Kontext des /join-Briefings (beste Treffer zuerst). Wird beim Laden gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_URL',
@@ -449,22 +450,27 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_TIMEOUT_MS',
     label: 'RAG-Timeout (ms)', type: 'number', def: '800', applyMode: 'live',
-    desc: 'Timeout pro RAG-Abfrage in ms; danach lautloser Fallback auf CAMPAIGN.md, die '
-      + 'Voice-Pipeline blockiert nie auf RAG. Wird pro Anfrage gelesen.',
+    desc: 'Timeout pro RAG-Abfrage in ms (Verbindung + Antwort); danach Fallback auf '
+      + 'CAMPAIGN.md, die Voice-Pipeline wartet also höchstens so lange auf RAG. Das '
+      + '/join-Briefing läuft abseits der Pipeline und bekommt mindestens 5000 ms. Wird '
+      + 'pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_ENABLED',
     label: 'Session-Briefing beim /join', type: 'boolean', onValue: 'true', offValue: 'false',
     def: 'true', applyMode: 'next-session',
-    desc: 'Session-Briefing beim /join — RAG-Query mit dem rekonstruierten Summary der '
-      + 'letzten Sitzung, Ergebnis als system-Message an den Anfang der '
-      + 'conversationHistory. Nur wirksam wenn RAG_URL gesetzt und ein Summary existiert. '
-      + 'Wird beim Session-Start gelesen.',
+    desc: 'Session-Briefing beim /join (einmal pro Session) — RAG-Query mit der aus dem '
+      + 'Transkript-JSONL dieser Session rekonstruierten rollenden Zusammenfassung, Ergebnis '
+      + 'als system-Message an den Anfang der conversationHistory. Greift damit nur beim '
+      + 'Fortsetzen einer Session mit bereits zusammengefasstem Verlauf (z. B. nach '
+      + 'Server-Neustart); eine neue Session hat noch keine Zusammenfassung. Nur wirksam '
+      + 'wenn RAG_URL gesetzt. Wird beim Session-Start gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_TOP_K',
     label: 'Vault-Chunks fürs Briefing', type: 'number', def: '3', applyMode: 'next-session',
-    desc: 'Anzahl Vault-Chunks fürs /join-Briefing. Wird beim Session-Start gelesen.',
+    desc: 'Anzahl Vault-Chunks fürs /join-Briefing (1–20, mehr lehnt der RAG-Dienst ab; '
+      + 'wird gekappt). Wird beim Session-Start gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'RAG_BRIEFING_POST_CHAT',

@@ -270,7 +270,7 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
 | `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn `CAMPAIGN_CONTEXT_FILE` ein relativer Pfad ist. |
 | `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn `RAG_URL` nicht gesetzt oder der RAG-Dienst nicht erreichbar ist). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
-| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). |
+| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für RAG-Treffer und den Vault-Kontext des `/join`-Briefings. |
 
 #### RAG (semantische Vault-Suche, Phase 4)
 
@@ -279,10 +279,11 @@ Der Python-RAG-Dienst (`apps/rag/`) indiziert den Obsidian-Vault und liefert pro
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `RAG_URL` | — | Basis-URL des RAG-Dienstes (z. B. `http://localhost:5001`). Leer = RAG aus, nur `CAMPAIGN.md`. |
-| `RAG_TIMEOUT_MS` | `800` | Timeout pro RAG-Abfrage; danach Fallback auf die Datei, ohne die Pipeline zu blockieren. |
-| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join`: RAG-Query mit der rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Nur wirksam bei gesetztem `RAG_URL` und vorhandenem Summary. |
-| `RAG_BRIEFING_TOP_K` | `3` | Anzahl der Vault-Chunks fürs Briefing. |
-| `RAG_BRIEFING_POST_CHAT` | `false` | Briefing zusätzlich als kurze Discord-Textnachricht posten. `false` = nur als LLM-Kontext injizieren. |
+| `RAG_TIMEOUT_MS` | `800` | Timeout pro RAG-Abfrage (Verbindung + Antwort); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. Das `/join`-Briefing bekommt mindestens 5000 ms. |
+| `RAG_SCORE_THRESHOLD` | — | Maximale Cosine-Distanz (0–2, kleiner = ähnlicher) eines Treffers; wird als `score_threshold` an `POST /query` durchgereicht. Leer = kein Filter. Treffer werden wie `CAMPAIGN.md` auf `CAMPAIGN_CONTEXT_MAX_CHARS` gekappt. |
+| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join` (einmal pro Session): RAG-Query mit der aus dem JSONL dieser Session rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Greift nur beim Fortsetzen einer Session mit schon zusammengefasstem Verlauf (z. B. nach Server-Neustart); eine neue Session hat noch kein Summary. Nur wirksam bei gesetztem `RAG_URL`. |
+| `RAG_BRIEFING_TOP_K` | `3` | Anzahl der Vault-Chunks fürs Briefing (1–20). |
+| `RAG_BRIEFING_POST_CHAT` | `false` | Briefing zusätzlich als kurze Discord-Textnachricht posten (einmal pro Session, nicht bei jedem Reconnect). `false` = nur als LLM-Kontext injizieren. |
 
 #### TTS (Text-to-Speech)
 

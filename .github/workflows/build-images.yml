@@ -5,6 +5,7 @@ name: build-images
 #
 # Images:
 #   ghcr.io/<owner>/discord-voice-assistant/va-server
+#   ghcr.io/<owner>/discord-voice-assistant/va-rag
 #   ghcr.io/<owner>/discord-voice-assistant/va-piper
 #   ghcr.io/<owner>/discord-voice-assistant/va-whisper
 
@@ -13,6 +14,7 @@ on:
     branches: ["**"]
     paths:
       - "apps/server/**"
+      - "apps/rag/**"
       - "services/piper/**"
       - "deploy/whisper/**"
       - "package.json"

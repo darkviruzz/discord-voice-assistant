@@ -312,7 +312,43 @@ export const CATALOG = [
       + 'würde. Der Live-Pfad speichert no_speech_prob, verwirft aber nichts. Reserviert.',
   },
 
-  // ======================= SERVER: LLM (Ollama) =============================
+  // ======================= SERVER: LLM =======================================
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PROVIDER',
+    label: 'LLM-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
+    applyMode: 'live',
+    desc: 'ollama = natives Ollama-API (OLLAMA_URL/OLLAMA_MODEL, Keep-Warm). openai = '
+      + 'beliebiger OpenAI-kompatibler Server (/chat/completions) — z. B. vLLM, AMD '
+      + 'Lemonade, llama.cpp-Server, LM Studio — über LLM_BASE_URL/LLM_MODEL. Gilt für '
+      + 'Antworten, rollende Zusammenfassung und Briefing. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_BASE_URL',
+    label: 'OpenAI-kompatible Basis-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: Basis-URL inklusive /v1, z. B. '
+      + 'http://localhost:8000/v1 (vLLM) — den genauen Pfad nennt die Doku des jeweiligen '
+      + 'Servers. Angefragt wird <URL>/chat/completions.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_MODEL',
+    label: 'Modellname (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: Modellname, wie ihn der Server erwartet. Leer = '
+      + 'OLLAMA_MODEL. SUMMARY_MODEL überschreibt ihn für die Zusammenfassung.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_API_KEY',
+    label: 'API-Key (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für LLM_PROVIDER=openai (lokale Server brauchen meist '
+      + 'keinen). Secret — hier nur Status sichtbar; Änderung über .env.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_TIMEOUT_MS',
+    label: 'LLM-Timeout (ms)', type: 'number', def: '120000', applyMode: 'live',
+    desc: 'Maximale Dauer einer Antwort-Anfrage inklusive Generierung, bevor sie als '
+      + 'fehlgeschlagen gilt (vorher: unbegrenzt — ein hängendes Modell blockierte die '
+      + 'Antwort für immer). Wird pro Anfrage gelesen.',
+  },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'OLLAMA_URL',
     label: 'Ollama-Server-URL', type: 'string', def: 'http://localhost:11434',

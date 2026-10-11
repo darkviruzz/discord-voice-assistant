@@ -299,7 +299,12 @@ test('store: replacing a note swaps its chunks atomically; delete; dimension gua
 
 test('store: serialize → deserialize round-trips notes, meta and vectors', () => {
   const s = storeWith({ 'npc/graf.md': ['## A\nGraf Zahl', '## B\nKrone'], 'leer.md': [] });
+  s.getNote('npc/graf.md').fp = '12:1700000000000:2:2000';
   const back = VectorStore.deserialize(s.serialize(), { signature: 'sig' });
+  assert.equal(back.getNote('npc/graf.md').fp, '12:1700000000000:2:2000');
+  assert.equal(back.getNote('leer.md').fp, null);
+  assert.equal(back.findByHash('h-npc/graf.md', 'other.md'), back.getNote('npc/graf.md'));
+  assert.equal(back.findByHash('h-npc/graf.md', 'npc/graf.md'), null);
   assert.equal(back.chunkCount, 2);
   assert.equal(back.noteCount, 2);
   assert.equal(back.dim, s.dim);

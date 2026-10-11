@@ -10,7 +10,8 @@
 // Distances are cosine distances like Chroma's `hnsw:space=cosine`:
 // 1 − cos(a, b), 0 = identical .. 2 = opposite (rounded to 4 decimals).
 //
-// Records are per note: { hash, meta, chunks: [{ text, heading, vec }] }. A
+// Records are per note: { hash, fp, meta, chunks: [{ text, heading, vec }] }
+// (hash = content digest, fp = size/mtime fingerprint for quick rescans). A
 // note is always replaced as a whole (setNote) — synchronous, so a query never
 // sees half of an update.
 //
@@ -20,7 +21,7 @@
 //   bytes 12..15  uint32 LE  header length H
 //   bytes 16..    H bytes UTF-8 JSON header:
 //                 { signature, dim, chunks, endian, savedAt,
-//                   notes: [{ source, hash, meta, chunks: [{ heading, text }] }] }
+//                   notes: [{ source, hash, fp, meta, chunks: [{ heading, text }] }] }
 //   zero padding to a 4-byte boundary
 //   chunks × dim float32 (platform byte order, recorded in `endian`), in
 //   header order (notes, then their chunks).
@@ -66,7 +67,7 @@ export class VectorStore {
   constructor(signature = null) {
     this.signature = signature;
     this.dim = 0;
-    this.notes = new Map(); // source → { hash, meta, chunks: [{ text, heading, vec }] }
+    this.notes = new Map(); // source → { hash, fp, meta, chunks: [{ text, heading, vec }] }
     this.chunkCount = 0;
   }
 
@@ -84,7 +85,7 @@ export class VectorStore {
   // Replace a note's chunks. `vectors[i]` belongs to `chunks[i]`. Throws on a
   // dimension mismatch with the vectors already stored (a different embedding
   // space — the caller resets the store and re-embeds).
-  setNote(source, { hash, meta = {}, chunks = [], vectors = [] }) {
+  setNote(source, { hash, fp = null, meta = {}, chunks = [], vectors = [] }) {
     if (chunks.length !== vectors.length) throw new Error(`setNote(${source}): ${chunks.length} chunks, ${vectors.length} vectors`);
     const stored = chunks.map((c, i) => ({ text: c.text, heading: c.heading ?? '', vec: normalize(vectors[i]) }));
     const dims = new Set(stored.map((c) => c.vec.length));
@@ -96,8 +97,16 @@ export class VectorStore {
     }
     this.deleteNote(source);
     if (dim && this.chunkCount === 0) this.dim = dim;
-    this.notes.set(source, { hash, meta, chunks: stored });
+    this.notes.set(source, { hash, fp, meta, chunks: stored });
     this.chunkCount += stored.length;
+  }
+
+  // Another note (not `exceptSource`) with exactly this content digest.
+  findByHash(hash, exceptSource) {
+    for (const [source, note] of this.notes) {
+      if (source !== exceptSource && note.hash === hash) return note;
+    }
+    return null;
   }
 
   deleteNote(source) {
@@ -140,7 +149,7 @@ export class VectorStore {
     const notes = [];
     const vecBufs = [];
     for (const [source, n] of this.notes) {
-      notes.push({ source, hash: n.hash, meta: n.meta, chunks: n.chunks.map((c) => ({ heading: c.heading, text: c.text })) });
+      notes.push({ source, hash: n.hash, fp: n.fp ?? null, meta: n.meta, chunks: n.chunks.map((c) => ({ heading: c.heading, text: c.text })) });
       for (const c of n.chunks) vecBufs.push(Buffer.from(c.vec.buffer, c.vec.byteOffset, c.vec.byteLength));
     }
     const header = Buffer.from(JSON.stringify({
@@ -193,7 +202,8 @@ export class VectorStore {
         at++;
         return { text: String(c.text ?? ''), heading: String(c.heading ?? ''), vec };
       });
-      store.notes.set(n.source, { hash: n.hash, meta: n.meta ?? {}, chunks });
+      if (typeof n.source !== 'string') throw new IndexFormatError('note without source');
+      store.notes.set(n.source, { hash: n.hash, fp: n.fp ?? null, meta: n.meta ?? {}, chunks });
       store.chunkCount += chunks.length;
     }
     if (at !== count) throw new IndexFormatError(`header lists ${at} chunks, vectors for ${count}`);

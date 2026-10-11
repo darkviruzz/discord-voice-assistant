@@ -38,7 +38,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, DEFAULT_MAX_CHUNK_CHARS } from './chunker.js';
-import { listNotes, readNote, noteState, isHidden, MAX_FILE_BYTES } from './scanner.js';
+import { listNotes, readNote, noteState, statNote, isHidden, MAX_FILE_BYTES } from './scanner.js';
 import { VectorStore, INDEX_FILE, writeFileAtomic, cleanupTempFiles, IndexFormatError, DimensionMismatch } from './store.js';
 import { VaultWatcher } from './watcher.js';
 
@@ -110,7 +110,7 @@ export class RagIndexer {
     this.indexing = false;   // a full sync is running
     this.stopped = false;
     this.lastError = null;
-    this.lastSync = null;    // { at, ms, files, indexed, failed, pruned, embedded }
+    this.lastSync = null;    // { at, ms, quick, files, indexed, failed, pruned, embedded, reused }
     this.embedOk = null;     // last embedding call succeeded? (null = none yet)
 
     this._started = false;
@@ -129,6 +129,8 @@ export class RagIndexer {
     this._abort = new AbortController();
     this._watcher = null;
     this._embedded = 0; // notes (re-)embedded in the current sync pass
+    this._reused = 0;   // notes that took the vectors of an identical note
+    this._againFull = false; // a queued extra pass must not be a quick one
     this._failStreak = false;
 
     // When the index directory lives inside the vault, its writes must not
@@ -243,7 +245,9 @@ export class RagIndexer {
         const n = await this.syncNote(source);
         this.logger.debug(`rag: watch: synced ${source} (${n} chunks)`);
       },
-      onRescan: () => this.sync(),
+      // Folder-level events: renamed/moved notes have new paths (read anyway),
+      // everything else only needs the cheap size+mtime check.
+      onRescan: () => this.sync({ quick: true }),
     });
     this._watcher.start();
   }
@@ -251,7 +255,7 @@ export class RagIndexer {
   _startRescanTimer() {
     const ms = Number(this.rescanIntervalMs);
     if (!Number.isFinite(ms) || ms <= 0) return;
-    this._rescanTimer = setInterval(() => this.requestSync(), Math.min(ms, 2 ** 31 - 1));
+    this._rescanTimer = setInterval(() => this.requestSync({ quick: true }), Math.min(ms, 2 ** 31 - 1));
     this._rescanTimer.unref?.();
   }
 
@@ -291,9 +295,9 @@ export class RagIndexer {
 
   // Fire-and-forget sync for timers/queries; failures are logged once per
   // failure streak (a down Ollama must not log every 5 minutes at WARN).
-  requestSync() {
+  requestSync(opts) {
     if (this.stopped || this._syncing) return;
-    this.sync().then(() => {
+    this.sync(opts).then(() => {
       if (this._failStreak) this.logger.log('rag: sync succeeded again');
       this._failStreak = false;
     }, (e) => {
@@ -305,15 +309,24 @@ export class RagIndexer {
     });
   }
 
-  sync() {
+  // `quick` → see _indexNote (periodic rescans). A full request arriving
+  // while a quick pass runs makes the queued extra pass a full one.
+  sync({ quick = false } = {}) {
     if (this.stopped) return Promise.resolve(null);
-    if (this._syncing) { this._syncAgain = true; return this._syncing; }
+    if (this._syncing) {
+      this._syncAgain = true;
+      if (!quick) this._againFull = true;
+      return this._syncing;
+    }
     this._syncing = (async () => {
       try {
         let result;
+        let q = quick;
         do {
           this._syncAgain = false;
-          result = await this._syncOnce();
+          this._againFull = false;
+          result = await this._syncOnce({ quick: q });
+          q = !this._againFull && quick;
         } while (this._syncAgain && !this.stopped);
         return result;
       } finally {
@@ -324,7 +337,7 @@ export class RagIndexer {
     return this._syncing;
   }
 
-  async _syncOnce() {
+  async _syncOnce({ quick = false } = {}) {
     await this._ensureLoaded();
     if (this.stopped) return null;
     const t0 = Date.now();
@@ -348,6 +361,7 @@ export class RagIndexer {
     let indexed = 0;
     let failed = 0;
     this._embedded = 0;
+    this._reused = 0;
     const seen = new Set();
     for (const { full, source } of notes) {
       if (this.stopped) return null;
@@ -355,7 +369,7 @@ export class RagIndexer {
       files++;
       seen.add(source);
       try {
-        indexed += await this._withNoteLock(source, () => this._indexNote(full, source));
+        indexed += await this._withNoteLock(source, () => this._indexNote(full, source, { quick }));
       } catch (e) {
         if (this.stopped) return null;
         if (e instanceof EmbeddingUnavailable) throw e;
@@ -364,14 +378,16 @@ export class RagIndexer {
       }
     }
     const pruned = await this._prune(seen);
-    this.lastSync = { at: new Date().toISOString(), ms: Date.now() - t0, files, indexed, failed, pruned, embedded: this._embedded };
+    const embedded = this._embedded;
+    const reused = this._reused;
+    this.lastSync = { at: new Date().toISOString(), ms: Date.now() - t0, quick, files, indexed, failed, pruned, embedded, reused };
     this.lastError = failed ? `${failed} note(s) failed in the last sync` : null;
-    const msg = `rag: sync: ${indexed} chunks from ${files} notes (${this._embedded} embedded, ${failed} failed, ${pruned} pruned) in ${this.lastSync.ms} ms`;
-    if (this._embedded || failed || pruned) this.logger.log(msg); else this.logger.debug(msg);
+    const msg = `rag: ${quick ? 'rescan' : 'sync'}: ${indexed} chunks from ${files} notes (${embedded} embedded, ${reused} moved, ${failed} failed, ${pruned} pruned) in ${this.lastSync.ms} ms`;
+    if (embedded || reused || failed || pruned) this.logger.log(msg); else this.logger.debug(msg);
     clearTimeout(this._saveTimer);
     this._saveTimer = null;
     await this.flush();
-    return { files, indexed, failed, pruned, embedded: this._embedded };
+    return { files, indexed, failed, pruned, embedded, reused };
   }
 
   // Drop chunks of notes that no longer exist (deleted/renamed/now hidden).
@@ -423,21 +439,43 @@ export class RagIndexer {
 
   // (Re)index one note: replace its chunks with the current ones, skipping the
   // embedding round-trips when the note is unchanged. Caller holds the lock.
-  async _indexNote(full, source) {
+  //
+  // `quick` (periodic rescans only): trust an unchanged size + mtime and skip
+  // even reading the note — a rescan of a large vault on a slow or cloud-
+  // synced disk then costs one stat per note. Startup syncs and watcher
+  // events always compare content hashes, so an edit that kept size and mtime
+  // is still caught there.
+  async _indexNote(full, source, { quick = false } = {}) {
+    // Stat BEFORE reading: a save racing the read leaves a newer mtime behind,
+    // so the next quick rescan still looks at the note again.
+    const st = await statNote(full);
+    const fp = st ? `${st.size}:${st.mtimeMs}:${CHUNKER_VERSION}:${this.maxChunkChars}` : null;
+    const old = this.store.getNote(source);
+    if (quick && fp && old?.fp === fp) return old.chunks.length;
+
     const text = await readNote(full, {
       maxBytes: this.maxFileBytes,
       onWarn: (m) => this.logger.warn(`rag: ${m}`),
     });
     if (text === null) throw new NoteUnreadable('not readable right now — keeping its previous chunks');
     const hash = noteDigest(text, this.maxChunkChars);
-    const old = this.store.getNote(source);
-    if (old && old.hash === hash) return old.chunks.length;
+    if (old && old.hash === hash) {
+      if (fp && old.fp !== fp) { old.fp = fp; this._markDirty(); }
+      return old.chunks.length;
+    }
 
     const { meta, chunks } = chunkMarkdown(text, source, { maxChars: this.maxChunkChars });
-    const vectors = await this._embedDocuments(chunks.map((c) => c.text));
+    // A note with identical content under another path (renamed/moved notes
+    // and folders: the old path is only pruned after the scan) donates its
+    // vectors — moving a folder in Obsidian costs no embedding calls.
+    const donor = this.store.findByHash(hash, source);
+    const reuse = donor && donor.chunks.length === chunks.length;
+    const vectors = reuse
+      ? donor.chunks.map((c) => c.vec)
+      : await this._embedDocuments(chunks.map((c) => c.text));
     if (this.stopped) return 0;
     try {
-      this.store.setNote(source, { hash, meta, chunks, vectors });
+      this.store.setNote(source, { hash, fp, meta, chunks, vectors });
     } catch (e) {
       if (!(e instanceof DimensionMismatch)) throw e;
       // Same signature, different vector size: the model behind the name
@@ -445,11 +483,11 @@ export class RagIndexer {
       // re-embed the rest in another pass.
       this.logger.warn(`rag: ${e.message} — embedding model changed, rebuilding the index`);
       this.store.reset(this.signatureFn());
-      this.store.setNote(source, { hash, meta, chunks, vectors });
+      this.store.setNote(source, { hash, fp, meta, chunks, vectors });
       this._syncAgain = true;
       this.requestSync();
     }
-    this._embedded++;
+    if (reuse) this._reused++; else this._embedded++;
     this._markDirty();
     return chunks.length;
   }

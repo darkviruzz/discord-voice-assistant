@@ -39,6 +39,12 @@ let wss;
 let url;
 let sessions;
 let stopRag;
+// The Discord post goes to whichever bot is connected at that moment; hold
+// the briefing text back until the reconnected bot has registered, so the
+// post can't fall into the gap between the two connections (in-process RAG
+// answers in a few ms — fast enough to hit that gap).
+let openBriefingGate;
+const briefingGate = new Promise((r) => { openBriefingGate = r; });
 const clients = []; // every bot socket, terminated in after() even when a test fails
 
 before(async () => {
@@ -63,7 +69,8 @@ before(async () => {
       } else {
         stubCalls.chat.push(json);
         const isBriefing = json.messages?.[0]?.content?.includes('Spielleiter-Assistenz');
-        res.end(JSON.stringify({ message: { content: isBriefing ? 'Ihr steht noch am Tor.' : SUMMARY } }));
+        const reply = () => res.end(JSON.stringify({ message: { content: isBriefing ? 'Ihr steht noch am Tor.' : SUMMARY } }));
+        if (isBriefing) briefingGate.then(reply); else reply();
       }
     });
   });
@@ -145,6 +152,7 @@ test('session_start re-emitted on reconnect does not repeat the briefing', async
   // bot re-emits the pending session_start on the new connection.
   a.ws.close();
   const b = await connectBot();
+  openBriefingGate();
   b.ws.send(sessionStart('s2', true));
   await waitFor(() => b.inbox.some((m) => m.type === 'ack' && m.cmdId === 's2'));
 

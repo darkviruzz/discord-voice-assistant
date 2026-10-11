@@ -70,7 +70,7 @@ const docCalls = () => embed.kinds.filter((k) => k === 'document').length;
 
 test('empty vault', async () => {
   const idx = makeIndexer();
-  assert.deepEqual(await idx.sync(), { files: 0, indexed: 0, failed: 0, pruned: 0, embedded: 0 });
+  assert.deepEqual(await idx.sync(), { files: 0, indexed: 0, failed: 0, pruned: 0, embedded: 0, reused: 0 });
 });
 
 test('index + query round-trip: closest chunk first, {text, source, distance}', async () => {
@@ -78,7 +78,7 @@ test('index + query round-trip: closest chunk first, {text, source, distance}', 
   writeNote(vault, 'orte/taverne.md', TAVERN);
   const idx = makeIndexer();
   const res = await idx.sync();
-  assert.deepEqual(res, { files: 2, indexed: 4, failed: 0, pruned: 0, embedded: 2 });
+  assert.deepEqual(res, { files: 2, indexed: 4, failed: 0, pruned: 0, embedded: 2, reused: 0 });
   assert.equal(idx.status().chunks, 4);
 
   const hits = await idx.query('Wo ist der Hort des roten Drachen?', { topK: 2 });
@@ -125,7 +125,49 @@ test('deleted and renamed notes are pruned', async () => {
   assert.equal(res.files, 1);
   assert.equal(res.pruned, 2);
   assert.deepEqual(chunkIds(idx), ['c.md::0', 'c.md::1']);
-  assert.equal(res.embedded, 1, 'a renamed note is re-embedded under its new path');
+  assert.equal(res.embedded, 0, 'a renamed note keeps its vectors');
+  assert.equal(res.reused, 1);
+});
+
+test('moving a folder re-uses the vectors of its notes (no embedding calls)', async () => {
+  writeNote(vault, 'ordner/a.md', DRAGON);
+  writeNote(vault, 'ordner/b.md', TAVERN);
+  const idx = makeIndexer();
+  await idx.sync();
+  const calls = embed.calls;
+  fs.renameSync(path.join(vault, 'ordner'), path.join(vault, 'anders'));
+  const res = await idx.sync();
+  assert.deepEqual([res.embedded, res.reused, res.pruned], [0, 2, 2]);
+  assert.equal(embed.calls, calls);
+  assert.deepEqual(chunkIds(idx), ['anders/a.md::0', 'anders/a.md::1', 'anders/b.md::0', 'anders/b.md::1']);
+  assert.equal((await idx.query('Hort des roten Drachen', { topK: 1 }))[0].source, 'anders/a.md');
+});
+
+test('quick (periodic) rescans trust size + mtime; full syncs compare content', async () => {
+  const T = new Date('2026-01-01T12:00:00Z');
+  const p = writeNote(vault, 'a.md', '## A\nalpha\n');
+  fs.utimesSync(p, T, T);
+  const idx = makeIndexer();
+  await idx.sync();
+  fs.writeFileSync(p, '## A\nomega\n'); // same size …
+  fs.utimesSync(p, T, T); // … and the same mtime: looks unchanged
+  const quick = await idx.sync({ quick: true });
+  assert.equal(quick.embedded, 0);
+  assert.match(idx.store.getNote('a.md').chunks[0].text, /alpha/, 'quick rescan did not even read it');
+  await idx.sync();
+  assert.match(idx.store.getNote('a.md').chunks[0].text, /omega/, 'a full sync compares content hashes');
+  // A normal edit (new mtime) is picked up by a quick rescan too.
+  fs.writeFileSync(p, '## A\nneuer Inhalt\n');
+  assert.equal((await idx.sync({ quick: true })).embedded, 1);
+});
+
+test('the periodic rescan keeps the index current without a watcher', async () => {
+  const idx = makeIndexer({ rescanIntervalMs: 60 });
+  await idx.start();
+  await idx.whenSynced();
+  writeNote(vault, 'spaet.md', '## Neu\nnachgereicht\n');
+  await waitFor(() => chunkIds(idx).includes('spaet.md::0'), 3000, 'periodic rescan');
+  assert.equal(idx.status().watcher, 'off');
 });
 
 test('a frontmatter `source:` field neither duplicates chunks nor changes the hit source', async () => {

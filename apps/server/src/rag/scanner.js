@@ -81,6 +81,17 @@ export async function readNote(full, { maxBytes = MAX_FILE_BYTES, onWarn } = {})
   }
 }
 
+// Size + mtime of a note (the quick-rescan fingerprint), null when it can't
+// be stat'ed.
+export async function statNote(full) {
+  try {
+    const st = await fs.promises.stat(full);
+    return { size: st.size, mtimeMs: st.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
 // Current on-disk state of one note path:
 //   'file'    — a regular file (or a symlink to one)
 //   'missing' — gone, or no longer a file (e.g. a directory now has the name)

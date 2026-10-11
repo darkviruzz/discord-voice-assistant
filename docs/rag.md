@@ -37,7 +37,12 @@ Aktiv, sobald `OBSIDIAN_VAULT_PATH` gesetzt ist (`RAG_ENABLED=false` schaltet ab
    (`fs.watch` rekursiv, ~1 s entprellt, jede Notiz wird aus ihrem *aktuellen*
    Zustand auf der Platte synchronisiert) plus periodischem Abgleich
    (`RAG_RESCAN_INTERVAL_MS`) als Absicherung. Inkrementell per Inhalts-Hash:
-   nur neue/geänderte Notizen werden eingebettet, gelöschte/umbenannte entfernt.
+   nur neue/geänderte Notizen werden eingebettet, gelöschte entfernt;
+   verschobene/umbenannte Notizen (auch ganze Ordner) übernehmen ihre Vektoren
+   ohne Neu-Einbetten. Der periodische Abgleich und Ordner-Ereignisse prüfen nur
+   Größe + Änderungszeit (ein `stat` pro Notiz, gemessen ~80 ms für 1000
+   Notizen statt ~0,5 s mit Lesen + Hashen); Start-Sync und Einzel-Ereignisse
+   vergleichen immer den Inhalt.
 7. **Abfrage** – Frage einbetten, Top-k (1–20) nächste Abschnitte, optional
    gefiltert mit `RAG_SCORE_THRESHOLD`; Ergebnis `[{ text, source, distance }]`.
 

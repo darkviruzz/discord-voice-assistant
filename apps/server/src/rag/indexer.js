@@ -6,9 +6,12 @@
 //                (Ollama still starting / model not pulled yet). Never blocks
 //                on the vault or on embeddings.
 //   sync()       full, incremental, single-flight sync: every note is hashed;
-//                only new/changed notes are re-embedded, notes that vanished
-//                (deleted, renamed, moved into .trash) are pruned. A call while
-//                a sync runs joins it and queues exactly one more pass.
+//                only new/changed notes are re-embedded (renamed/moved ones
+//                take over their old vectors), notes that vanished (deleted,
+//                renamed, moved into .trash) are pruned. A call while a sync
+//                runs joins it and queues exactly one more pass.
+//                sync({ quick: true }) — periodic rescans — trusts an
+//                unchanged size + mtime instead of reading every note.
 //   syncNote(s)  bring ONE note in line with its current state on disk (the
 //                watcher path): exists → (re)index, gone → drop.
 //   query(text)  embed the query, brute-force cosine top-k over the store.
@@ -264,9 +267,11 @@ export class RagIndexer {
   // server was down are picked up; unchanged notes cost no embedding calls.
   async _warmLoop() {
     let delay = this.retryBaseMs;
+    let warned = null; // repeat the same failure (model not pulled …) only at DEBUG
     while (!this.stopped) {
       try {
         await this.sync();
+        if (warned) this.logger.log('rag: initial sync succeeded after retrying');
         return;
       } catch (e) {
         if (this.stopped) return;
@@ -275,7 +280,9 @@ export class RagIndexer {
           this.logger.warn(`rag: ${e.message} — not indexed (the periodic rescan retries)`);
           return;
         }
-        this.logger.warn(`rag: initial sync failed (retry in ${Math.round(delay / 1000)} s): ${e.message}`);
+        const msg = `rag: initial sync failed (retry in ${Math.round(delay / 1000)} s; CAMPAIGN.md until then): ${e.message}`;
+        if (warned === e.message) this.logger.debug(msg); else this.logger.warn(msg);
+        warned = e.message;
       }
       await this._sleep(delay);
       delay = Math.min(delay * 2, this.retryMaxMs);

@@ -126,12 +126,21 @@ for _ in $(seq 1 30); do
 done
 "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || warn "ollama pull failed — pull manually later"
 
-# RAG (Phase 4) needs its own embedding model in the same ollama instance.
-# Only relevant once RAG_URL is set — skip silently on a plain deployment.
-if [ -n "${RAG_URL:-}" ]; then
-  RAG_EMBED_MODEL="${RAG_EMBED_MODEL:-nomic-embed-text}"
-  step "Pulling RAG embedding model: $RAG_EMBED_MODEL"
-  "${COMPOSE[@]}" exec -T ollama ollama pull "$RAG_EMBED_MODEL" || warn "RAG embed model pull failed — pull manually later"
+# Vault RAG (inside the server) embeds the campaign vault with its own model in
+# the same ollama instance. Skipped when RAG is switched off or the embeddings
+# come from another (OpenAI-compatible) server. Same "off" spellings as the
+# server's ragEnabled(). Without the model the server just keeps using the
+# static CAMPAIGN.md (and retries indexing with backoff).
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'; }
+case "$(lc "${RAG_ENABLED:-true}")" in
+  false|0|off|no) rag_on=0 ;;
+  *) rag_on=1 ;;
+esac
+if [ "$rag_on" = 1 ] && [ "$(lc "${EMBED_PROVIDER:-ollama}")" != "openai" ]; then
+  EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
+  step "Pulling RAG embedding model: $EMBED_MODEL"
+  "${COMPOSE[@]}" exec -T ollama ollama pull "$EMBED_MODEL" \
+    || warn "embedding model pull failed — pull manually later (RAG falls back to CAMPAIGN.md until then)"
 fi
 
 step "Starting the full stack"

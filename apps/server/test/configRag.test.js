@@ -144,6 +144,19 @@ test('RAG/EMBED vars are passed through to the server container with the catalog
   assert.match(serverBlock, /- server-data:\/data$/m);
 });
 
+test('every compose passthrough is documented in deploy/.env.example (no stale RAG_* keys)', () => {
+  const example = fs.readFileSync(path.join(repoDir, 'deploy/.env.example'), 'utf8');
+  for (const key of ragKeysUsedInServerCode()) {
+    if (key === 'RAG_INDEX_DIR') continue; // fixed to /data/rag in compose
+    const m = example.match(new RegExp(`^(#\\s*)?${key}=(.*)$`, 'm'));
+    assert.ok(m, `${key} missing from deploy/.env.example`);
+    if (!m[1]) assert.equal(m[2].trim(), catalogEntry('server', key).def, `${key} default in deploy/.env.example`);
+  }
+  for (const stale of ['RAG_URL', 'RAG_EMBED_MODEL', 'RAG_EMBED_KEEP_ALIVE']) {
+    assert.ok(!new RegExp(`^${stale}=`, 'm').test(example), `${stale} still set in deploy/.env.example`);
+  }
+});
+
 test('panel: clearing an optional number (def "") stores "" — not 0', () => {
   // RAG_SCORE_THRESHOLD=0 would drop every hit but exact duplicates, i.e.
   // silently turn RAG off; "" means "no filter".

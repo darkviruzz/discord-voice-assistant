@@ -468,14 +468,19 @@ if ($Prov.OllamaNeeded) {
             $have = @()
             try { $have = @((Invoke-RestMethod -Uri "$($Cfg['OLLAMA_URL'].TrimEnd('/'))/api/tags" -TimeoutSec 5).models | ForEach-Object { $_.name }) } catch { }
             $need = @()
+            # Modelle so, wie der Server sie nutzt: apps\server\.env plus Web-Panel-
+            # Overrides (OLLAMA_MODEL/SUMMARY_MODEL sind dort live änderbar).
+            $srvNow = Get-VaServerSettings -RepoRoot $RepoRoot
             if ($Prov.Llm -eq 'ollama') {
-                $need += $(if ($ServerEnv.Contains('OLLAMA_MODEL') -and $ServerEnv['OLLAMA_MODEL']) { $ServerEnv['OLLAMA_MODEL'] } else { 'llama3.2' })
-                if ($ServerEnv.Contains('SUMMARY_MODEL') -and $ServerEnv['SUMMARY_MODEL']) { $need += $ServerEnv['SUMMARY_MODEL'] }
+                $llmModel = Get-VaSetting $srvNow 'OLLAMA_MODEL'
+                $need += $(if ($llmModel) { $llmModel } else { 'llama3.2' })
+                $sumModel = Get-VaSetting $srvNow 'SUMMARY_MODEL'
+                if ($sumModel) { $need += $sumModel }
             }
             # Embedding-Modell der Vault-Suche (RAG läuft im Node-Server): EMBED_MODEL
             # aus apps\server\.env bzw. dem Web-Panel, Standard nomic-embed-text.
             # Entfällt bei RAG_ENABLED=false oder EMBED_PROVIDER=openai.
-            $needEmbed = Get-VaEmbedModel -ServerSettings (Get-VaServerSettings -RepoRoot $RepoRoot)
+            $needEmbed = Get-VaEmbedModel -ServerSettings $srvNow
             if ($needEmbed) { $need += $needEmbed }
             Add-Result 'Ollama' 'OK' "läuft ($($have.Count) Modelle)"
             foreach ($m in ($need | Select-Object -Unique)) {

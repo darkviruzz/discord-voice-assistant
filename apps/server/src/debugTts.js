@@ -1,13 +1,17 @@
 /**
  * Minimal TTS debug endpoint: GET /debug/tts
  *
- * Calls Piper, collects all PCM, encodes to Opus via StreamingAudioPipeline,
- * and returns the frames as a flat binary blob:
+ * Synthesizes a fixed test text through the configured TTS provider
+ * (providers/tts.js — piper, openai or elevenlabs, exactly as a voice reply
+ * would), collects all PCM, encodes it to Opus via StreamingAudioPipeline, and
+ * returns the frames as a flat binary blob:
  *   [UInt32BE frameLen][frameBytes] [UInt32BE frameLen][frameBytes] ...
+ * Any TTS failure (unreachable, HTTP error, timeout, unsupported format) →
+ * 502 { error }.
  *
  * No WebSocket, no timestamps, no jitter — pure encode path for isolation testing.
  */
-import http from 'http';
+import { synthesizeStream, ttsProvider } from './tts.js';
 import { StreamingAudioPipeline } from './audio.js';
 import { log, warn } from './logger.js';
 
@@ -23,57 +27,38 @@ const TEST_TEXT =
 
 export function registerDebugTtsRoute(expressApp) {
   expressApp.get('/debug/tts', async (req, res) => {
-    const piperBase = process.env.PIPER_URL || 'http://127.0.0.1:5000';
-    const bodyBuf = Buffer.from(
-      JSON.stringify({ text: TEST_TEXT, model: 'emotional', speaker_id: 0 }),
-    );
+    const provider = ttsProvider();
+    // Client gone (bot cancelled the fetch) → stop synthesizing.
+    const ctrl = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) ctrl.abort(); });
 
-    // ── 1. Call Piper streaming endpoint ─────────────────────────────────────
-    let piperRes;
-    try {
-      piperRes = await new Promise((resolve, reject) => {
-        const u = new URL(piperBase + '/tts/synthesize');
-        const r = http.request(
-          {
-            hostname: u.hostname,
-            port:     parseInt(u.port, 10) || 80,
-            path:     u.pathname,
-            method:   'POST',
-            headers:  {
-              'Content-Type':   'application/json',
-              'Content-Length': bodyBuf.length,
-            },
-          },
-          resolve,
-        );
-        r.on('error', reject);
-        r.write(bodyBuf);
-        r.end();
-      });
-    } catch (e) {
-      warn('debug/tts: Piper unreachable:', e.message);
-      return res.status(502).json({ error: 'piper unreachable: ' + e.message });
-    }
-
-    if (piperRes.statusCode !== 200) {
-      piperRes.resume();
-      return res.status(502).json({ error: `piper HTTP ${piperRes.statusCode}` });
-    }
-
-    const sampleRate = parseInt(piperRes.headers['x-sample-rate'] || '22050', 10);
-
-    // ── 2. Collect all PCM ───────────────────────────────────────────────────
+    // ── 1. Synthesize via the provider, collect all PCM ─────────────────────
     const pcmChunks = [];
-    for await (const c of piperRes) pcmChunks.push(c);
+    let sampleRate = null;
+    try {
+      for await (const chunk of synthesizeStream(TEST_TEXT, { model: 'emotional', speakerId: 0 }, ctrl.signal)) {
+        sampleRate ??= chunk.sampleRate;
+        pcmChunks.push(chunk.pcm);
+      }
+    } catch (e) {
+      warn(`debug/tts: ${provider} failed:`, e.message);
+      if (!res.headersSent) res.status(502).json({ error: e.message });
+      return;
+    }
+    if (ctrl.signal.aborted) return;
     const pcm = Buffer.concat(pcmChunks);
-    log(`debug/tts: pcm=${pcm.length}B  rate=${sampleRate}  dur=${Math.round(pcm.length / sampleRate / 2 * 1000)}ms`);
+    if (pcm.length === 0) warn(`debug/tts: ${provider} returned no audio (sending 0 frames)`);
+    else log(`debug/tts: provider=${provider} pcm=${pcm.length}B  rate=${sampleRate}  dur=${Math.round(pcm.length / sampleRate / 2 * 1000)}ms`);
 
-    // ── 3. Encode PCM → Opus (one pipeline, no chunk-boundary artifacts) ────
-    const pipe   = new StreamingAudioPipeline(sampleRate);
-    const frames = [...pipe.push(pcm), ...pipe.flush()];
+    // ── 2. Encode PCM → Opus (one pipeline, no chunk-boundary artifacts) ────
+    const frames = [];
+    if (pcm.length > 0) {
+      const pipe = new StreamingAudioPipeline(sampleRate);
+      frames.push(...pipe.push(pcm), ...pipe.flush());
+    }
     log(`debug/tts: ${frames.length} Opus frames (${frames.length * 20}ms)`);
 
-    // ── 4. Serialize as [UInt32BE len][bytes]... and send ────────────────────
+    // ── 3. Serialize as [UInt32BE len][bytes]... and send ────────────────────
     const parts = frames.map(f => {
       const hdr = Buffer.allocUnsafe(4);
       hdr.writeUInt32BE(f.length);

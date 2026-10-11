@@ -67,15 +67,25 @@ function readCampaignFile() {
   }
 }
 
+// Cap vault text (RAG hits) at the same CAMPAIGN_CONTEXT_MAX_CHARS budget as
+// the static file. RAG chunks are whole `##` sections — a note without
+// headings is one arbitrarily large chunk — so this bound is what keeps the
+// prompt size predictable. Hits arrive most-relevant-first, so keeping the
+// front keeps the best ones.
+export function capCampaignContext(text) {
+  return truncate(String(text ?? '').trim(), maxChars());
+}
+
 // Returns the campaign-context text for `query`, or '' when unavailable/disabled.
 //
 // Async because the RAG path is an HTTP call. When RAG_URL is set and the query
 // is non-empty, a semantic vault lookup is preferred; an empty/failed RAG result
 // transparently falls back to the static CAMPAIGN.md (existing behaviour).
+// Added latency is bounded by RAG_TIMEOUT_MS.
 export async function getCampaignContext(query = null) {
   if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return '';
   if (ragEnabled() && typeof query === 'string' && query.trim()) {
-    const rag = await queryRag(query);
+    const rag = capCampaignContext(await queryRag(query));
     if (rag) return rag;
     // RAG unreachable/empty → fall through to the static file.
   }

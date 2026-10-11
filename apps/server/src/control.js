@@ -12,7 +12,8 @@ import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
-import { maybeSessionBriefing } from './sessionBriefing.js';
+import { maybeSessionBriefing, briefingConfig } from './sessionBriefing.js';
+import { ragConfig } from './ragClient.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -97,14 +98,9 @@ function logSessionMeta(sessionId, msg) {
       campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
       campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),
     },
-    rag: {
-      url: process.env.RAG_URL || null,
-      timeoutMs: Number(process.env.RAG_TIMEOUT_MS ?? 800),
-      scoreThreshold: process.env.RAG_SCORE_THRESHOLD ? Number(process.env.RAG_SCORE_THRESHOLD) : null,
-      briefingEnabled: (process.env.RAG_BRIEFING_ENABLED ?? 'true') !== 'false',
-      briefingTopK: Number(process.env.RAG_BRIEFING_TOP_K ?? 3),
-      briefingPostChat: (process.env.RAG_BRIEFING_POST_CHAT ?? 'false') === 'true',
-    },
+    // Effective values as ragClient/sessionBriefing apply them (normalized URL,
+    // fallback timeout, sanitized threshold) — not the raw env strings.
+    rag: { ...ragConfig(), ...briefingConfig() },
     stt: {
       provider: 'whisper.cpp',
       url: process.env.WHISPER_URL ?? 'http://localhost:8080',
@@ -334,10 +330,13 @@ export function initControlWSS({ bearer } = {}) {
             // start where the buffer is still empty). Fire-and-forget — must not
             // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. Once the
             // rolling summary is reconstructed, use it to pull a vault briefing
-            // (Phase 4); also best-effort, never blocks the ack.
-            rebuildLiveContext(startedSession, activeSessionId)
-              .then(() => maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId }))
-              .catch((e) => warn('live-context rebuild/briefing failed:', e.message));
+            // (Phase 4); also best-effort, never blocks the ack. The briefing
+            // claims its once-per-session slot right here (synchronously), so
+            // the session_start the bot re-emits after a reconnect is a no-op.
+            const rebuilt = rebuildLiveContext(startedSession, activeSessionId);
+            rebuilt.catch((e) => warn('live-context rebuild failed:', e.message));
+            maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId, after: rebuilt })
+              .catch((e) => warn('session briefing failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

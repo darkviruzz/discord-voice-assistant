@@ -15,6 +15,7 @@ import { ensureServerReachable } from './serverAutoStart.js';
 import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import { pullArchive, startArchiveCleanup } from './archivePuller.js';
+import { LeaveFinalizeScheduler } from './leaveFinalize.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -173,14 +174,53 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
   });
 }
 
-// On startup, surface open sessions that are past the idle window (e.g. the
-// server-side timer was lost to a server restart). They are not auto-finalized
-// here — finalize needs the server — but flagged so they can be completed with
-// /finalize run. The live path is driven by the server-side idle timer.
+// Idle auto-finalize for LEFT sessions (see leaveFinalize.js for why the bot
+// and not the server times this). SESSION_IDLE_HOURS after the last activity;
+// AUTO_FINALIZE_AFTER_LEAVE=false turns it off (manual /finalize run only).
+const leaveFinalizer = new LeaveFinalizeScheduler({
+  idleMs: (Number(process.env.SESSION_IDLE_HOURS) || 4) * 3600_000,
+  enabled: !/^(0|false|no|off)$/i.test(process.env.AUTO_FINALIZE_AFTER_LEAVE ?? 'true'),
+  // Re-joined in the meantime → the session is live again, not idle.
+  isBlocked: (id) => !!(sessions.active && sessions.active.id === id && _activeVoiceChannelId),
+  run: autoFinalizeLeftSession,
+});
+
+async function autoFinalizeLeftSession(id) {
+  const session = (sessions.active && sessions.active.id === id) ? sessions.active : SessionManager.loadById(id);
+  if (!session || session.status !== SessionStatus.OPEN || _finalizeInFlight.has(id)) return;
+  // Nothing recorded → nothing to transcribe. Skip BEFORE performFinalize, which
+  // would otherwise bring up (on cloud: launch) a server just to fail.
+  if (!(session.timeline?.length > 0)) { log(`leave-finalize: ${id} has no utterances — left open`); return; }
+  const { result, retentionNote } = await performFinalize(session, {});
+  log(`leave-finalize: ${id} finalized → ${result.transcriptPath}`);
+  if (_textChannel?.send) {
+    _textChannel.send(`🗄️ Session \`${session.id}\` automatisch finalisiert (Inaktivität nach /leave).\nTranskript: \`${result.transcriptPath}\`${retentionNote}`)
+      .catch(() => {});
+  }
+}
+
+// On startup: open sessions on disk get the idle countdown re-armed from their
+// last activity (already overdue → finalized shortly after start, serialised;
+// a /join within the window cancels it and resumes the session instead).
+// Sessions stuck in FINALIZING (bot died mid-finalize — nothing can still be
+// running after a restart) are put back to OPEN so they can be retried.
 function recoverOldSessions() {
-  const stale = SessionManager.tryAutoFinalizeOld();
-  for (const s of stale) {
-    log(`Offene Session über Idle-Grenze: ${s.id} — mit /finalize run abschließen.`);
+  for (const entry of SessionManager.listAll()) {
+    if (entry.status !== SessionStatus.FINALIZING) continue;
+    const s = SessionManager.loadById(entry.id);
+    if (!s) continue;
+    s.status = SessionStatus.OPEN;
+    SessionManager.save(s);
+    warn(`Session ${s.id} hing in FINALIZING (Bot-Neustart während Finalize) — wieder auf OPEN gesetzt.`);
+  }
+  let open = [];
+  try { open = SessionManager.listOpenSessions(); } catch { /* DATA_DIR missing → nothing to recover */ }
+  for (const dir of open) {
+    const s = SessionManager.loadById(dir.split(/[\\/]/).pop());
+    if (!s) continue;
+    // ≥ 60 s after start: transport + Discord settle, and an immediate /join wins.
+    leaveFinalizer.arm(s.id, s.lastActivity, { minDelayMs: 60_000 });
+    log(`Offene Session ${s.id}: Auto-Finalize ${leaveFinalizer.enabled ? 'geplant' : 'aus (AUTO_FINALIZE_AFTER_LEAVE=false) — mit /finalize run abschließen'}.`);
   }
 }
 
@@ -595,7 +635,16 @@ client.on('interactionCreate', async (i) => {
           // Did not recover — real disconnect.
           warn('voice: real disconnect, destroying connection');
           try { connection.destroy(); } catch {}
+          // Treat it like an implicit /leave (kicked, channel deleted, network
+          // gone): without this the session was neither reported as left nor
+          // armed for idle auto-finalize, and the server link stayed open.
+          disposeAllRecordings('voice disconnect');
+          transport.clearVoiceConnection();
+          const wid = sessions.wireSessionId();
+          if (wid) transport.voiceState({ sessionId: wid, state: 'left' });
           _activeVoiceChannelId = null;
+          if (sessions.active) leaveFinalizer.arm(sessions.active.id, sessions.active.lastActivity);
+          maybeScheduleIdleRelease();
         }
       });
 
@@ -614,6 +663,8 @@ client.on('interactionCreate', async (i) => {
 
       connection.on('error', (e) => warn('voice: connection error:', e.message));
 
+      // Back in voice: no pending idle auto-finalize may hit the (resumed) session.
+      leaveFinalizer.cancelAll();
       const { resumed } = sessions.resumeOrStart();
       _activeVoiceChannelId = channel.id;
       transport.sessionStart({
@@ -731,11 +782,12 @@ client.on('interactionCreate', async (i) => {
       disposeAllRecordings('leave');
       transport.clearVoiceConnection();
       // Leaving voice does NOT end the session. Recording resumes on the next
-      // /join within the idle window; finalize (manual /finalize or the
-      // server-side auto-finalize timer) owns session teardown.
+      // /join within the idle window; finalize (manual /finalize or the idle
+      // auto-finalize armed here) owns session teardown.
       const wireId = sessions.wireSessionId();
       if (wireId) transport.voiceState({ sessionId: wireId, state: 'left' });
       sessions.touch();
+      if (sessions.active) leaveFinalizer.arm(sessions.active.id, sessions.active.lastActivity);
       _activeVoiceChannelId = null;
       _outage.active = false;
       _outage.autoRestartTried = false;

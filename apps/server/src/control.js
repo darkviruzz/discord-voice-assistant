@@ -28,9 +28,19 @@ import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 // the WAVs and runs the upload + finalize flow. Broadcast: only the bot that
 // owns the session will act.
 const autoTimer = new AutoFinalizeTimer({
-  onFire: (sessionId) => broadcastToAllBots({
-    type: 'finalize_request', cmdId: randomUUID(), sessionId, reason: 'idle',
-  }),
+  onFire: (sessionId) => {
+    const sent = broadcastToAllBots({
+      type: 'finalize_request', cmdId: randomUUID(), sessionId, reason: 'idle',
+    });
+    // No bot connected (it drops the link 60 s after /leave): nobody received
+    // the request, so don't leave the session locked as "finalizing" — the bot
+    // runs its own idle auto-finalize for left sessions and its finalize_session
+    // must not be refused/raced by a phantom lock here.
+    if (sent === 0) {
+      log(`autoFinalize: no bot connected for session ${sessionId} — left to the bot's own idle finalize`);
+      autoTimer.release(sessionId);
+    }
+  },
 });
 
 const PROTO_VERSION = 1;

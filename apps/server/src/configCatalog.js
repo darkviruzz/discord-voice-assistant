@@ -696,6 +696,15 @@ export const CATALOG = [
     desc: 'Stunden, nach denen eine inaktive Session automatisch beendet wird. Wird als '
       + 'Modul-Konstante beim Bot-Start gelesen — greift nach Bot-Neustart.',
   },
+  {
+    scope: 'bot', group: 'Bot · Daten & Session', key: 'AUTO_FINALIZE_AFTER_LEAVE',
+    label: 'Auto-Finalize nach /leave', type: 'boolean', def: 'true', applyMode: 'restart',
+    desc: 'Finalisiert eine verlassene Session (/leave, Voice-Abbruch) automatisch, sobald '
+      + 'SESSION_IDLE_HOURS seit der letzten Aktivität vergangen sind — auch nach einem '
+      + 'Bot-Neustart. Baut dafür die Server-Verbindung selbst auf und startet den Server '
+      + 'per SERVER_START_CMD, falls nötig (Cloud: startet also eine GPU-Instanz). '
+      + 'false = nur manuell per /finalize run.',
+  },
 
   // ======================= BOT: Transkript-Live-Sync =========================
   {

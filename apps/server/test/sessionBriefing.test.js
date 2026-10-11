@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { maybeSessionBriefing } from '../src/sessionBriefing.js';
+import { maybeSessionBriefing, briefingConfig } from '../src/sessionBriefing.js';
 import { ensureSession, dropSession } from '../src/state.js';
 import { botConnections } from '../src/broadcast.js';
 
@@ -235,4 +235,12 @@ test('uses a generous timeout off the hot path (cold embedding model at /join)',
     assert.equal(systemMessages(session).length, 1);
     dropSession(sid);
   });
+});
+
+test('briefingConfig reports the effective settings (defaults match the catalog)', () => {
+  assert.deepEqual(briefingConfig(), { briefingEnabled: true, briefingTopK: 3, briefingPostChat: false });
+  process.env.RAG_BRIEFING_ENABLED = 'false';
+  process.env.RAG_BRIEFING_TOP_K = 'abc';
+  process.env.RAG_BRIEFING_POST_CHAT = 'true';
+  assert.deepEqual(briefingConfig(), { briefingEnabled: false, briefingTopK: 3, briefingPostChat: true });
 });

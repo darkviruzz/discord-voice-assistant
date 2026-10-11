@@ -12,7 +12,8 @@ import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
-import { maybeSessionBriefing } from './sessionBriefing.js';
+import { maybeSessionBriefing, briefingConfig } from './sessionBriefing.js';
+import { ragConfig } from './ragClient.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
@@ -96,14 +97,9 @@ function logSessionMeta(sessionId, msg) {
       campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
       campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),
     },
-    rag: {
-      url: process.env.RAG_URL || null,
-      timeoutMs: Number(process.env.RAG_TIMEOUT_MS ?? 800),
-      scoreThreshold: process.env.RAG_SCORE_THRESHOLD ? Number(process.env.RAG_SCORE_THRESHOLD) : null,
-      briefingEnabled: (process.env.RAG_BRIEFING_ENABLED ?? 'true') !== 'false',
-      briefingTopK: Number(process.env.RAG_BRIEFING_TOP_K ?? 3),
-      briefingPostChat: (process.env.RAG_BRIEFING_POST_CHAT ?? 'false') === 'true',
-    },
+    // Effective values as ragClient/sessionBriefing apply them (normalized URL,
+    // fallback timeout, sanitized threshold) — not the raw env strings.
+    rag: { ...ragConfig(), ...briefingConfig() },
     stt: {
       provider: 'whisper.cpp',
       url: process.env.WHISPER_URL ?? 'http://localhost:8080',

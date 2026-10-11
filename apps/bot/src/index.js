@@ -334,6 +334,8 @@ function finalizeResultText(session, result, retentionNote = '', { reFinalize = 
     `Transkript: \`${result.transcriptPath}\``,
     `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
     retentionNote.trim(),
+    // Discord caps a message at 2000 chars; the full recap is in the archive (summary.md).
+    result.summary ? `📝 **Zusammenfassung:** ${result.summary.length > 1100 ? `${result.summary.slice(0, 1100).trimEnd()} … (vollständig: summary.md im Archiv)` : result.summary}` : '',
   ].filter(Boolean).join('\n');
 }
 

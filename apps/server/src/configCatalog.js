@@ -217,6 +217,45 @@ export const CATALOG = [
       + '(Standard; das Archiv hält die Originale). true = zusätzlich im Upload-Ordner '
       + 'behalten. Wird beim Finalize gelesen.',
   },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_ENABLED',
+    label: 'Session-Zusammenfassung beim Finalize', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'true', applyMode: 'next-finalize',
+    desc: 'Erzeugt beim Finalize per LLM eine kurze Zusammenfassung der Session '
+      + '(summary.md im Archiv). Daraus beantwortet Rabenauge auf Nachfrage „Was war '
+      + 'letztes Mal?" — nie als Begrüßung. Lange Sessions werden abschnittsweise '
+      + 'verdichtet. Ein Fehler hier lässt den Finalize unberührt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_MAX_CHARS',
+    label: 'Länge der Session-Zusammenfassung (Zeichen)', type: 'number', def: '2500',
+    applyMode: 'next-finalize',
+    desc: 'Obergrenze für die Zusammenfassung (gekürzt am Satzende).',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_CHUNK_CHARS',
+    label: 'Abschnittsgröße für lange Sessions (Zeichen)', type: 'number', def: '12000',
+    applyMode: 'next-finalize',
+    desc: 'Transkripte über dieser Länge werden in Abschnitte geteilt, einzeln verdichtet '
+      + 'und dann zusammengeführt. Kleiner = mehr, aber kürzere LLM-Aufrufe (für Modelle '
+      + 'mit kleinem Kontextfenster).',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_VAULT_DIR',
+    label: 'Zusammenfassung zusätzlich in den Vault schreiben', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Ordner relativ zu OBSIDIAN_VAULT_PATH (z. B. Rabenauge/Sessions), in den eine '
+      + 'Kopie der Zusammenfassung als Notiz geschrieben wird — der Vault-Index nimmt sie '
+      + 'dann auf. Leer = aus (Standard: nichts wird ungefragt in den Vault geschrieben). '
+      + 'Pfade außerhalb des Vaults werden abgelehnt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'FINALIZE_PROGRESS_MS',
+    label: 'Finalize-Fortschritt: Mindestabstand (ms)', type: 'number', def: '3000',
+    applyMode: 'next-finalize',
+    desc: 'Wie oft der Server den Fortschritt (x/N Äußerungen) an den Bot meldet, der ihn '
+      + 'als Statusnachricht in Discord aktualisiert. Phasenwechsel kommen immer sofort.',
+  },
 
   // ======================= SERVER: STT (Whisper) ============================
   {

@@ -290,6 +290,7 @@ async function handleFinalize(ws, msg) {
       files: result.files,            // small: archive-root files only
       audioOk: result.audio?.ok ?? false,
       audioCount: result.audio?.files?.length ?? 0,
+      summary: result.summary ?? null, // short session recap (LLM; null when off/failed)
     };
   });
 }

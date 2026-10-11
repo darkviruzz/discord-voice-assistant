@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
+import { summarizeSession, writeSummaryToVault } from './summary.js';
 import { warn, log } from '../logger.js';
 
 // Default re-STT is lazy-loaded so importing the orchestrator (e.g. in tests
@@ -186,6 +187,17 @@ export async function finalizeSession({
   fs.writeFileSync(path.join(archiveDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(archiveDir, 'speaker-map.json'), JSON.stringify(mergedSpeakerMap, null, 2));
 
+  // Session summary (LLM, best-effort — null on any failure). Written before the
+  // checksum pass below so it is part of the archive the bot pulls back.
+  report({ phase: 'summary' });
+  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report });
+  if (summary) {
+    fs.writeFileSync(path.join(archiveDir, 'summary.md'), summary + '\n');
+    fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');
+    const dateLabel = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(model.sessionStartMs));
+    writeSummaryToVault(summary, { title: `${dateLabel} Session-Zusammenfassung (${dirName})`, dateLabel });
+  }
+
   // Audio archive (OGG/Opus). Best-effort: a failure must not lose the transcript.
   report({ phase: 'audio' });
   let audio = { files: [], ok: false, error: null };
@@ -229,5 +241,6 @@ export async function finalizeSession({
     missing,
     mismatched,
     audio,
+    summary,
   };
 }

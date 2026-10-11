@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { registerTranscriptRoutes } from '../src/transcriptApi.js';
-import { publishEntry, publishPresence, publishAnnotation } from '../src/liveBus.js';
+import { publishEntry, publishPresence, publishAnnotation, publishSessionEnded } from '../src/liveBus.js';
 import { ensureSession, dropSession } from '../src/state.js';
 
 const SID = '999000111222';
@@ -31,12 +31,17 @@ after(() => {
 });
 
 // Read SSE frames until `predicate(events)` is satisfied or it times out.
-function collectSse(url, predicate, timeoutMs = 3000) {
+// `onSnapshot` runs once the server has sent its snapshot — by then the
+// handler has subscribed to the bus (it subscribes BEFORE building the
+// snapshot), so anything published from there on must be streamed. This
+// replaces a fixed 200 ms "give it a tick" delay that raced the subscription.
+function collectSse(url, predicate, { onSnapshot = () => {}, timeoutMs = 3000 } = {}) {
   return new Promise((resolve, reject) => {
+    let snapshotSeen = false;
     const req = http.get(url, (res) => {
       let buf = '';
       const events = [];
-      const timer = setTimeout(() => { req.destroy(); reject(new Error('SSE timeout')); }, timeoutMs);
+      const timer = setTimeout(() => { req.destroy(); reject(new Error(`SSE timeout; got ${JSON.stringify(events.map((e) => e.event))}`)); }, timeoutMs);
       res.setEncoding('utf8');
       res.on('data', (chunk) => {
         buf += chunk;
@@ -50,6 +55,10 @@ function collectSse(url, predicate, timeoutMs = 3000) {
             try { events.push({ event: ev[1].trim(), data: JSON.parse(data[1]) }); } catch {}
           }
         }
+        if (!snapshotSeen && events.some((e) => e.event === 'snapshot')) {
+          snapshotSeen = true;
+          onSnapshot();
+        }
         if (predicate(events)) { clearTimeout(timer); req.destroy(); resolve(events); }
       });
       res.on('error', () => {}); // destroy() triggers this; ignore
@@ -61,11 +70,9 @@ function collectSse(url, predicate, timeoutMs = 3000) {
 test('SSE sends a snapshot then a live entry published to the bus', async () => {
   const url = `${base}/transcript/live?sessionId=${SID}`;
   // Once connected (snapshot arrived), push an entry and expect it to stream.
-  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'entry'));
-  // Give the server a tick to subscribe + emit the snapshot, then publish.
-  setTimeout(() => {
-    publishEntry(SID, { label: 'Greta', text: 'Hallo **Welt**', startMs: Date.now(), kind: 'user' }, { noSpeechProb: 0.03 });
-  }, 200);
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'entry'), {
+    onSnapshot: () => publishEntry(SID, { label: 'Greta', text: 'Hallo **Welt**', startMs: Date.now(), kind: 'user' }, { noSpeechProb: 0.03 }),
+  });
 
   const events = await got;
   const snapshot = events.find((e) => e.event === 'snapshot');
@@ -74,18 +81,22 @@ test('SSE sends a snapshot then a live entry published to the bus', async () => 
   assert.equal(snapshot.data.sessionId, SID);
   assert.ok(entry, 'live entry received');
   assert.equal(entry.data.label, 'Greta');
+  assert.equal(entry.data.text, 'Hallo **Welt**', 'text passed through verbatim (rendering escapes client-side)');
+  assert.equal(entry.data.kind, 'user');
   assert.equal(entry.data.meta.noSpeechProb, 0.03);
+  assert.ok(events.indexOf(snapshot) < events.indexOf(entry), 'snapshot precedes live entries');
 });
 
 test('SSE streams a presence event when voice state changes', async () => {
   const url = `${base}/transcript/live?sessionId=${SID}`;
-  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'presence'));
-  setTimeout(() => {
-    const s = ensureSession(SID);
-    s.voice.state = 'occupied';
-    s.voice.members.set('111', 'Greta');
-    publishPresence(SID);
-  }, 200);
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'presence'), {
+    onSnapshot: () => {
+      const s = ensureSession(SID);
+      s.voice.state = 'occupied';
+      s.voice.members.set('111', 'Greta');
+      publishPresence(SID);
+    },
+  });
 
   const events = await got;
   const presence = events.find((e) => e.event === 'presence');
@@ -98,11 +109,12 @@ test('SSE streams a presence event when voice state changes', async () => {
 
 test('SSE streams an annotation (retro wake/stop marking)', async () => {
   const url = `${base}/transcript/live?sessionId=${SID}`;
-  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'annotation'));
-  setTimeout(() => {
-    publishAnnotation(SID, { startMs: 1234, wakeDetected: true });
-    publishAnnotation('777', { startMs: 9, wakeDetected: true }); // other session, ignored
-  }, 200);
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'annotation' && e.data.startMs === 1234), {
+    onSnapshot: () => {
+      publishAnnotation('777', { startMs: 9, wakeDetected: true }); // other session, ignored
+      publishAnnotation(SID, { startMs: 1234, wakeDetected: true });
+    },
+  });
 
   const events = await got;
   const ann = events.find((e) => e.event === 'annotation');
@@ -115,16 +127,31 @@ test('SSE streams an annotation (retro wake/stop marking)', async () => {
 test('SSE ignores entries for a different session', async () => {
   const url = `${base}/transcript/live?sessionId=${SID}`;
   let sawForeign = false;
-  const got = collectSse(url, (evs) => {
-    // resolve as soon as our own marker entry arrives
-    return evs.some((e) => e.event === 'entry' && e.data.label === 'MINE');
+  // Resolve as soon as our own marker entry arrives; the foreign one was
+  // published first, so had it leaked it would already be in the stream.
+  const got = collectSse(url, (evs) => evs.some((e) => e.event === 'entry' && e.data.label === 'MINE'), {
+    onSnapshot: () => {
+      publishEntry('555000', { label: 'OTHER', text: 'x', startMs: Date.now(), kind: 'user' });
+      publishEntry(SID, { label: 'MINE', text: 'y', startMs: Date.now(), kind: 'user' });
+    },
   });
-  setTimeout(() => {
-    publishEntry('555000', { label: 'OTHER', text: 'x', startMs: Date.now(), kind: 'user' });
-    publishEntry(SID, { label: 'MINE', text: 'y', startMs: Date.now(), kind: 'user' });
-  }, 200);
 
   const events = await got;
   sawForeign = events.some((e) => e.event === 'entry' && e.data.label === 'OTHER');
   assert.equal(sawForeign, false, 'foreign-session entry must not leak');
+});
+
+test('SSE tells the client when the session was finalized (session_ended)', async () => {
+  const url = `${base}/transcript/live?sessionId=${SID}`;
+  const events = await collectSse(url, (evs) => evs.some((e) => e.event === 'session_ended'), {
+    onSnapshot: () => { publishSessionEnded('123'); publishSessionEnded(SID); },
+  });
+  const ended = events.filter((e) => e.event === 'session_ended');
+  assert.deepEqual(ended.map((e) => e.data), [{ sessionId: SID }], 'only our own session_ended');
+});
+
+test('SSE without a sessionId and no active session → 404 (no stream opened)', async () => {
+  const res = await fetch(`${base}/transcript/live?sessionId=not-a-number`);
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: 'no active session' });
 });

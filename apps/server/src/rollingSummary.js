@@ -89,6 +89,10 @@ export async function summarize(prev, segment) {
   }
   const data = await res.json();
   const raw  = (data.message?.content ?? '').trim();
+  // An empty reply is a failed fold, not an empty history: throw so callers
+  // keep the segment (maybeFold) / the raw history (rebuild) instead of
+  // dropping turns that never made it into the summary.
+  if (!raw) throw new Error('summarize: empty reply from model');
   return capSummary(raw, summaryMaxChars());
 }
 

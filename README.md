@@ -409,23 +409,31 @@ WantedBy=multi-user.target
 ### Server (Windows)
 
 ```powershell
-# im Repo-Root
-npm install
-cp apps/server/.env.example apps/server/.env
-# .env ausfüllen (CONTROL_BEARER, Pfade, Wake-Word)
+# im Repo-Root: geführte Einrichtung — erkennt vorhandene Installationen,
+# fragt fehlende Pfade ab (Whisper, Piper, Stimmen, Ollama-Modelle, Obsidian-
+# Vault, RAG-venv), prüft sie und schreibt %USERPROFILE%\.config\va\deploy.env
+# sowie die passenden Werte in apps\server\.env (jeweils mit Sicherung).
+.\scripts\Setup-VoiceAssistant.ps1
 
-# Alle Dienste starten (Whisper + Piper minimiert, Server im Vordergrund)
+# Nur prüfen, nichts ändern (Doktor-Modus, Exit 1 bei Fehlern):
+.\scripts\Setup-VoiceAssistant.ps1 -Check
+
+# Alle Dienste starten (Whisper + Piper + RAG minimiert, Server im Vordergrund)
 .\scripts\Start-VoiceAssistant.ps1
 
-# Alternativ: 3 Split-Panes in Windows Terminal (Debugging)
+# Alternativ: 4 Split-Panes in Windows Terminal (Debugging)
 .\scripts\Start-VoiceAssistant.ps1 -Mode all
 
-# Alternativ: Hintergrundprozesse ohne Fenster (Autostart)
+# Alternativ: Hintergrundprozesse ohne Fenster (Autostart, so startet der Bot per SSH)
 .\scripts\Start-VoiceAssistant.ps1 -Mode silent
 ```
 
-**Pfade anpassen:** Die Variablen `$WhisperDir`, `$PiperDir` etc. am Anfang von
-[`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) auf dein System anpassen.
+**Pfade:** stehen nicht mehr im Startskript, sondern in
+`%USERPROFILE%\.config\va\deploy.env` (Keys `VA_WHISPER_DIR`, `VA_WHISPER_MODEL`,
+`VA_PIPER_PYTHON`, `PIPER_VOICES_DIR`, `VA_VAULT_PATH`, …; Defaults und Layering in
+[`scripts/lib/VaLocalConfig.ps1`](scripts/lib/VaLocalConfig.ps1)). Ein falscher Pfad
+bricht den Start sofort mit konkreter Meldung ab, statt still in einen Timeout zu laufen.
+`.\deploy\va.ps1 env` zeigt jeden Wert mit seiner Herkunft.
 
 ### System-Prompt als Datei einrichten
 
@@ -757,7 +765,8 @@ Die Python-Dependencies sind in [`services/piper/requirements.txt`](services/pip
 
 **3. Umgebungsvariablen**
 
-Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch:
+Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch
+(Werte aus `%USERPROFILE%\.config\va\deploy.env`, eingerichtet per `Setup-VoiceAssistant.ps1`):
 
 | Variable | Wert | Beschreibung |
 |----------|------|--------------|

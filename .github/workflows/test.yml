@@ -52,3 +52,15 @@ jobs:
 
       - name: pytest
         run: pytest apps/rag/tests -q
+
+  # Windows-native launcher config (scripts/lib/VaLocalConfig.ps1): the
+  # dependency-free self-test runs under pwsh 7 (preinstalled on the runner);
+  # it is written to stay Windows PowerShell 5.1 compatible.
+  powershell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: VaLocalConfig self-test
+        shell: pwsh
+        run: ./scripts/tests/VaLocalConfig.Tests.ps1

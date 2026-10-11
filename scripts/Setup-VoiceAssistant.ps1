@@ -489,14 +489,17 @@ if (-not $vault) {
 
     # --- RAG-venv ---
     $ragPy = $Cfg['VA_RAG_PYTHON']
+    # Pakete importierbar UND chromadb >= 1.5 (requirements.txt pinnt das; ältere
+    # venvs von 0.5/0.6 öffnen den neuen Store nicht) → sonst pip install anbieten.
+    $RagProbe = 'import fastapi, uvicorn, watchdog, yaml, requests, chromadb; v = tuple(int(x) for x in chromadb.__version__.split(chr(46))[:2]); raise SystemExit(0 if v >= (1, 5) else 3)'
     $ragReq = Join-Path $RepoRoot 'apps\rag\requirements.txt'
     $ragOk = $false
     if (Test-Path -LiteralPath $ragPy) {
-        $imp = Invoke-Native $ragPy @('-c', 'import fastapi, uvicorn, chromadb, watchdog, yaml, requests')
+        $imp = Invoke-Native $ragPy @('-c', $RagProbe)
         $ragOk = ($imp.Code -eq 0)
     }
     if (-not $ragOk -and -not $Check) {
-        $q = if (Test-Path -LiteralPath $ragPy) { 'RAG-venv unvollständig. Pakete installieren?' } else { 'RAG-venv fehlt. Jetzt anlegen (python -m venv + pip install, dauert einige Minuten)?' }
+        $q = if (Test-Path -LiteralPath $ragPy) { 'RAG-venv unvollständig oder veraltet (chromadb < 1.5). Pakete installieren/aktualisieren?' } else { 'RAG-venv fehlt. Jetzt anlegen (python -m venv + pip install, dauert einige Minuten)?' }
         if (Read-YesNo $q $true) {
             if (-not (Test-Path -LiteralPath $ragPy)) {
                 # chromadb hinkt neuen Python-Versionen hinterher → 3.12/3.11 bevorzugen
@@ -521,7 +524,7 @@ if (-not $vault) {
                 Write-Info 'pip install -r apps\rag\requirements.txt ...'
                 $r = Invoke-Native $ragPy @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $ragReq)
                 if ($r.Code -ne 0) { Write-Fail (($r.Output -split "`n") | Select-Object -Last 3) }
-                $ragOk = ((Invoke-Native $ragPy @('-c', 'import fastapi, uvicorn, chromadb, watchdog, yaml, requests')).Code -eq 0)
+                $ragOk = ((Invoke-Native $ragPy @('-c', $RagProbe)).Code -eq 0)
             }
         }
     }

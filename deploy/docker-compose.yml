@@ -137,6 +137,15 @@ services:
       # Campaign context source (pulled into the campaign volume by start.sh).
       OBSIDIAN_VAULT_PATH: /data/campaign
       CAMPAIGN_CONTEXT_FILE: ${CAMPAIGN_CONTEXT_FILE:-CAMPAIGN.md}
+      # TTS provider settings (TTS_PROVIDER=openai etc.) — see deploy/.env.example.
+      TTS_TIMEOUT_MS: ${TTS_TIMEOUT_MS:-30000}
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_MODEL: ${TTS_MODEL:-}
+      TTS_VOICE: ${TTS_VOICE:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_RESPONSE_FORMAT: ${TTS_RESPONSE_FORMAT:-pcm}
+      TTS_SAMPLE_RATE: ${TTS_SAMPLE_RATE:-24000}
+      TTS_SPEED: ${TTS_SPEED:-}
     env_file:
       - path: ./server.env
         required: false

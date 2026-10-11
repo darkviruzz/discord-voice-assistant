@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
@@ -8,8 +8,12 @@ import { finalizeSession, buildFinalizeModel, verifyUploads, sha256File } from '
 
 const BASE = 1_700_000_000_000;
 
+const tmpRoots = [];
+after(() => { for (const d of tmpRoots) fs.rmSync(d, { recursive: true, force: true }); });
 function tmpdir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-test-'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'finalize-test-'));
+  tmpRoots.push(d);
+  return d;
 }
 function writeWav(dir, name, content) {
   const fp = path.join(dir, name);
@@ -164,4 +168,78 @@ test('re-finalize from the archive (no upload) reuses archived WAVs', async () =
   assert.ok(r2.ok);
   assert.equal(r2.userCount, 2);
   assert.ok(fs.existsSync(path.join(audioDir, 'a.wav')), 'archive WAVs preserved after re-finalize');
+});
+
+test('verifyUploads refuses manifest entries that are not plain basenames (no reads outside the upload dir)', () => {
+  const root = tmpdir();
+  const upload = path.join(root, 'upload');
+  fs.mkdirSync(upload);
+  fs.writeFileSync(path.join(root, 'secret.txt'), 'TOP SECRET');
+  const secretSha = sha256File(path.join(root, 'secret.txt'));
+  const manifest = baseManifest(upload);
+  const evil = ['../secret.txt', 'sub/../../secret.txt', '..', '.'];
+  for (const file of evil) manifest.utterances.push({ userId: '9', username: 'X', file, sha256: secretSha, startMs: 0, durationMs: 1 });
+  manifest.utterances.push({ userId: '9', username: 'X', file: '../secret.txt', startMs: 0, durationMs: 1 }); // no sha at all
+
+  const v = verifyUploads(manifest, upload);
+  assert.deepEqual([...v.verified].sort(), ['a.wav', 'b.wav']);
+  for (const file of evil) assert.ok(v.mismatched.includes(file), `${file} refused`);
+});
+
+test('finalizeSession never transcribes or archives a file outside the upload dir', async () => {
+  const root = tmpdir();
+  const upload = path.join(root, 'upload');
+  fs.mkdirSync(upload);
+  fs.writeFileSync(path.join(root, 'secret.txt'), 'TOP SECRET');
+  const manifest = baseManifest(upload);
+  manifest.utterances.push({ userId: '9', username: 'Eve', file: '../secret.txt', startMs: 500, durationMs: 100 });
+  const transcribed = [];
+  const result = await finalizeSession({
+    sessionId: String(BASE), manifest, events, uploadDir: upload,
+    archiveRoot: path.join(root, 'archive'), transcriptRoot: path.join(root, 'transcripts'),
+    transcribeFn: async (abs) => { transcribed.push(abs); return { text: 'gehört', words: null }; },
+    opts: { timeZone: 'UTC' },
+  });
+  assert.ok(transcribed.every((p) => path.dirname(p) === upload), `transcribed outside upload dir: ${transcribed}`);
+  assert.equal(fs.existsSync(path.join(result.archiveDir, 'audio', 'secret.txt')), false, 'secret not copied into the (bot-pullable) archive');
+  assert.ok(result.mismatched.includes('../secret.txt'));
+  assert.ok(fs.existsSync(upload), 'unverified upload dir kept for a retry');
+});
+
+test('finalizeSession keeps archive and transcript dirs inside their roots for any sessionName', async () => {
+  for (const sessionName of ['..', '.', '/..', '../..', 'a/../..']) {
+    const root = tmpdir();
+    const upload = path.join(root, 'upload');
+    fs.mkdirSync(upload);
+    const manifest = { ...baseManifest(upload), sessionName };
+    const archiveRoot = path.join(root, 'archive');
+    const transcriptRoot = path.join(root, 'transcripts');
+    const r = await finalizeSession({
+      sessionId: String(BASE), manifest, events, uploadDir: upload, archiveRoot, transcriptRoot,
+      transcribeFn: fakeStt({}), opts: { timeZone: 'UTC' },
+    });
+    assert.equal(path.dirname(r.archiveDir), path.resolve(archiveRoot), `archive escaped for sessionName=${sessionName}`);
+    assert.equal(path.dirname(path.dirname(r.transcriptPath)), path.resolve(transcriptRoot), `transcript escaped for ${sessionName}`);
+    assert.ok(!['.', '..'].includes(r.archiveName), `archiveName ${r.archiveName} must be pullable`);
+    assert.equal(fs.existsSync(path.join(root, 'transcript.md')), false);
+    assert.equal(fs.existsSync(path.join(archiveRoot, 'transcript.md')), false, 'nothing written into the archive root itself');
+  }
+});
+
+test('archive dir name: sanitized bot sessionName, else <date in FINALIZE tz>-<sessionId>', async () => {
+  const root = tmpdir();
+  const upload = path.join(root, 'upload');
+  fs.mkdirSync(upload);
+  const common = { sessionId: String(BASE), events, uploadDir: upload, transcribeFn: fakeStt({}), cleanupUploadDir: false };
+  const named = await finalizeSession({
+    ...common, manifest: { ...baseManifest(upload), sessionName: '2023-11-14T22:13:20.000Z <x>' },
+    archiveRoot: path.join(root, 'a1'), transcriptRoot: path.join(root, 't1'), opts: { timeZone: 'UTC' },
+  });
+  assert.equal(named.archiveName, '2023-11-14T221320.000Zx');
+  // BASE = 2023-11-14T22:13:20Z → already Nov 15th at UTC+14.
+  const dated = await finalizeSession({
+    ...common, manifest: baseManifest(upload),
+    archiveRoot: path.join(root, 'a2'), transcriptRoot: path.join(root, 't2'), opts: { timeZone: 'Pacific/Kiritimati' },
+  });
+  assert.equal(dated.archiveName, `2023-11-15-${BASE}`);
 });

@@ -27,6 +27,14 @@ export function verifyUploads(manifest, uploadDir) {
   const missing = [];
   const mismatched = [];
   for (const u of manifest.utterances || []) {
+    // The manifest comes from the bot: `file` must be a plain basename inside
+    // uploadDir. Anything else ('../x', 'a/b', '..') would read — and archive,
+    // where the bot can pull it — a file outside the upload dir.
+    if (typeof u.file !== 'string' || u.file === '.' || u.file === '..'
+        || path.basename(u.file) !== u.file || u.file.includes('\\')) {
+      mismatched.push(u.file);
+      continue;
+    }
     const file = path.join(uploadDir, u.file);
     if (!fs.existsSync(file)) { missing.push(u.file); continue; }
     if (u.sha256) {
@@ -99,7 +107,9 @@ export async function buildFinalizeModel({
 function archiveDirName(manifest, sessionStartMs, sessionId, timeZone) {
   // Prefer the human-readable bot session id; sanitize for the filesystem.
   const name = typeof manifest.sessionName === 'string' ? manifest.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
-  if (name) return name;
+  // '.'/'..' survive the charset filter but would resolve to the archive root
+  // itself or its parent — fall back to the date-based name instead.
+  if (name && name !== '.' && name !== '..') return name;
   const date = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date(sessionStartMs)); // YYYY-MM-DD

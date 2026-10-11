@@ -19,6 +19,7 @@ import { logTranscriptEvent } from './transcript.js';
 import { botConnections, broadcastToAllBots } from './broadcast.js';
 import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
+import { FinalizeRegistry } from './finalize/inflight.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 
@@ -150,11 +151,49 @@ export function ensureUploadDir(sessionId) {
   return dir;
 }
 
+// Deliver a finalize_result to one waiting request. Normally on the socket the
+// request came in on. If that socket closed while the run was going (the bot's
+// link dropped mid-finalize), hand the result to the currently registered bot
+// connection(s) instead: the bot keeps finalize_session pending across the
+// reconnect and re-sends it with the SAME cmdId, so this cmdId still matches
+// (a bot with no such pending cmdId ignores it). With no bot connected right
+// now, the re-send is answered from the registry's result cache. Exported for
+// tests.
+export function deliverFinalizeResult({ ws, cmdId }, payload) {
+  const msg = { ...payload, type: 'finalize_result', cmdId };
+  if (ws.readyState === ws.OPEN) { send(ws, msg); return; }
+  let n = 0;
+  for (const botWs of botConnections) {
+    if (botWs.readyState === botWs.OPEN) { send(botWs, msg); n++; }
+  }
+  log(`finalize: result for ${payload.sessionId} (cmdId ${cmdId}) — requesting socket closed, sent to ${n} current bot connection(s)`);
+}
+
+// One run per session; repeated requests join it (see finalize/inflight.js).
+const finalizeRuns = new FinalizeRegistry({ deliver: deliverFinalizeResult });
+
 // Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
 // archive, then reply with a checksum summary. Errors are reported back so the
-// bot keeps its local WAVs for a retry.
+// bot keeps its local WAVs for a retry. Idempotent per session: a request for a
+// session whose finalize is already running joins that run (no 2nd re-STT on
+// the same upload dir); a re-send of a request that just completed gets the
+// cached result instead of NO_MANIFEST (the upload dir is gone by then).
 async function handleFinalize(ws, msg) {
   const sessionId = msg.sessionId;
+  const waiter = { ws, cmdId: msg.cmdId };
+
+  // NOTE: no await from here until finalizeRuns.start() — the attach check and
+  // the run registration must be atomic (all source resolution below is sync).
+  const attached = finalizeRuns.attach(sessionId, waiter);
+  if (attached === 'joined') {
+    log('finalize: session', String(sessionId), 'already finalizing — request', msg.cmdId, 'joins the running finalize');
+    send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: 'joined' });
+    return;
+  }
+  if (attached === 'cached') {
+    log('finalize: session', String(sessionId), 'just finalized — answered re-sent request', msg.cmdId, 'from cache');
+    return;
+  }
 
   // Source resolution: a fresh finalize reads the freshly-uploaded WAVs from the
   // transient upload dir; a re-finalize (no upload) reads the originals back from
@@ -188,11 +227,26 @@ async function handleFinalize(ws, msg) {
   autoTimer.markFinalizing(sessionId);
   send(ws, { type: 'finalize_progress', cmdId: msg.cmdId, phase: cleanupUploadDir ? 'started' : 'rebuilding', utterances: manifest.utterances?.length ?? 0 });
 
-  try {
-    const result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir });
-    send(ws, {
-      type: 'finalize_result',
-      cmdId: msg.cmdId,
+  // The registry delivers the outcome to this request and to every request
+  // that joined meanwhile; a throw becomes { ok: false, error } (not cached).
+  await finalizeRuns.start(sessionId, waiter, async () => {
+    let result;
+    try {
+      result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir });
+    } catch (e) {
+      warn('finalize: failed for', String(sessionId), '-', e.message);
+      autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
+      throw e;
+    }
+    // The session is done: drop the RAM state (snapshots rebuild from the
+    // JSONL) and tell the transcript UI to flip it from active to past. Once
+    // per run — joined/re-sent requests never get here. Bookkeeping only: it
+    // must not turn a built transcript into a failure result.
+    try {
+      dropSession(sessionId);
+      publishSessionEnded(sessionId);
+    } catch (e) { warn('finalize: post-finalize cleanup failed:', e.message); }
+    return {
       ok: true,
       sessionId: String(sessionId),
       transcriptPath: result.transcriptPath,
@@ -205,16 +259,8 @@ async function handleFinalize(ws, msg) {
       files: result.files,            // small: archive-root files only
       audioOk: result.audio?.ok ?? false,
       audioCount: result.audio?.files?.length ?? 0,
-    });
-    // The session is done: drop the RAM state (snapshots rebuild from the
-    // JSONL) and tell the transcript UI to flip it from active to past.
-    dropSession(sessionId);
-    publishSessionEnded(sessionId);
-  } catch (e) {
-    warn('finalize: failed for', String(sessionId), '-', e.message);
-    autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
-    send(ws, { type: 'finalize_result', cmdId: msg.cmdId, ok: false, sessionId: String(sessionId), error: e.message });
-  }
+    };
+  });
 }
 
 export function initControlWSS({ bearer } = {}) {

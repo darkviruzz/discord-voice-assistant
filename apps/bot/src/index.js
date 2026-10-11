@@ -61,15 +61,23 @@ const _outage = { active: false, autoRestartTried: false };
 // control link is kept open only in this state (idle bots hold no server link).
 function hasActiveSession() { return !!(sessions.active && _activeVoiceChannelId); }
 
+// The server is also still needed while a finalize runs (it holds the control
+// link, see performFinalize) — possibly with no active session at all, e.g.
+// /finalize after /leave. An idle auto-stop armed meanwhile (/leave, /ask)
+// must not shut the server down mid-finalize; the finalize re-arms the stop
+// when it is done.
+function hasServerWork() { return hasActiveSession() || transport.isLinkHeld(); }
+
 // Release the on-demand server link after a grace period, unless a session is
-// keeping it alive. Re-checked when the timer fires, so a /join cancels it.
-// While idle we also arm the cloud-server idle auto-stop (SERVER_STOP_CMD) —
-// a no-op unless that command is configured — so an idle cloud GPU instance is
-// eventually shut down; a /join or a starting finalize cancels it.
+// keeping it alive. Re-checked when the timer fires, so a /join cancels it (a
+// running finalize keeps it via its link hold). While idle we also arm the
+// cloud-server idle auto-stop (SERVER_STOP_CMD) — a no-op unless that command
+// is configured — so an idle cloud GPU instance is eventually shut down; a
+// /join or a starting finalize cancels it.
 function maybeScheduleIdleRelease() {
   if (!hasActiveSession()) {
     transport.scheduleIdleRelease({ hasWork: hasActiveSession });
-    scheduleServerStop({ hasWork: hasActiveSession });
+    scheduleServerStop({ hasWork: hasServerWork });
   }
 }
 
@@ -230,15 +238,79 @@ function detachActiveSession() {
   maybeScheduleIdleRelease();
 }
 
+// Bring the control link up for a finalize. The link is opened lazily and
+// released 60 s after the last voice session, so a /finalize run after /leave
+// almost always starts without one (and a server-requested auto-finalize can
+// find it gone again after a server hiccup). Previously finalize never
+// reconnected: it failed with "Server nicht verbunden" and only a /join (+
+// /leave) brought the link back. Mirrors /join and /server restart: try the
+// link; if that fails, make sure the server is up (SERVER_START_CMD when
+// configured) and try again. Throws a user-facing error when the server stays
+// unreachable.
+async function ensureFinalizeLink(onProgress = () => {}) {
+  if (transport.isConnected()) return;
+  onProgress('⏳ Verbinde mit dem Server …');
+  try { await transport.ensureConnected({ timeoutMs: 12000 }); return; }
+  catch (e) { debug('finalize: control link not ready:', e.message); }
+
+  let result = 'timeout';
+  try {
+    result = await ensureServerReachable({
+      onProgress: ({ phase, elapsedMs, deadlineMs }) => onProgress(phase === 'starting'
+        ? '⏳ Server offline – starte ihn …'
+        : `⏳ Warte bis Server bereit ist (${Math.round(elapsedMs / 1000)}s/${Math.round(deadlineMs / 1000)}s) …`),
+    });
+  } catch (e) { warn('finalize: ensureServerReachable failed:', e.message); }
+  if (result === 'started' || result === 'already-online') {
+    try { await transport.ensureConnected({ timeoutMs: 12000 }); return; }
+    catch (e) { debug('finalize: control link still not ready:', e.message); }
+  }
+  throw new Error(result === 'no-cmd'
+    ? 'Server nicht erreichbar (kein Auto-Start konfiguriert). Session bleibt offen – später erneut mit `/finalize run` versuchen.'
+    : 'Server nicht erreichbar. Session bleibt offen – später erneut mit `/finalize run` versuchen (ggf. vorher `/server restart`).');
+}
+
+// Session ids with a performFinalize in flight. The persisted FINALIZING
+// status is only set once the link is up (so an unreachable server leaves the
+// session untouched); this closes the window before that against a second
+// /finalize run or a racing auto-finalize for the same session.
+const _finalizeInFlight = new Set();
+
 // Shared finalize flow for both manual (/finalize run) and server-initiated
-// (idle auto-finalize) paths: lock → manifest → upload → server finalize →
-// status + checksum-gated retention → detach if active. Throws on failure
-// (status reverted so it can be retried).
-async function performFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
+// (idle auto-finalize) paths: link → lock → manifest → upload → server
+// finalize → status + checksum-gated retention → detach if active. Throws on
+// failure (status reverted / never changed, so it can be retried).
+async function performFinalize(session, opts = {}) {
+  if (_finalizeInFlight.has(session.id)) throw new Error('Diese Session wird bereits finalisiert.');
+  _finalizeInFlight.add(session.id);
   // Finalize needs the server alive (upload + STT + transcript build). Cancel
   // any pending idle auto-stop so it can't fire mid-finalize — this also covers
   // a finalize started after /leave, when the stop was already armed.
   cancelServerStop();
+  // It also needs the control link for its whole duration (finalize_session
+  // and its reply). Hold it: otherwise the idle release armed by /leave (60 s
+  // grace) drops the socket in the middle of a re-STT that runs for minutes.
+  const releaseLink = transport.holdLink(`finalize ${session.id}`);
+  try {
+    // Before touching status/manifest/upload: an unreachable server must leave
+    // the session exactly as it was, so /finalize run can simply be retried.
+    await ensureFinalizeLink(opts.onProgress);
+    return await runFinalize(session, opts);
+  } finally {
+    _finalizeInFlight.delete(session.id);
+    // Last hold gone → the normal idle policy applies again: with no active
+    // session the link is released after the grace period.
+    releaseLink();
+    // Finalize is done (success or failure) → re-arm the idle auto-stop. A
+    // finalize started after /leave (session already detached, so nothing else
+    // re-arms it) would otherwise leave the cloud server running indefinitely.
+    // The hasWork re-check at fire time skips the stop if a session is live.
+    scheduleServerStop({ hasWork: hasServerWork });
+  }
+}
+
+// performFinalize's body, run with the control link up and held.
+async function runFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
   const prevStatus = session.status;
   session.status = SessionStatus.FINALIZING;
   SessionManager.save(session);
@@ -311,12 +383,6 @@ async function performFinalize(session, { channelName = null, guildName = null, 
     session.status = prevStatus;
     SessionManager.save(session);
     throw e;
-  } finally {
-    // Finalize is done (success or failure) → re-arm the idle auto-stop. A
-    // finalize started after /leave (session already detached, so nothing else
-    // re-arms it) would otherwise leave the cloud server running indefinitely.
-    // The hasWork re-check at fire time skips the stop if a session is live.
-    scheduleServerStop({ hasWork: hasActiveSession });
   }
 }
 
@@ -329,6 +395,7 @@ async function handleAutoFinalize({ sessionId }) {
     : SessionManager.findByWireId(sessionId);
   if (!session) { warn('auto-finalize: unknown session', sessionId); return; }
   if (session.status === SessionStatus.FINALIZING || session.status === SessionStatus.FINALIZED) return;
+  if (_finalizeInFlight.has(session.id)) return; // manual finalize still bringing up the link
 
   if (sessions.active && sessions.active.id === session.id && _activeVoiceChannelId) {
     const ch = client.channels.cache.get(_activeVoiceChannelId);
@@ -762,7 +829,7 @@ client.on('interactionCreate', async (i) => {
         session = sessions.active;
       }
       if (!session) return i.reply({ content: 'Keine Session zum Finalisieren (gib eine Session-ID an oder starte mit /join).', flags: MessageFlags.Ephemeral });
-      if (session.status === SessionStatus.FINALIZING) {
+      if (session.status === SessionStatus.FINALIZING || _finalizeInFlight.has(session.id)) {
         return i.reply({ content: 'Diese Session wird bereits finalisiert.', flags: MessageFlags.Ephemeral });
       }
       // FINALIZED sessions may be re-finalized (rebuilds from the retained

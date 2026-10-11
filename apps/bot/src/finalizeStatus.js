@@ -1,4 +1,5 @@
 import { warn, debug } from './logger.js';
+import { DISCORD_MAX_CHARS, clampDiscordText } from './discordText.js';
 
 // One live status message per finalize in a Discord text channel.
 //
@@ -26,8 +27,15 @@ export class FinalizeStatus {
     this.chain = Promise.resolve();
   }
 
+  // Discord rejects a message over 2000 chars — an oversized final edit would
+  // leave the status stuck on its last progress line, so never send one.
   _render(text) {
-    return this.header ? `${this.header}\n${text}` : text;
+    return clampDiscordText(this.header ? `${this.header}\n${text}` : text);
+  }
+
+  // Characters left for the body below the header (finalizeResultText budget).
+  textRoom() {
+    return DISCORD_MAX_CHARS - (this.header ? this.header.length + 1 : 0);
   }
 
   _enqueue(fn) {
@@ -89,6 +97,37 @@ export class FinalizeStatus {
     this.pending = null;
     return this._enqueue(() => (this.message ? this._edit(text) : this._postLate(text)));
   }
+}
+
+const SUMMARY_PREFIX = '📝 **Zusammenfassung:** ';
+const SUMMARY_MORE = ' … (vollständig: summary.md im Archiv)';
+const SUMMARY_MAX_CHARS = 1100;
+
+// Final status of a successful finalize. Fits `maxChars` (one Discord message,
+// minus the status header): the session recap is shortened to the room the
+// other lines leave — long archive paths plus retention/pull notes plus an
+// 1100-char recap could otherwise pass the limit and the edit was rejected.
+export function finalizeResultText(result, retentionNote = '', { reFinalize = false, maxChars = DISCORD_MAX_CHARS } = {}) {
+  const lines = [
+    `✅ ${reFinalize ? 'Neu finalisiert' : 'Finalisiert'}.`,
+    `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
+    `Transkript: \`${result.transcriptPath}\``,
+    `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
+    retentionNote.trim(),
+  ].filter(Boolean);
+  const summary = String(result.summary ?? '').trim();
+  if (summary) {
+    const room = maxChars - lines.join('\n').length - 1 - SUMMARY_PREFIX.length;
+    if (summary.length <= Math.min(room, SUMMARY_MAX_CHARS)) {
+      lines.push(SUMMARY_PREFIX + summary);
+    } else {
+      const cut = Math.min(room - SUMMARY_MORE.length, SUMMARY_MAX_CHARS);
+      lines.push(cut >= 100
+        ? `${SUMMARY_PREFIX}${summary.slice(0, cut).trimEnd()}${SUMMARY_MORE}`
+        : '📝 Zusammenfassung: summary.md im Archiv');
+    }
+  }
+  return clampDiscordText(lines.join('\n'), maxChars);
 }
 
 const PHASE_TEXT = {

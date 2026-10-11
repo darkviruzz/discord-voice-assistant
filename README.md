@@ -247,10 +247,12 @@ Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster 
 
 #### LLM
 
+Anbieter-Wahl (`LLM_PROVIDER=ollama|openai`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_MS`) und die übrigen Provider (STT, TTS, Embeddings): [`docs/providers.md`](docs/providers.md).
+
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434` | URL des Ollama-Servers. |
-| `OLLAMA_MODEL` | `llama3` | Zu verwendendes Ollama-Modell. Muss zuvor mit `ollama pull <modell>` geladen worden sein (z. B. `llama3.2`). |
+| `OLLAMA_MODEL` | `llama3.2` | Zu verwendendes Ollama-Modell. Muss zuvor mit `ollama pull <modell>` geladen worden sein. |
 | `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. Relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`). Hat Vorrang vor `SYSTEM_PROMPT`. |
 | `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
 | `HISTORY_TURNS` | `6` | Anzahl der Gesprächs-Runden (User+Assistant je = 1 Turn), die als Kontext an Ollama übergeben werden. Höhere Werte = besserer Kontext, aber mehr Token-Verbrauch. |
@@ -268,11 +270,11 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `LIVE_FOLD_CHARS` | `3000` | Wie viele Zeichen pro Faltung (vom ältesten Ende) in die Zusammenfassung wandern. |
 | `LIVE_RENDER_MAX_CHARS` | `6000` | Obergrenze der Zeichen, die das Live-Transkript im Prompt belegt (neueste Zeilen bevorzugt). |
 | `LIVE_FOLD_MIN_INTERVAL_MS` | `0` | Mindestabstand zwischen zwei Faltungen (Drosselung). `0` = keine Drosselung. |
-| `SUMMARY_MODEL` | *(= `OLLAMA_MODEL`)* | Optionales separates Ollama-Modell für die Zusammenfassung. Leer = dasselbe Modell wie für Antworten. |
+| `SUMMARY_MODEL` | *(= Antwort-Modell)* | Optionales separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize. Leer = dasselbe Modell wie für Antworten (`OLLAMA_MODEL` bzw. `LLM_MODEL`). |
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
 | `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der Vault-Suche (RAG) und Basis für ein relatives `CAMPAIGN_CONTEXT_FILE`. |
 | `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn RAG aus ist, der Index noch nicht steht oder die Vault-Suche nichts liefert). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
-| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für RAG-Treffer und den Vault-Kontext des `/join`-Briefings. |
+| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für die RAG-Treffer pro Anfrage. |
 
 #### RAG (semantische Vault-Suche, Phase 4)
 
@@ -284,7 +286,7 @@ Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines J
 | `EMBED_PROVIDER` | `ollama` | `ollama` (`/api/embed` auf `OLLAMA_URL`) oder `openai` (OpenAI-kompatibles `/embeddings` auf `EMBED_BASE_URL` inkl. `/v1`, optional `EMBED_API_KEY`). |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding-Modell (bei Ollama vorher `ollama pull nomic-embed-text`). Wechsel → Index wird verworfen und neu aufgebaut. |
 | `EMBED_KEEP_ALIVE` | `30m` | Wie lange Ollama das Embedding-Modell geladen hält (sonst reißt die erste Abfrage nach einer Pause das Timeout). |
-| `RAG_TIMEOUT_MS` | `800` | Zeitbudget pro RAG-Abfrage (Embedding der Frage + Suche); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. Das `/join`-Briefing bekommt mindestens 5000 ms. |
+| `RAG_TIMEOUT_MS` | `800` | Zeitbudget pro RAG-Abfrage (Embedding der Frage + Suche); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. |
 | `RAG_SCORE_THRESHOLD` | — | Maximale Cosine-Distanz (1 − Cosinus-Ähnlichkeit, 0–2, kleiner = ähnlicher) eines Treffers. Leer = kein Filter. Startwert ~0.5 (nomic-embed-text: gute Treffer meist ~0.2–0.45; `DEBUG=1` loggt die Distanzen). Treffer werden wie `CAMPAIGN.md` auf `CAMPAIGN_CONTEXT_MAX_CHARS` gekappt. |
 | `RAG_MAX_CHUNK_CHARS` | `2000` | Max. Zeichen pro Vault-Abschnitt (Notizen werden an `##` geteilt, lange Abschnitte zusätzlich). Änderung → jede Notiz wird einmal neu eingebettet. |
 | `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
@@ -296,7 +298,7 @@ Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines J
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
-| `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `elevenlabs` für die ElevenLabs-Cloud-API. |
+| `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `openai` für einen OpenAI-kompatiblen `/audio/speech`-Server, `elevenlabs` für die ElevenLabs-Cloud-API (Details: [`docs/providers.md`](docs/providers.md)). |
 | `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /tts/synthesize` mit JSON `{text, model, speaker_id, length_scale, noise_scale, noise_w_scale}` → chunked `audio/pcm-s16le`. |
 | `ELEVENLABS_API_KEY` | — | API-Key für ElevenLabs (nur bei `TTS_PROVIDER=elevenlabs`). |
 | `ELEVENLABS_VOICE_ID` | `EXAVITQu4vr4xnSDxMaL` | Voice-ID für ElevenLabs. Standard ist eine englische Männerstimme; für Deutsch eine passende Stimme aus dem ElevenLabs-Katalog wählen. |
@@ -501,6 +503,7 @@ Siehe `docs/phase-3-manual-tests.md` für die vollständige manuelle Test-Checkl
 * Wake-Word sprechen: *„Rabenauge, wer ist Baron Kelthur?"* → Bot antwortet per Sprache im Voice-Channel.
 * Textfrage ohne Vorlesen: `/ask frage:Wer ist Baron Kelthur?` oder `@Botname Wer ist Baron Kelthur?`.
 * Textfrage mit Voice-Ausgabe: `/ask frage:Wer ist Baron Kelthur? tts:true`. Der Textpfad nutzt dieselbe LLM-/History-Pipeline wie Wake-Word-Anfragen, überspringt aber STT/Wake-Word-Erkennung.
+* Rückblick: `/recap` (optional `tts:true`) — Rabenauge fasst die zuletzt finalisierte Session zusammen (aus deren `summary.md`). Getippte Fragen werden immer im Kanal beantwortet, unabhängig von `DISCORD_POST_REPLIES`.
 
 Nach Änderungen an Slash-Commands muss der Bot neu registriert werden:
 
@@ -1005,7 +1008,7 @@ Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Mo
 1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Diagnostik.
 2. **Phase 2 — Core Workflows** *(implementiert, Praxistest ausstehend)*: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log mit Schema-v1-Struktur.
 3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
-4. **Phase 4 — RAG + Obsidian**: Vault-Suche im Node-Server (reines JS, Ollama-/OpenAI-kompatible Embeddings, persistenter Vektor-Index — ursprünglich als Python-Dienst mit FastAPI + ChromaDB gebaut), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
+4. **Phase 4 — RAG + Obsidian**: Vault-Suche im Node-Server (reines JS, Ollama-/OpenAI-kompatible Embeddings, persistenter Vektor-Index — ursprünglich als Python-Dienst mit FastAPI + ChromaDB gebaut), Vault-Kontext pro Anfrage; „Was war letztes Mal?“ bzw. `/recap` aus der Session-Zusammenfassung des letzten Finalize (auf Nachfrage — das frühere Vault-Briefing bei `/join` ist entfallen).
 5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).
 
 Die Stränge **Finalize (Phase 3)** und **RAG/Obsidian (Phase 4)** sind voneinander unabhängig und können parallel entwickelt werden.

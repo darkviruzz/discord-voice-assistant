@@ -108,7 +108,11 @@ test('TTS vars are documented in apps/server/.env.example with the catalog defau
 
 test('TTS_* vars are passed through to the server container and listed in deploy/.env.example', () => {
   const compose = fs.readFileSync(path.join(repoDir, 'deploy/docker-compose.yml'), 'utf8');
-  const serverBlock = compose.slice(compose.indexOf('\n  server:'), compose.indexOf('\n  rag:'));
+  // The server's own `environment:` block (the rag service this used to end
+  // at was removed — indexOf('\n  rag:') = -1 sliced to the end of the file).
+  const start = compose.indexOf('\n  server:');
+  const serverBlock = compose.slice(start, compose.indexOf('\n    env_file:', start));
+  assert.ok(start > 0 && serverBlock.includes('TTS_PROVIDER'), 'server environment block not found');
   const deployEnv = fs.readFileSync(path.join(repoDir, 'deploy/.env.example'), 'utf8');
   // TTS_URL is fixed to the piper service inside the compose network;
   // ELEVENLABS_* stay in server.env (as before).

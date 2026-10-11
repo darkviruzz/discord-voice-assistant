@@ -1,5 +1,5 @@
 import { debug, warn } from '../logger.js';
-import { baseUrl, env, authHeaders, postJson } from './http.js';
+import { baseUrl, env, authHeaders, postJson, keepAliveParam } from './http.js';
 
 // LLM provider — one chat-completion call for every LLM use in the server
 // (wake-word/text answers, rolling summary, finalize session summary).
@@ -21,15 +21,22 @@ export function llmProvider() {
   return p === 'openai' ? 'openai' : 'ollama';
 }
 
+// Same default as the settings catalog / .env.example / the launchers, which
+// pull llama3.2 — a server without OLLAMA_MODEL asked Ollama for an
+// unpulled 'llama3' before.
+const DEFAULT_OLLAMA_MODEL = 'llama3.2';
+
 // The model used when the caller does not override it.
 export function defaultModel() {
   return llmProvider() === 'openai'
-    ? env('LLM_MODEL', env('OLLAMA_MODEL', 'llama3'))
-    : env('OLLAMA_MODEL', 'llama3');
+    ? env('LLM_MODEL', env('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL))
+    : env('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL);
 }
 
+// Empty (a field cleared in the settings panel) → default: Ollama rejects
+// keep_alive "" with HTTP 400, which failed every answer.
 function ollamaKeepAlive() {
-  return process.env.OLLAMA_KEEP_ALIVE ?? '30m';
+  return env('OLLAMA_KEEP_ALIVE', '30m');
 }
 
 // Public description for the session_meta snapshot / logs.
@@ -62,7 +69,7 @@ export async function complete({ messages, model, temperature, maxTokens, timeou
   }
 
   const base = baseUrl(env('OLLAMA_URL'), 'http://localhost:11434');
-  const body = { model: m, messages, keep_alive: ollamaKeepAlive(), stream: false };
+  const body = { model: m, messages, keep_alive: keepAliveParam(ollamaKeepAlive()), stream: false };
   const options = {};
   if (Number.isFinite(temperature)) options.temperature = temperature;
   if (Number.isFinite(maxTokens) && maxTokens > 0) options.num_predict = maxTokens;
@@ -81,7 +88,7 @@ export async function warmUp() {
   const base = baseUrl(env('OLLAMA_URL'), 'http://localhost:11434');
   const model = defaultModel();
   try {
-    await postJson('llm', `${base}/api/chat`, { model, messages: [], keep_alive: ollamaKeepAlive(), stream: false }, { timeoutMs: 120_000 });
+    await postJson('llm', `${base}/api/chat`, { model, messages: [], keep_alive: keepAliveParam(ollamaKeepAlive()), stream: false }, { timeoutMs: 120_000 });
     debug(`llm: warm-up ok (model=${model}, keep_alive=${ollamaKeepAlive()})`);
     return true;
   } catch (e) {

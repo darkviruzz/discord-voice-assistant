@@ -414,7 +414,8 @@ export const CATALOG = [
     desc: 'ollama = natives Ollama-API (OLLAMA_URL/OLLAMA_MODEL, Keep-Warm). openai = '
       + 'beliebiger OpenAI-kompatibler Server (/chat/completions) — z. B. vLLM, AMD '
       + 'Lemonade, llama.cpp-Server, LM Studio — über LLM_BASE_URL/LLM_MODEL. Gilt für '
-      + 'Antworten, rollende Zusammenfassung und Briefing. Wird pro Anfrage gelesen.',
+      + 'Antworten, rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize. '
+      + 'Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_BASE_URL',
@@ -539,8 +540,9 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MODEL',
     label: 'Modell für Zusammenfassung', type: 'string', def: '', applyMode: 'live',
-    desc: 'Separates Ollama-Modell für die rollende Zusammenfassung. Leer = OLLAMA_MODEL '
-      + 'verwenden. Wird pro Zusammenfassung gelesen.',
+    desc: 'Separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung '
+      + 'beim Finalize (beide LLM-Anbieter). Leer = Antwort-Modell (OLLAMA_MODEL bzw. '
+      + 'LLM_MODEL). Wird pro Zusammenfassung gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MAX_CHARS',
@@ -567,8 +569,8 @@ export const CATALOG = [
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'CAMPAIGN_CONTEXT_MAX_CHARS',
     label: 'Max. Zeichen Kampagnen-Kontext', type: 'number', def: '6000', applyMode: 'live',
     desc: 'Obergrenze der Zeichen (vom Dateianfang), die aus der Kampagnen-Kontext-Datei '
-      + 'übernommen werden. Gilt genauso für die RAG-Treffer pro Wake-Word-Query und für '
-      + 'den Vault-Kontext des /join-Briefings (beste Treffer zuerst). Wird beim Laden gelesen.',
+      + 'übernommen werden. Gilt genauso für die RAG-Treffer pro Anfrage (beste Treffer '
+      + 'zuerst). Wird beim Laden gelesen.',
   },
 
   // ======================= SERVER: RAG (Vault-Suche) ========================
@@ -589,8 +591,7 @@ export const CATALOG = [
     label: 'RAG-Timeout (ms)', type: 'number', def: '800', applyMode: 'live',
     desc: 'Zeitbudget pro RAG-Abfrage in ms (Embedding der Frage + Suche im Index); danach '
       + 'Fallback auf CAMPAIGN.md, die Voice-Pipeline wartet also höchstens so lange auf RAG. '
-      + 'Das /join-Briefing läuft abseits der Pipeline und bekommt mindestens 5000 ms. Wird '
-      + 'pro Anfrage gelesen.',
+      + 'Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_SCORE_THRESHOLD',

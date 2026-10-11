@@ -16,7 +16,9 @@ import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import { pullArchive, startArchiveCleanup } from './archivePuller.js';
 import { LeaveFinalizeScheduler } from './leaveFinalize.js';
-import { FinalizeStatus, formatProgress } from './finalizeStatus.js';
+import { FinalizeStatus, formatProgress, finalizeResultText } from './finalizeStatus.js';
+import { chatMessageText, splitDiscordMessage } from './discordText.js';
+import { AnswerHolds } from './answerHolds.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -162,6 +164,10 @@ function displayNameFor(member, user) {
   return member?.displayName || member?.nick || user?.globalName || user?.username || user?.id || 'Spieler';
 }
 
+// Typed questions keep the on-demand link up until their chat answer is in
+// (see answerHolds.js) — the idle release would otherwise drop it first.
+const answerHolds = new AnswerHolds({ hold: (reason) => transport.holdLink(reason) });
+
 function askServer({ question, tts = false, channelId, userId, userDisplayName, source = 'slash' }) {
   // Share voice-session history only when the question comes from the same
   // channel the bot is currently joined to. Other text channels keep their
@@ -169,7 +175,7 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
   const sessionId = (channelId && channelId === _activeVoiceChannelId)
     ? sessions.wireSessionId()
     : null;
-  return transport.textQuery({
+  const sent = transport.textQuery({
     sessionId,
     question,
     tts,
@@ -178,6 +184,8 @@ function askServer({ question, tts = false, channelId, userId, userDisplayName, 
     userDisplayName,
     source,
   });
+  if (sent) answerHolds.add(channelId);
+  return sent;
 }
 
 // Idle auto-finalize for LEFT sessions (see leaveFinalize.js for why the bot
@@ -242,19 +250,18 @@ client.once('clientReady', async () => {
   transport.onFinalizeRequest((req) => { handleAutoFinalize(req).catch((e) => warn('auto-finalize:', e.message)); });
 
   transport.onChatMessage(async (msg) => {
+    answerHolds.settle(msg.channelId);
     const targetChannel = msg.channelId
       ? await client.channels.fetch(msg.channelId).catch(() => null)
       : _textChannel;
     if (!targetChannel?.send) return;
-    const speaker = msg.userDisplayName || 'Spieler';
-    const assistant = msg.assistantName || 'Rabenauge';
-    let text;
-    if (msg.isStop) {
-      text = `**[${speaker}]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
-    } else {
-      text = `**[${speaker}]** ${msg.question}\n**[${assistant}]** ${msg.answer ?? ''}`;
+    // A long answer (a /recap, or a long /ask question + answer) can exceed
+    // Discord's 2000-char limit — one oversized send was rejected and the
+    // answer lost. Post it in order as several messages instead.
+    for (const part of splitDiscordMessage(chatMessageText(msg))) {
+      try { await targetChannel.send(part); }
+      catch (e) { warn('chat_message send failed:', e.message); return; }
     }
-    targetChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
   });
 });
 
@@ -324,18 +331,6 @@ async function resolveSessionTextChannel(session, preferred = null) {
   return _textChannel?.send ? _textChannel : null;
 }
 
-function finalizeResultText(session, result, retentionNote = '', { reFinalize = false } = {}) {
-  return [
-    `✅ ${reFinalize ? 'Neu finalisiert' : 'Finalisiert'}.`,
-    `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
-    `Transkript: \`${result.transcriptPath}\``,
-    `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
-    retentionNote.trim(),
-    // Discord caps a message at 2000 chars; the full recap is in the archive (summary.md).
-    result.summary ? `📝 **Zusammenfassung:** ${result.summary.length > 1100 ? `${result.summary.slice(0, 1100).trimEnd()} … (vollständig: summary.md im Archiv)` : result.summary}` : '',
-  ].filter(Boolean).join('\n');
-}
-
 // Session ids with a performFinalize in flight. The persisted FINALIZING
 // status is only set once the link is up (so an unreachable server leaves the
 // session untouched); this closes the window before that against a second
@@ -377,7 +372,7 @@ async function performFinalize(session, opts = {}) {
     // the session exactly as it was, so /finalize run can simply be retried.
     await ensureFinalizeLink(onProgress);
     const out = await runFinalize(session, { ...opts, onProgress });
-    await status.done(finalizeResultText(session, out.result, out.retentionNote, { reFinalize: opts.fromArchive }));
+    await status.done(finalizeResultText(out.result, out.retentionNote, { reFinalize: opts.fromArchive, maxChars: status.textRoom() }));
     return out;
   } catch (e) {
     await status.fail(`❌ Finalize fehlgeschlagen: ${e.message}\nDie lokalen Aufnahmen bleiben erhalten — erneut mit \`/finalize run session:${session.id}\`.`);
@@ -466,6 +461,9 @@ async function runFinalize(session, { channelName = null, guildName = null, onPr
     }
 
     if (sessions.active && sessions.active.id === session.id) detachActiveSession();
+    // Finalized = over for the server link too (no revival on the next
+    // reconnect, later /recap not logged into this session).
+    transport.endSessionIfCurrent(String(session.startedAt));
     return { result, fullyVerified, retentionNote: retentionNote + archiveNote };
   } catch (e) {
     session.status = prevStatus;
@@ -958,7 +956,7 @@ client.on('interactionCreate', async (i) => {
           fromArchive: reFinalize,
           reason: reFinalize ? 'neu (aus dem Archiv)' : null,
         });
-        await i.editReply({ content: finalizeResultText(session, result, retentionNote, { reFinalize }) }).catch(() => {});
+        await i.editReply({ content: finalizeResultText(result, retentionNote, { reFinalize }) }).catch(() => {});
       } catch (e) {
         error(e);
         await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` }).catch(() => {});

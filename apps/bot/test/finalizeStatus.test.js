@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FinalizeStatus, formatProgress } from '../src/finalizeStatus.js';
+import { FinalizeStatus, formatProgress, finalizeResultText } from '../src/finalizeStatus.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,4 +64,41 @@ test('formatProgress renders server phases in German', () => {
   assert.match(formatProgress({ phase: 'joined' }), /läuft bereits/);
   assert.match(formatProgress({ phase: 'audio' }), /Audio-Archiv/);
   assert.equal(formatProgress({ phase: 'weird' }), '⏳ weird …');
+});
+
+// Worst case: a checkout deep under a OneDrive folder (archive paths ~235
+// chars, still below Windows' MAX_PATH), incomplete uploads + archive-pull
+// notes, a 2500-char recap. The old fixed 1100-char recap cap gave a final
+// edit of 2003 chars — Discord rejects > 2000, the edit failed and the status
+// stayed on its last progress line.
+test('final status stays within one Discord message; the recap is shortened, not the facts', async () => {
+  const id = '2026-10-11T19-00-00-000Z';
+  const base = 'C:\\Users\\Markus.Mustermann\\OneDrive - Universität Musterstadt\\Dokumente\\Rollenspiel\\Greyhawk Kampagne 2026 (Spielrunde Donnerstag)\\Server-Ablage\\discord-voice-assistant-main\\apps\\server';
+  const result = {
+    userCount: 1234, spanCount: 1789, audioOk: true, audioCount: 1235,
+    transcriptPath: `${base}\\transcripts\\${id}\\transcript.md`,
+    archiveDir: `${base}\\archive\\${id}`,
+    summary: 'Die Gruppe erreichte Burg Rabenstein und verhandelte lange mit Baron Kelthur über das Lösegeld. '.repeat(26).trim(),
+  };
+  const notes = ' ⚠️ 2 fehlende / 1 fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.'
+    + ' ⚠️ Archiv-Pull unvollständig (3 Datei(en) fehlgeschlagen) — stop.sh --backup bleibt als Netz.';
+  const ch = fakeChannel();
+  const s = new FinalizeStatus({ resolveChannel: async () => ch, header: `🗄️ **Finalize** Session \`${id}\` — automatisch (Inaktivität nach /leave)`, minIntervalMs: 0 });
+  await s.start('⏳ Startet …');
+  await s.done(finalizeResultText(result, notes, { maxChars: s.textRoom() }));
+  const final = ch.log.at(-1)[1];
+  assert.ok(final.length <= 2000, `final status has ${final.length} chars`);
+  assert.ok(final.includes(result.transcriptPath) && final.includes(result.archiveDir), 'paths are never cut');
+  assert.ok(final.includes('Archiv-Pull unvollständig'), 'notes are kept');
+  assert.match(final, /📝 \*\*Zusammenfassung:\*\* Die Gruppe .* … \(vollständig: summary\.md im Archiv\)$/s);
+
+  // Short paths: the recap keeps its usual 1100 chars.
+  const short = finalizeResultText({ ...result, transcriptPath: '/data/t.md', archiveDir: '/data/a' }, '', { maxChars: 1900 });
+  assert.equal(short.split('📝 **Zusammenfassung:** ')[1], `${result.summary.slice(0, 1100).trimEnd()} … (vollständig: summary.md im Archiv)`);
+  // A short recap is shown whole; no recap → no line.
+  assert.match(finalizeResultText({ ...result, summary: 'Kurz.' }, ''), /📝 \*\*Zusammenfassung:\*\* Kurz\.$/);
+  assert.ok(!finalizeResultText({ ...result, summary: null }, '').includes('Zusammenfassung'));
+  // Any oversized text (e.g. a long error) is clamped rather than rejected.
+  await s.fail('x'.repeat(5000));
+  assert.ok(ch.log.at(-1)[1].length <= 2000);
 });

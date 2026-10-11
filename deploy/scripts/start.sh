@@ -117,21 +117,25 @@ else
   fi
 fi
 
-step "Starting Ollama and pulling model: $OLLAMA_MODEL"
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'; }
+step "Starting Ollama"
 "${COMPOSE[@]}" up -d ollama
 # Ollama runs without a model; pull into the persistent volume.
 for _ in $(seq 1 30); do
   "${COMPOSE[@]}" exec -T ollama ollama list >/dev/null 2>&1 && break
   sleep 2
 done
-"${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || warn "ollama pull failed — pull manually later"
+# LLM_PROVIDER=openai: answers come from another server — no model to pull.
+if [ "$(lc "${LLM_PROVIDER:-ollama}")" != "openai" ]; then
+  step "Pulling LLM model: $OLLAMA_MODEL"
+  "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || warn "ollama pull failed — pull manually later"
+fi
 
 # Vault RAG (inside the server) embeds the campaign vault with its own model in
 # the same ollama instance. Skipped when RAG is switched off or the embeddings
 # come from another (OpenAI-compatible) server. Same "off" spellings as the
 # server's ragEnabled(). Without the model the server just keeps using the
 # static CAMPAIGN.md (and retries indexing with backoff).
-lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'; }
 case "$(lc "${RAG_ENABLED:-true}")" in
   false|0|off|no) rag_on=0 ;;
   *) rag_on=1 ;;

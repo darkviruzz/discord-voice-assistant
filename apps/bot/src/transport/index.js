@@ -288,6 +288,18 @@ export function sessionEnd(sessionId) {
   _instance.downlink.close();
 }
 
+// The session is over for good (finalized): stop carrying it on the link —
+// but only if it IS the link's current session (finalizing an older session
+// by id must not end a live one). Before, a finalized session stayed current:
+// every later reconnect re-sent its session_start (the server revived it and
+// logged a 2nd session_meta into its JSONL) and typed questions afterwards —
+// typically /recap — were logged into the finalized session. → ended?
+export function endSessionIfCurrent(sessionId) {
+  if (!_instance || sessionId == null || _instance.currentSessionId !== String(sessionId)) return false;
+  sessionEnd(String(sessionId));
+  return true;
+}
+
 export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
   if (!_instance) return;
   try { _instance.uplink.sendFrame({ sessionId, userId, tsMs, opus }); }

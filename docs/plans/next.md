@@ -58,6 +58,15 @@ Live-Test gemergt.
 - **STT-Modell:** `ggml-medium-q5_0` → `large-v3-turbo` testen (Setup bietet
   den Download an); mit echten Aufnahmen per `bench:stt` vergleichen.
 - **Voice-Clone für Rabenauge:** offen (Owner).
+- **Kleinkram aus dem Integrations-Review (bestehend, nicht blockierend):**
+  getippte Fragen aus einem *anderen* Textkanal landen während einer
+  Voice-Session in deren Verlauf (Bot und Server müssten die Session-ID pro
+  Kanal mitführen); das Wake-Word des Bots (`WAKE_WORD`) schlägt beim
+  Transkript ein im Panel gesetztes Server-Wake-Word; Code-Fallbacks
+  `WHISPER_LANGUAGE`=auto / `WHISPER_TEMPERATURE`=0.2 weichen vom Katalog
+  (de / 0.1) ab — wirkt nur ohne `.env`; der PowerShell-Env-Parser entfernt
+  keine Inline-`# Kommentare` wie dotenv und ignoriert `DATA_DIR` für den
+  Pfad der Panel-Overrides.
 - **Lizenz** des öffentlichen Repos: offen (Owner).
 
 ## Später (Phasen)

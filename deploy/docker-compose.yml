@@ -137,6 +137,13 @@ services:
       # Campaign context source (pulled into the campaign volume by start.sh).
       OBSIDIAN_VAULT_PATH: /data/campaign
       CAMPAIGN_CONTEXT_FILE: ${CAMPAIGN_CONTEXT_FILE:-CAMPAIGN.md}
+      # STT provider (default: the whisper service above via WHISPER_URL).
+      STT_PROVIDER: ${STT_PROVIDER:-whispercpp}
+      STT_BASE_URL: ${STT_BASE_URL:-}
+      STT_MODEL: ${STT_MODEL:-}
+      STT_API_KEY: ${STT_API_KEY:-}
+      STT_LANGUAGE: ${STT_LANGUAGE:-}
+      STT_TIMEOUT_MS: ${STT_TIMEOUT_MS:-120000}
     env_file:
       - path: ./server.env
         required: false

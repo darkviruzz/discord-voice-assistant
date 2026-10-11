@@ -218,44 +218,99 @@ export const CATALOG = [
       + 'behalten. Wird beim Finalize gelesen.',
   },
 
-  // ======================= SERVER: STT (Whisper) ============================
+  // ======================= SERVER: STT ======================================
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_URL',
+    scope: 'server', group: 'Server · STT', key: 'STT_PROVIDER',
+    label: 'STT-Anbieter', type: 'enum', enumValues: ['whispercpp', 'openai'],
+    def: 'whispercpp', applyMode: 'live',
+    desc: 'Spracherkennungs-Backend. whispercpp = whisper.cpp-Server über dessen '
+      + 'eigenen /inference-Endpunkt (WHISPER_URL, Standard). openai = beliebiger '
+      + 'OpenAI-kompatibler /audio/transcriptions-Endpunkt (STT_BASE_URL, STT_MODEL, '
+      + 'STT_API_KEY) — z. B. vLLM mit Whisper oder Voxtral, AMD Lemonade, Speaches '
+      + 'oder whisper.cpp mit --inference-path /v1/audio/transcriptions. Wird pro '
+      + 'STT-Anfrage gelesen (der nächste Streaming-Tick nutzt schon den neuen Anbieter).',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_BASE_URL',
+    label: 'OpenAI-kompatible STT-URL', type: 'string', def: '', applyMode: 'live',
+    desc: 'Basis-URL inkl. /v1 (z. B. http://localhost:8000/v1) — angehängt wird '
+      + '/audio/transcriptions. Nur bei STT_PROVIDER=openai; leer = Fehler bei jeder '
+      + 'STT-Anfrage. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_MODEL',
+    label: 'STT-Modell (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Modellname im Feld "model" der Anfrage (z. B. openai/whisper-large-v3 oder '
+      + 'mistralai/Voxtral-Mini-3B-2507 bei vLLM, whisper-1 bei OpenAI). Leer = Feld '
+      + 'weglassen, der Server nimmt sein Standardmodell (vLLM: das geladene Modell; '
+      + 'whisper.cpp ignoriert es ohnehin). Nur bei STT_PROVIDER=openai. Wird pro '
+      + 'STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_API_KEY',
+    label: 'STT API-Key (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für den OpenAI-kompatiblen STT-Server (bei '
+      + 'STT_PROVIDER=openai; lokale Server brauchen meist keinen). Secret — hier nur '
+      + 'Status sichtbar; Änderung über .env. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_TIMEOUT_MS',
+    label: 'STT-Timeout (ms)', type: 'number', def: '120000', applyMode: 'live',
+    desc: 'Maximale Dauer einer STT-Anfrage inkl. Upload und Lesen der Antwort, für '
+      + 'beide Anbieter. Danach schlägt die Anfrage mit "stt: timeout" fehl: ein '
+      + 'Streaming-Tick wird übersprungen; scheitert der Abschluss-Durchlauf, fehlt die '
+      + 'Äußerung im Live-Transkript (das Finalize transkribiert sie später erneut). '
+      + '0 = kein Timeout. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_URL',
     label: 'Whisper-Server-URL', type: 'string', def: 'http://localhost:8080',
     applyMode: 'live',
     desc: 'Basis-URL des whisper.cpp-Servers, an den Audio zur Transkription gesendet '
-      + 'wird. Wird pro STT-Anfrage neu gelesen.',
+      + 'wird (POST /inference; bei STT_PROVIDER=whispercpp). Wird pro STT-Anfrage '
+      + 'neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_LANGUAGE',
+    scope: 'server', group: 'Server · STT', key: 'STT_LANGUAGE',
+    label: 'Erkennungssprache (anbieterneutral)', type: 'enum',
+    enumValues: ['', 'de', 'en', 'auto'], def: '', applyMode: 'live',
+    desc: 'Sprachcode für die Spracherkennung, gilt für beide Anbieter. de/en erzwingen '
+      + 'die Sprache, auto lässt das Modell raten. Leer = WHISPER_LANGUAGE verwenden '
+      + '(den lesen auch die Startskripte für den whisper.cpp-Server). Wird pro '
+      + 'STT-Anfrage neu gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_LANGUAGE',
     label: 'Erkennungssprache', type: 'enum', enumValues: ['de', 'en', 'auto'],
     def: 'de', applyMode: 'live',
     desc: 'Sprachcode für die Spracherkennung. de/en erzwingen die Sprache, auto lässt '
-      + 'Whisper raten. Wird pro STT-Anfrage neu gelesen.',
+      + 'Whisper raten. Wird verwendet, solange STT_LANGUAGE leer ist (gilt dann auch '
+      + 'für STT_PROVIDER=openai). Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_TEMPERATURE',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_TEMPERATURE',
     label: 'STT-Sampling-Temperatur', type: 'number', def: '0.1', applyMode: 'live',
-    desc: 'Sampling-Temperatur der Erkennung. Werte > 0 liefern deutlich brauchbarere '
-      + 'no_speech_prob-Werte; 0.1 ist ein konservativer, auf de_DE getesteter Default. '
-      + 'Wird pro STT-Anfrage neu gelesen.',
+    desc: 'Sampling-Temperatur der Erkennung (beide Anbieter). Werte > 0 liefern '
+      + 'deutlich brauchbarere no_speech_prob-Werte; 0.1 ist ein konservativer, auf '
+      + 'de_DE getesteter Default. Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_MAX_CHUNK_SECONDS',
+    scope: 'server', group: 'Server · STT', key: 'STT_MAX_CHUNK_SECONDS',
     label: 'Max. Chunk-Länge (s)', type: 'number', def: '30', applyMode: 'live',
     desc: 'Maximale Länge eines STT-Chunks, bevor an einer Stille gesplittet oder '
       + 'erzwungen geteilt wird. Wird pro STT-Anfrage neu gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_WORD_TIMESTAMPS',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_WORD_TIMESTAMPS',
     label: 'Wort-Zeitstempel anfordern', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
-    desc: 'true = wortgenaue Zeitstempel von Whisper anfordern (für präzises '
-      + 'Interrupt-Splitting im Finalize). Wird ignoriert, wenn der Whisper-Server das '
-      + 'nicht kann. Wird pro STT-Anfrage gelesen.',
+    desc: 'true = wortgenaue Zeitstempel anfordern (für präzises Interrupt-Splitting im '
+      + 'Finalize und stabile Wörter im Streaming; beide Anbieter). Wird ignoriert, wenn '
+      + 'der STT-Server das nicht kann. Wird pro STT-Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAMING',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAMING',
     label: 'Streaming-Transkription während des Sprechens', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
     desc: 'true = echtes Wort-Streaming: das wachsende Audio-Fenster wird laufend als '
@@ -265,7 +320,7 @@ export const CATALOG = [
       + 'Äußerungsende und ersetzt die Vorschau. Wird pro Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_INTERVAL_MS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_INTERVAL_MS',
     label: 'Streaming-Tick-Intervall (ms)', type: 'number', def: '1000',
     applyMode: 'restart',
     desc: 'Wie oft das aktive Fenster eines Sprechers neu transkribiert wird. Kleiner = '
@@ -274,7 +329,7 @@ export const CATALOG = [
       + 'Streaming-Loops einmalig gelesen (Neustart nötig).',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_MIN_WINDOW_MS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_MIN_WINDOW_MS',
     label: 'Streaming: Mindest-Audio vor erstem Tick (ms)', type: 'number', def: '1000',
     applyMode: 'live',
     desc: 'So viel Audio muss vorliegen, bevor der Streamer das Fenster zum ersten Mal '
@@ -282,7 +337,7 @@ export const CATALOG = [
       + 'Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_TRIM_SECONDS',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_TRIM_SECONDS',
     label: 'Streaming: Fenster-Trim ab (s)', type: 'number', def: '15', applyMode: 'live',
     desc: 'Sobald die bestätigten Wörter so viele Sekunden Audio abdecken, wird das '
       + 'Fenster an der letzten bestätigten Satzgrenze abgeschnitten und der Text '
@@ -290,7 +345,7 @@ export const CATALOG = [
       + 'GPU-Last) unabhängig von der Länge des Monologs. Wird pro Tick gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_STREAM_PROMPT',
+    scope: 'server', group: 'Server · STT', key: 'STT_STREAM_PROMPT',
     label: 'Streaming: fixierten Text als Kontext mitgeben', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
     desc: 'true = bereits fixierter Text wird Whisper als Decoder-Prompt mitgegeben, '
@@ -298,14 +353,14 @@ export const CATALOG = [
       + '(Satzanfang bekannt). Wird pro Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'STT_SILENCE_THRESH',
+    scope: 'server', group: 'Server · STT', key: 'STT_SILENCE_THRESH',
     label: 'RMS-Schwellwert Stille-Erkennung', type: 'number', def: '300', applyMode: 'live',
     desc: 'RMS-Amplituden-Schwelle für die Stille-Erkennung beim Aufteilen langer '
       + 'Äußerungen. Höher = toleranter gegenüber Hintergrundgeräuschen. Wird in der '
       + 'Pipeline pro Verarbeitung gelesen.',
   },
   {
-    scope: 'server', group: 'Server · STT (Whisper.cpp)', key: 'WHISPER_NO_SPEECH_THRESHOLD',
+    scope: 'server', group: 'Server · STT', key: 'WHISPER_NO_SPEECH_THRESHOLD',
     label: 'no_speech_prob-Schwellwert', type: 'number', def: '', applyMode: 'restart',
     note: 'Zukunftswert — derzeit im Code nicht aktiv ausgewertet (nur für Finalize/Offline-Tests vorgesehen).',
     desc: 'Optionaler Schwellwert, ab dem eine Äußerung als "keine Sprache" verworfen '

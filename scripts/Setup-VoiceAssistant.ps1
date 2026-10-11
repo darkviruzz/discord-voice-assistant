@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Geht Schritt für Schritt alle Bausteine durch (Node, Server-.env, Whisper,
-    Piper, Ollama, Obsidian-Vault, RAG, Ports, SSH-Autostart), erkennt
+    Piper, Ollama + Embedding-Modell, Obsidian-Vault, Ports, SSH-Autostart), erkennt
     vorhandene Installationen, fragt fehlende Pfade ab, prüft sie und schreibt
     das Ergebnis nach %USERPROFILE%\.config\va\deploy.env (Host-Konfiguration)
     bzw. apps\server\.env (Server-Einstellungen). Vorher wird jeweils eine
@@ -434,13 +434,17 @@ if (-not $ollamaCmd -and -not (Test-PortOpen $ollamaPort)) {
         $need = @()
         $need += $(if ($ServerEnv.Contains('OLLAMA_MODEL') -and $ServerEnv['OLLAMA_MODEL']) { $ServerEnv['OLLAMA_MODEL'] } else { 'llama3.2' })
         if ($ServerEnv.Contains('SUMMARY_MODEL') -and $ServerEnv['SUMMARY_MODEL']) { $need += $ServerEnv['SUMMARY_MODEL'] }
-        $needEmbed = $Cfg['RAG_EMBED_MODEL']
+        # Embedding-Modell der Vault-Suche (RAG läuft im Node-Server): EMBED_MODEL
+        # aus apps\server\.env bzw. dem Web-Panel, Standard nomic-embed-text.
+        # Entfällt bei RAG_ENABLED=false oder EMBED_PROVIDER=openai.
+        $needEmbed = Get-VaEmbedModel -ServerSettings (Get-VaServerSettings -RepoRoot $RepoRoot)
+        if ($needEmbed) { $need += $needEmbed }
         Add-Result 'Ollama' 'OK' "läuft ($($have.Count) Modelle)"
-        foreach ($m in ($need + @($needEmbed) | Select-Object -Unique)) {
+        foreach ($m in ($need | Select-Object -Unique)) {
             $present = $have | Where-Object { $_ -eq $m -or $_ -eq "$($m):latest" -or $_.StartsWith("$($m):") }
             if ($present) { Add-Result "Modell $m" 'OK' "$m vorhanden"; continue }
-            $isEmbed = ($m -eq $needEmbed)
-            if ($ollamaCmd -and (Read-YesNo "Modell '$m' fehlt$(if ($isEmbed) { ' (für RAG)' }). Jetzt laden (ollama pull)?" $true)) {
+            $isEmbed = ($needEmbed -and $m -eq $needEmbed)
+            if ($ollamaCmd -and (Read-YesNo "Modell '$m' fehlt$(if ($isEmbed) { ' (Embeddings der Vault-Suche)' }). Jetzt laden (ollama pull)?" $true)) {
                 $r = Invoke-Native $ollamaCmd.Source @('pull', $m)
                 if ($r.Code -eq 0) { Add-Result "Modell $m" 'OK' "$m geladen"; continue }
             }
@@ -451,7 +455,7 @@ if (-not $ollamaCmd -and -not (Test-PortOpen $ollamaPort)) {
 }
 
 # ============================================================
-# 6. Obsidian-Vault + RAG
+# 6. Obsidian-Vault (Kampagnen-Kontext + Vault-Suche/RAG)
 # ============================================================
 Write-Section '6/8  Obsidian-Vault + RAG'
 $validateVault = {
@@ -465,7 +469,7 @@ $vaultRoots = @((Join-Path $HomeDir 'Documents'), (Join-Path $HomeDir 'Obsidian'
     @(Get-ChildItem -LiteralPath $HomeDir -Filter 'OneDrive*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $vaultCands = @($Cfg['VA_VAULT_PATH']) + @(Find-Dirs -Roots $vaultRoots -Filter '.obsidian' -Depth 3 -Directory | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique)
 if (-not $Check) {
-    Write-Info 'Der Vault liefert Kampagnen-Kontext (CAMPAIGN.md) und ist die Wissensbasis für RAG.'
+    Write-Info 'Der Vault liefert Kampagnen-Kontext (CAMPAIGN.md) und ist die Wissensbasis der Vault-Suche (RAG im Node-Server).'
     $vault = Read-Value -Label 'Pfad zum Obsidian-Vault der Kampagne' -Current $Cfg['VA_VAULT_PATH'] -Validate $validateVault -Candidates $vaultCands -Optional
     Set-HostValue 'VA_VAULT_PATH' $vault
     if ($vault) { $ServerChanges['OBSIDIAN_VAULT_PATH'] = $vault }
@@ -479,7 +483,7 @@ if (-not $vault) {
     Add-Result 'Vault' 'OK' $vault
     $campaignFile = if ($ServerEnv.Contains('CAMPAIGN_CONTEXT_FILE')) { $ServerEnv['CAMPAIGN_CONTEXT_FILE'] } else { 'CAMPAIGN.md' }
     if (-not (Test-Path -LiteralPath (Join-Path $vault $campaignFile))) {
-        Add-Result 'CAMPAIGN.md' 'WARN' "$campaignFile fehlt im Vault (Fallback-Kontext leer, wenn RAG nicht antwortet)" 'CAMPAIGN.md aus dem Vault generieren lassen'
+        Add-Result 'CAMPAIGN.md' 'WARN' "$campaignFile fehlt im Vault (Fallback-Kontext leer, solange die Vault-Suche nichts liefert)" 'CAMPAIGN.md aus dem Vault generieren lassen'
     } else {
         Add-Result 'CAMPAIGN.md' 'OK' "$campaignFile vorhanden"
     }
@@ -487,52 +491,21 @@ if (-not $vault) {
         Add-Result 'Vault' 'WARN' "apps\server\.env zeigt auf anderen Vault ($($ServerEnv['OBSIDIAN_VAULT_PATH']))" 'Launcher überstimmt das; zur Konsistenz Setup ohne -Check ausführen'
     }
 
-    # --- RAG-venv ---
-    $ragPy = $Cfg['VA_RAG_PYTHON']
-    # Pakete importierbar UND chromadb >= 1.5 (requirements.txt pinnt das; ältere
-    # venvs von 0.5/0.6 öffnen den neuen Store nicht) → sonst pip install anbieten.
-    $RagProbe = 'import fastapi, uvicorn, watchdog, yaml, requests, chromadb; v = tuple(int(x) for x in chromadb.__version__.split(chr(46))[:2]); raise SystemExit(0 if v >= (1, 5) else 3)'
-    $ragReq = Join-Path $RepoRoot 'apps\rag\requirements.txt'
-    $ragOk = $false
-    if (Test-Path -LiteralPath $ragPy) {
-        $imp = Invoke-Native $ragPy @('-c', $RagProbe)
-        $ragOk = ($imp.Code -eq 0)
-    }
-    if (-not $ragOk -and -not $Check) {
-        $q = if (Test-Path -LiteralPath $ragPy) { 'RAG-venv unvollständig oder veraltet (chromadb < 1.5). Pakete installieren/aktualisieren?' } else { 'RAG-venv fehlt. Jetzt anlegen (python -m venv + pip install, dauert einige Minuten)?' }
-        if (Read-YesNo $q $true) {
-            if (-not (Test-Path -LiteralPath $ragPy)) {
-                # chromadb hinkt neuen Python-Versionen hinterher → 3.12/3.11 bevorzugen
-                $base = $null
-                foreach ($v in @('-3.12', '-3.11', '-3')) {
-                    if ((Get-Command py -ErrorAction SilentlyContinue) -and (Invoke-Native 'py' @($v, '--version')).Code -eq 0) { $base = @('py', $v); break }
-                }
-                if (-not $base -and (Get-Command python -ErrorAction SilentlyContinue)) { $base = @('python') }
-                if (-not $base) {
-                    Add-Result 'RAG' 'FAIL' 'Kein Python gefunden' 'winget install Python.Python.3.12'
-                } else {
-                    $venvDir = Split-Path -Parent (Split-Path -Parent $ragPy)
-                    $exe = $base[0]
-                    $vargs = @()
-                    if ($base.Count -gt 1) { $vargs += $base[1] }
-                    $vargs += @('-m', 'venv', $venvDir)
-                    Write-Info "Erzeuge venv: $venvDir"
-                    $null = Invoke-Native $exe $vargs
-                }
-            }
-            if (Test-Path -LiteralPath $ragPy) {
-                Write-Info 'pip install -r apps\rag\requirements.txt ...'
-                $r = Invoke-Native $ragPy @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $ragReq)
-                if ($r.Code -ne 0) { Write-Fail (($r.Output -split "`n") | Select-Object -Last 3) }
-                $ragOk = ((Invoke-Native $ragPy @('-c', $RagProbe)).Code -eq 0)
-            }
-        }
-    }
-    if ($ragOk) {
-        Add-Result 'RAG' 'OK' "venv ok ($ragPy)"
-        $ServerChanges['RAG_URL'] = $Cfg['RAG_URL'].TrimEnd('/')
+    # --- Vault-Suche (RAG) ---
+    # Kein eigener Dienst und kein Python mehr: der Node-Server indexiert den
+    # Vault selbst (Index: apps\server\data\rag) mit dem Embedding-Modell aus
+    # Abschnitt 5 und fällt auf CAMPAIGN.md zurück, solange der Index fehlt.
+    $serverSettings = Get-VaServerSettings -RepoRoot $RepoRoot
+    $embedModel = Get-VaEmbedModel -ServerSettings $serverSettings
+    if (Test-VaRagOff -ServerSettings $serverSettings) {
+        Add-Result 'RAG' 'SKIP' 'RAG_ENABLED=false → nur CAMPAIGN.md'
+    } elseif ($embedModel) {
+        Add-Result 'RAG' 'OK' "Vault-Suche im Server aktiv (Embeddings: Ollama/$embedModel)"
     } else {
-        Add-Result 'RAG' 'WARN' 'RAG-venv fehlt/unvollständig → RAG wird nicht gestartet (CAMPAIGN.md-Fallback)' "py -3.12 -m venv apps\rag\venv; apps\rag\venv\Scripts\pip install -r apps\rag\requirements.txt"
+        Add-Result 'RAG' 'OK' 'Vault-Suche im Server aktiv (Embeddings: EMBED_PROVIDER=openai)'
+    }
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot 'apps\rag')) {
+        Write-Info 'apps\rag\ ist ein Überbleibsel des alten Python-RAG-Dienstes (venv + Chroma) und kann gelöscht werden.'
     }
 }
 
@@ -543,11 +516,10 @@ Write-Section '7/8  Ports + Autostart vom Bot'
 $ports = [ordered]@{
     Whisper = (Get-VaPortFromUrl $Cfg['WHISPER_URL'] 8080)
     Piper   = (Get-VaPortFromUrl $Cfg['TTS_URL'] 5000)
-    RAG     = (Get-VaPortFromUrl $Cfg['RAG_URL'] 5001)
     Server  = [int]$Cfg['VA_SERVER_PORT']
 }
 $dupes = $ports.Values | Group-Object | Where-Object { $_.Count -gt 1 }
-if ($dupes) { Add-Result 'Ports' 'FAIL' "Port doppelt vergeben: $(($dupes | ForEach-Object { $_.Name }) -join ', ')" 'WHISPER_URL/TTS_URL/RAG_URL in deploy.env entzerren' }
+if ($dupes) { Add-Result 'Ports' 'FAIL' "Port doppelt vergeben: $(($dupes | ForEach-Object { $_.Name }) -join ', ')" 'WHISPER_URL/TTS_URL in deploy.env entzerren' }
 $expected = @('whisper-server', 'python', 'pythonw', 'node', 'ollama', 'powershell', 'pwsh')
 $conflict = $false
 if ($IsWin) {

@@ -1,6 +1,7 @@
 ﻿# va.ps1 — windows-native local profile for the `va` CLI.
 # Wraps scripts/Start-VoiceAssistant.ps1 (whisper-vulkan + piper-directml +
-# ollama + rag as native processes, node server) instead of reimplementing it.
+# ollama as native processes, node server incl. the vault RAG) instead of
+# reimplementing it.
 # Contract: docs/deploy-architecture.md.
 #
 #   ./deploy/va.ps1 setup   -> scripts/Setup-VoiceAssistant.ps1 (interaktiv)
@@ -55,7 +56,7 @@ switch ($Command) {
         $cfg = Get-VaLocalConfig -RepoRoot $RepoRoot
         $logDir = $cfg.Values['VA_LOG_DIR']
         if (-not (Test-Path $logDir)) { throw "no logs yet ($logDir missing) - run 'va.ps1 up' first" }
-        Write-Host "[va.ps1] tailing $logDir\server.log (Ctrl+C to stop; whisper.log/piper.log/rag.log live beside it)"
+        Write-Host "[va.ps1] tailing $logDir\server.log (Ctrl+C to stop; whisper.log/piper.log live beside it)"
         Get-Content -Path (Join-Path $logDir "server.log") -Tail 50 -Wait
     }
 }

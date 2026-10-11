@@ -4,19 +4,22 @@
     Startet/Stoppt alle lokalen Dienste des Discord Voice Assistant.
 
 .PARAMETER Mode
-    server  (Standard) – Whisper + Piper + RAG im Hintergrund (hidden, Logs in %TEMP%\va-logs\),
+    server  (Standard) – Whisper + Piper im Hintergrund (hidden, Logs in %TEMP%\va-logs\),
                          Node-Server im aktuellen Fenster. Strg+C beendet alles graceful.
     silent  – Alle Prozesse hidden (Autostart-tauglich, so ruft der Bot per SSH auf).
               Beenden mit "-Mode stop".
-    all     – Windows Terminal mit 4 Panes (Server / Whisper / Piper / RAG).
+    all     – Windows Terminal mit 3 Panes (Server / Whisper / Piper).
                          Live-Output + Logs (Tee). [X] killt hart, Ctrl+C im Server-Pane graceful.
-    stop    – Beendet alle Services (Whisper, Piper, RAG, Server). Ollama bleibt laufen.
+    stop    – Beendet alle Services (Whisper, Piper, Server). Ollama bleibt laufen.
     check   – Führt check-services.ps1 aus (Health-Status aller Dienste).
 
 .NOTES
     Pfade, Modelle und Ports stehen NICHT mehr in diesem Skript, sondern in
     %USERPROFILE%\.config\va\deploy.env (Layering: scripts\lib\VaLocalConfig.ps1).
     Einrichten/prüfen:  .\scripts\Setup-VoiceAssistant.ps1   bzw.   -Check
+
+    Die Vault-Suche (RAG) ist kein eigener Prozess: sie läuft im Node-Server
+    (Index in apps\server\data\rag), Embeddings liefert Ollama.
 
 .EXAMPLE
     .\scripts\Start-VoiceAssistant.ps1
@@ -56,15 +59,10 @@ $PiperUrl      = $Svc.PiperUrl
 $OllamaPort    = $Svc.OllamaPort
 $ServerPort    = $Svc.ServerPort
 
-$RagPort       = $Svc.RagPort
-$RagUrl        = $Svc.RagUrl
-$RagPython     = $Svc.RagPython
-
 $PiperSvcDir   = $Svc.PiperSvcDir
 $ServerDir     = $Svc.ServerDir
-$RagSvcDir     = $Svc.RagSvcDir
 
-# Env für Kindprozesse (Piper/RAG/Node). Gilt für diesen Prozess und wird in
+# Env für Kindprozesse (Piper/Node). Gilt für diesen Prozess und wird in
 # Hidden-/Pane-Skripte injiziert (die erben die Env nicht).
 $ChildEnv = Get-VaChildEnv -Config $VaConfig -Services $Svc
 Set-VaProcessEnv -EnvMap $ChildEnv
@@ -76,7 +74,6 @@ $LogDir     = $Svc.LogDir
 $WhisperLog = Join-Path $LogDir 'whisper.log'
 $PiperLog   = Join-Path $LogDir 'piper.log'
 $ServerLog  = Join-Path $LogDir 'server.log'
-$RagLog     = Join-Path $LogDir 'rag.log'
 if (-not (Test-Path $LogDir)) { $null = New-Item -ItemType Directory -Path $LogDir -Force }
 
 # ============================================================
@@ -225,7 +222,6 @@ function Stop-AllServices {
     Write-Step "Beende alle Services..."
     Stop-ServiceByPort -Name "Server (Node)" -Port $ServerPort -ShutdownUrl "http://localhost:$ServerPort/shutdown"
     Stop-ServiceByPort -Name "Piper"         -Port $PiperPort  -ShutdownUrl "$PiperUrl/shutdown"
-    Stop-ServiceByPort -Name "RAG"           -Port $RagPort    -ShutdownUrl "$RagUrl/shutdown"
     Stop-ServiceByPort -Name "Whisper"       -Port $WhisperPort -HardKillOnly
     Write-Ok "Stop abgeschlossen. Logs: $LogDir"
 }
@@ -251,7 +247,7 @@ function Ensure-Ollama {
 
 # Löscht alle Service-Logs (frischer Start, kein Anhängen an alte Läufe).
 function Clear-AllLogs {
-    foreach ($log in @($WhisperLog, $PiperLog, $ServerLog, $RagLog)) {
+    foreach ($log in @($WhisperLog, $PiperLog, $ServerLog)) {
         try {
             [System.IO.File]::WriteAllText($log, "", [System.Text.Encoding]::UTF8)
         } catch {
@@ -287,7 +283,7 @@ function Start-ServiceHidden {
     $tmpScript = "$env:TEMP\va-hidden-$($Name.ToLower()).ps1"
 
     # Re-inject env-vars, die der Task-Prozess sonst nicht sieht (Piper-
-    # Stimmen, RAG-Vault, Server-URLs — siehe Get-VaChildEnv).
+    # Stimmen, Vault-Pfad, Server-URLs — siehe Get-VaChildEnv).
     $envBlock = @(ConvertTo-VaEnvAssignments -EnvMap $ChildEnv)
     ($envBlock + $ScriptLines) | Set-Content -Path $tmpScript -Encoding UTF8
 
@@ -332,10 +328,9 @@ function Start-Whisper-Hidden {
     )
 }
 
-# Piper und RAG lauschen nur auf 127.0.0.1: beide haben keine Authentifizierung
-# (RAG gibt per /query Vault-Inhalte heraus, beide haben POST /shutdown) und
-# werden ausschließlich vom lokalen Node-Server angesprochen. Nach außen ist
-# nur der Node-Server (Bearer-geschützt) erreichbar.
+# Piper lauscht nur auf 127.0.0.1: keine Authentifizierung (u. a. POST
+# /shutdown) und wird ausschließlich vom lokalen Node-Server angesprochen. Nach
+# außen ist nur der Node-Server (Bearer-geschützt) erreichbar.
 function Start-Piper-Hidden {
     if (Test-Port $PiperPort) { Write-Warn "Piper läuft bereits auf Port $PiperPort"; return }
     Write-Step "Starte Piper hidden (Log: $PiperLog)..."
@@ -343,20 +338,6 @@ function Start-Piper-Hidden {
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$PiperSvcDir'"
         "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$PiperLog' -Encoding UTF8 -Append"
-    )
-}
-
-function Start-Rag-Hidden {
-    if (-not $Svc.RagEnabled) {
-        Write-Info "RAG aus (kein Vault oder kein venv konfiguriert) – Server nutzt den CAMPAIGN.md-Fallback."
-        return
-    }
-    if (Test-Port $RagPort) { Write-Warn "RAG läuft bereits auf Port $RagPort"; return }
-    Write-Step "Starte RAG hidden (Log: $RagLog)..."
-    Start-ServiceHidden -Name "rag" -LogFile $RagLog -ScriptLines @(
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
-        "Set-Location '$RagSvcDir'"
-        "& '$RagPython' -u -m uvicorn server:app --host 127.0.0.1 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$RagLog' -Encoding UTF8 -Append"
     )
 }
 
@@ -402,7 +383,7 @@ if (-not (Test-Path -LiteralPath $VaConfig.DeployEnvPath)) {
     Write-Warn "Keine Host-Konfiguration ($($VaConfig.DeployEnvPath)) – nutze Defaults."
     Write-Info "Einrichten: .\scripts\Setup-VoiceAssistant.ps1"
 }
-$portOf = @{ Whisper = $WhisperPort; Piper = $PiperPort; RAG = $RagPort }
+$portOf = @{ Whisper = $WhisperPort; Piper = $PiperPort }
 $preflight = @(Test-VaServiceConfig -Services $Svc -Config $VaConfig | Where-Object {
     -not ($portOf.ContainsKey($_.Component) -and (Test-Port $portOf[$_.Component]))
 })
@@ -433,13 +414,10 @@ if ($Mode -eq "silent") {
     Clear-AllLogs
     Start-Whisper-Hidden
     Start-Piper-Hidden
-    Start-Rag-Hidden
 
     Write-Step "Warte auf Whisper und Piper..."
     $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
     $null = Wait-ForHttp "Piper"   "$PiperUrl/health"
-    # RAG ist optional — kurzer, nicht-blockierender Health-Check.
-    $null = Wait-ForHttp "RAG"     "$RagUrl/health" -TimeoutSec 15
 
     Start-Server-Hidden
 
@@ -497,12 +475,7 @@ if ($Mode -eq "all") {
         "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
     )
 
-    $ragPane = New-PaneScript "rag" @(
-        "Set-Location '$RagSvcDir'"
-        "& '$RagPython' -u -m uvicorn server:app --host 127.0.0.1 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$RagLog'"
-    )
-
-    Write-Step "Öffne Windows Terminal mit 4 Panes..."
+    Write-Step "Öffne Windows Terminal mit 3 Panes..."
 
     # WT direkt aufrufen – Array-ArgumentList umgeht PowerShell-Reparsing.
     # Die einzigen ';' sind hier WT-Subcommand-Trenner (eigene Array-Elemente).
@@ -512,8 +485,6 @@ if ($Mode -eq "all") {
         'split-pane',  '--title', 'Whisper', '--', 'powershell', '-NoProfile', '-File', $whisperPane
         ';'
         'split-pane',  '--title', 'Piper',   '--', 'powershell', '-NoProfile', '-File', $piperPane
-        ';'
-        'split-pane',  '--title', 'RAG',     '--', 'powershell', '-NoProfile', '-File', $ragPane
     )
     Start-Process -FilePath wt -ArgumentList $wtArgs
 
@@ -538,13 +509,10 @@ if ((Test-Port $WhisperPort) -and (Test-Port $PiperPort) -and (Test-Port $Server
 Clear-AllLogs
 Start-Whisper-Hidden
 Start-Piper-Hidden
-Start-Rag-Hidden
 
 Write-Step "Warte auf Whisper und Piper..."
 $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
 $null = Wait-ForHttp "Piper"   "$PiperUrl/health"
-# RAG ist optional — kurzer, nicht-blockierender Health-Check.
-$null = Wait-ForHttp "RAG"     "$RagUrl/health" -TimeoutSec 15
 
 Write-Step "Starte Node-Server (Port $ServerPort) – Strg+C beendet alle Dienste..."
 Write-Info "Logs: $LogDir"

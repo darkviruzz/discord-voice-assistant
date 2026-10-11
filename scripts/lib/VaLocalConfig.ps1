@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Gemeinsame Konfiguration für den Windows-nativen Server-Stack
-    (whisper.cpp · Piper · Ollama · RAG · Node-Server).
+    (whisper.cpp · Piper · Ollama · Node-Server inkl. Vault-RAG).
 
 .DESCRIPTION
     Wird per Dot-Sourcing von Start-VoiceAssistant.ps1, check-services.ps1,
@@ -18,8 +18,13 @@
       4. Prozess-Env (nur für die hier bekannten Keys)
 
     deploy/.env.example wird hier bewusst NICHT gelesen: es ist auf den Docker-
-    Stack zugeschnitten (z. B. RAG_URL=http://rag:5001) und würde native
-    Dienste auf Container-Hostnamen umbiegen.
+    Stack zugeschnitten (Compose-Hostnamen, CUDA-/Image-Variablen) und würde
+    native Dienste verbiegen.
+
+    Die Vault-Suche (RAG) ist kein eigener Dienst mehr, sondern läuft im Node-
+    Server (apps/server/src/rag/). Ihre Einstellungen (RAG_ENABLED, EMBED_MODEL,
+    …) stehen deshalb in apps/server/.env bzw. im Web-Panel; der Launcher
+    exportiert nur den Vault-Pfad (VA_VAULT_PATH → OBSIDIAN_VAULT_PATH).
 #>
 
 # Keys, die der native Launcher besitzt. Nur diese werden aus der Prozess-Env
@@ -27,8 +32,8 @@
 $script:VaKnownKeys = @(
     'VA_WHISPER_DIR', 'VA_WHISPER_EXE', 'VA_WHISPER_MODEL', 'WHISPER_LANGUAGE',
     'VA_PIPER_PYTHON', 'PIPER_VOICES_DIR', 'PIPER_USE_DIRECTML', 'PIPER_DIRECTML_DEVICE',
-    'VA_VAULT_PATH', 'VA_RAG_ENABLED', 'VA_RAG_PYTHON', 'CHROMA_DIR', 'RAG_EMBED_MODEL',
-    'WHISPER_URL', 'TTS_URL', 'OLLAMA_URL', 'RAG_URL', 'VA_SERVER_PORT', 'VA_LOG_DIR'
+    'VA_VAULT_PATH',
+    'WHISPER_URL', 'TTS_URL', 'OLLAMA_URL', 'VA_SERVER_PORT', 'VA_LOG_DIR'
 )
 
 function Get-VaHomeDir {
@@ -157,14 +162,9 @@ function Get-VaDefaults {
         PIPER_USE_DIRECTML    = '1'
         PIPER_DIRECTML_DEVICE = '0'
         VA_VAULT_PATH         = ''
-        VA_RAG_ENABLED        = 'auto'
-        VA_RAG_PYTHON         = (Join-Path $RepoRoot 'apps\rag\venv\Scripts\python.exe')
-        CHROMA_DIR            = (Join-Path $RepoRoot 'apps\rag\chroma')
-        RAG_EMBED_MODEL       = 'nomic-embed-text'
         WHISPER_URL           = 'http://localhost:8080'
         TTS_URL               = 'http://localhost:5000'
         OLLAMA_URL            = 'http://localhost:11434'
-        RAG_URL               = 'http://localhost:5001'
         VA_SERVER_PORT        = '7440'
         VA_LOG_DIR            = (Join-Path (Get-VaTempDir) 'va-logs')
     }
@@ -200,6 +200,54 @@ function Get-VaLocalConfig {
     return @{ Values = $values; Sources = $sources; DeployEnvPath = $deployEnvPath; ProfilePath = $profilePath }
 }
 
+# Einstellungen des Node-Servers, so wie er sie selbst zusammensetzt:
+# apps\server\.env, darüber die im Web-Panel gespeicherten Overrides
+# (apps\server\data\config.overrides.json, Abschnitt "server"). Nur lesend,
+# best effort — eine kaputte Overrides-Datei ignoriert der Server ebenfalls.
+function Get-VaServerSettings {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $map = Read-VaEnvFile -Path (Join-Path $RepoRoot 'apps\server\.env')
+    $ovPath = Join-Path $RepoRoot 'apps\server\data\config.overrides.json'
+    if (Test-Path -LiteralPath $ovPath) {
+        try {
+            # Get-Content statt [IO.File]: der Provider versteht die '\'-Pfade
+            # auch unter pwsh auf Linux (CI-Selbsttest).
+            $json = Get-Content -LiteralPath $ovPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($json -and $json.server) {
+                foreach ($p in $json.server.PSObject.Properties) { $map[$p.Name] = [string]$p.Value }
+            }
+        } catch { }
+    }
+    return $map
+}
+
+function Get-VaSetting {
+    param([System.Collections.IDictionary]$Map, [string]$Key)
+    if ($Map -and $Map.Contains($Key)) { return ([string]$Map[$Key]).Trim() }
+    return ''
+}
+
+# RAG_ENABLED aus? Dieselben Schreibweisen wie ragEnabled() im Server
+# (apps/server/src/rag/index.js); nicht gesetzt = an. (Bewusst ohne
+# Mandatory: eine leere Map — noch keine apps\server\.env — ist gültig.)
+function Test-VaRagOff {
+    param([System.Collections.IDictionary]$ServerSettings)
+    return ((Get-VaSetting $ServerSettings 'RAG_ENABLED') -match '^(false|0|off|no)$')
+}
+
+# Embedding-Modell, das die Vault-Suche (RAG im Node-Server) in Ollama braucht,
+# oder $null, wenn keins nötig ist: RAG abgeschaltet oder Embeddings von einem
+# OpenAI-kompatiblen Server (EMBED_PROVIDER=openai). Dieselben Defaults wie
+# apps/server/src/providers/embed.js.
+function Get-VaEmbedModel {
+    param([System.Collections.IDictionary]$ServerSettings)
+    if (Test-VaRagOff -ServerSettings $ServerSettings) { return $null }
+    if ((Get-VaSetting $ServerSettings 'EMBED_PROVIDER').ToLower() -eq 'openai') { return $null }
+    $model = Get-VaSetting $ServerSettings 'EMBED_MODEL'
+    if (-not $model) { $model = 'nomic-embed-text' }
+    return $model
+}
+
 function Get-VaPortFromUrl {
     param([string]$Url, [int]$Default)
     try {
@@ -227,20 +275,10 @@ function Resolve-VaServices {
     param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$RepoRoot)
     $v = $Config.Values
     $whisperDir = $v['VA_WHISPER_DIR']
-    $vault = $v['VA_VAULT_PATH']
-    $ragPython = $v['VA_RAG_PYTHON']
-    $ragMode = ([string]$v['VA_RAG_ENABLED']).ToLower()
-    $ragWanted = $false
-    if ($ragMode -eq 'auto') {
-        $ragWanted = [bool]($vault) -and (Test-Path -LiteralPath $ragPython)
-    } else {
-        $ragWanted = Test-VaTrue $ragMode
-    }
     return [pscustomobject]@{
         RepoRoot       = $RepoRoot
         ServerDir      = (Join-Path $RepoRoot 'apps\server')
         PiperSvcDir    = (Join-Path $RepoRoot 'services\piper')
-        RagSvcDir      = (Join-Path $RepoRoot 'apps\rag')
         WhisperDir     = $whisperDir
         WhisperExe     = (Resolve-VaPath -Path $v['VA_WHISPER_EXE'] -Base $whisperDir)
         WhisperModel   = (Resolve-VaPath -Path $v['VA_WHISPER_MODEL'] -Base $whisperDir)
@@ -252,11 +290,7 @@ function Resolve-VaServices {
         PiperPort      = (Get-VaPortFromUrl $v['TTS_URL'] 5000)
         OllamaUrl      = $v['OLLAMA_URL'].TrimEnd('/')
         OllamaPort     = (Get-VaPortFromUrl $v['OLLAMA_URL'] 11434)
-        RagEnabled     = $ragWanted
-        RagPython      = $ragPython
-        RagUrl         = $v['RAG_URL'].TrimEnd('/')
-        RagPort        = (Get-VaPortFromUrl $v['RAG_URL'] 5001)
-        VaultPath      = $vault
+        VaultPath      = $v['VA_VAULT_PATH']
         ServerPort     = [int]$v['VA_SERVER_PORT']
         LogDir         = $v['VA_LOG_DIR']
     }
@@ -277,17 +311,12 @@ function Get-VaChildEnv {
         WHISPER_URL           = $Services.WhisperUrl
         TTS_URL               = $Services.PiperUrl
         OLLAMA_URL            = $Services.OllamaUrl
-        CHROMA_DIR            = $v['CHROMA_DIR']
-        EMBED_MODEL           = $v['RAG_EMBED_MODEL']
-        RAG_PORT              = [string]$Services.RagPort
     }
-    if ($Services.VaultPath) {
-        $envMap['VAULT_PATH'] = $Services.VaultPath           # apps/rag/server.py
-        $envMap['OBSIDIAN_VAULT_PATH'] = $Services.VaultPath  # CAMPAIGN.md-Fallback im Server
-    }
-    # RAG_URL nur exportieren, wenn der Dienst auch gestartet wird — sonst
-    # entscheidet weiterhin apps/server/.env (fail-soft auf CAMPAIGN.md).
-    if ($Services.RagEnabled) { $envMap['RAG_URL'] = $Services.RagUrl }
+    # Vault für den Node-Server: Wissensbasis der Vault-Suche (RAG) und Basis
+    # des CAMPAIGN.md-Fallbacks. Alle übrigen RAG-/Embedding-Einstellungen
+    # bleiben bewusst bei apps/server/.env bzw. dem Web-Panel — ein Export hier
+    # würde sie (Prozess-Env schlägt dotenv) still überstimmen.
+    if ($Services.VaultPath) { $envMap['OBSIDIAN_VAULT_PATH'] = $Services.VaultPath }
     return $envMap
 }
 
@@ -337,12 +366,9 @@ function Test-VaServiceConfig {
         }
     }
     if (-not $Services.VaultPath) {
-        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'RAG'; Message = 'VA_VAULT_PATH nicht gesetzt → RAG und Vault-Kontext aus'; Hint = $hint }
+        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = 'VA_VAULT_PATH nicht gesetzt → Vault-Suche (RAG) und Kampagnen-Kontext aus'; Hint = $hint }
     } elseif (-not (Test-Path -LiteralPath $Services.VaultPath)) {
-        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'RAG'; Message = "Vault-Pfad existiert nicht: $($Services.VaultPath)"; Hint = $hint }
-    }
-    if ($Services.VaultPath -and -not (Test-Path -LiteralPath $Services.RagPython)) {
-        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'RAG'; Message = "RAG-venv fehlt: $($Services.RagPython) → RAG übersprungen"; Hint = $hint }
+        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = "Vault-Pfad existiert nicht: $($Services.VaultPath)"; Hint = $hint }
     }
     # Elemente einzeln in die Pipeline (Aufrufer klammern mit @(...)).
     return $issues

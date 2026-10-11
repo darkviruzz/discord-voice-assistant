@@ -3,6 +3,7 @@
 .SYNOPSIS
     Health-Check aller lokalen Voice-Assistant-Dienste.
     Zeigt für jeden Service: Port-Status, HTTP-Health, PID und Detail.
+    Die Vault-Suche (RAG) läuft im Node-Server — keine eigene Zeile.
 #>
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -19,11 +20,8 @@ $Services = @(
     @{ Name = "Whisper"; Port = $Svc.WhisperPort; HealthUrl = "$($Svc.WhisperUrl)/";        HealthMatch = $null }
     @{ Name = "Piper";   Port = $Svc.PiperPort;   HealthUrl = "$($Svc.PiperUrl)/health";    HealthMatch = "ok"  }
     @{ Name = "Ollama";  Port = $Svc.OllamaPort;  HealthUrl = "$($Svc.OllamaUrl)/api/tags"; HealthMatch = $null }
+    @{ Name = "Server";  Port = $Svc.ServerPort;  HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
 )
-if ($Svc.RagEnabled) {
-    $Services += @{ Name = "RAG"; Port = $Svc.RagPort; HealthUrl = "$($Svc.RagUrl)/health"; HealthMatch = $null }
-}
-$Services += @{ Name = "Server"; Port = $Svc.ServerPort; HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
 
 $LogDir = $Svc.LogDir
 
@@ -111,12 +109,6 @@ foreach ($svc in $Services) {
         Write-Host ("{0,-12}" -f "OK") -ForegroundColor Green -NoNewline
         Write-Host (" {0,-8} {1}" -f $pidText, "Port offen") -ForegroundColor DarkGray
     }
-}
-
-if (-not $Svc.RagEnabled) {
-    Write-Host ("  {0,-9} {1,-7} " -f "RAG", "-") -NoNewline
-    Write-Host ("{0,-12}" -f "AUS") -ForegroundColor DarkGray -NoNewline
-    Write-Host (" {0,-8} {1}" -f "-", "kein Vault/venv konfiguriert (Setup-VoiceAssistant.ps1)") -ForegroundColor DarkGray
 }
 
 Write-Host ""

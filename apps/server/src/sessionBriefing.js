@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'crypto';
 import { log, warn, debug } from './logger.js';
+import { complete } from './providers/llm.js';
 import { queryRag, ragEnabled, ragConfig } from './ragClient.js';
 import { capCampaignContext } from './campaignContext.js';
 import { broadcastToAllBots } from './broadcast.js';
@@ -66,31 +67,22 @@ const BRIEFING_SYSTEM = [
   'Antworte NUR mit dem Briefing-Text, ohne Vorrede oder Formatierung.',
 ].join('\n');
 
-// One plain-text Ollama call → a short "where we left off" briefing. Returns ''
+// One plain-text LLM call → a short "where we left off" briefing. Returns ''
 // on any error (the caller treats that as "skip the Discord post").
 async function generateBriefing(summary, context) {
-  const base  = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
-  const model = process.env.OLLAMA_MODEL ?? 'llama3';
   const userContent = [
     `Zusammenfassung der letzten Sitzung:\n${summary}`,
     `Vault-Kontext:\n${context}`,
   ].join('\n\n');
   try {
-    const res = await fetch(`${base}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: BRIEFING_SYSTEM },
-          { role: 'user',   content: userContent },
-        ],
-        stream: false,
-      }),
+    const { content } = await complete({
+      messages: [
+        { role: 'system', content: BRIEFING_SYSTEM },
+        { role: 'user',   content: userContent },
+      ],
+      timeoutMs: 120_000,
     });
-    if (!res.ok) { warn(`sessionBriefing: LLM HTTP ${res.status}`); return ''; }
-    const data = await res.json();
-    return (data.message?.content ?? '').trim();
+    return content;
   } catch (e) {
     warn('sessionBriefing: LLM call failed:', e.message);
     return '';

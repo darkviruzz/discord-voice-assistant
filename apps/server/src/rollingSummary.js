@@ -12,6 +12,7 @@
 // appendLive() (pure) then maybeFold() (this module) as two distinct steps.
 
 import { log, warn, debug } from './logger.js';
+import { complete, defaultModel } from './providers/llm.js';
 import {
   liveContextEnabled, rawWindowChars, foldChars, summaryMaxChars, foldMinIntervalMs,
   windowChars, selectFoldSegment, splitForRebuild, renderForLlm, removeEntries, makeEntry,
@@ -40,7 +41,7 @@ const SUMMARY_SYSTEM = [
 
 function summaryModel() {
   const m = process.env.SUMMARY_MODEL;
-  return (m && m.trim()) ? m.trim() : (process.env.OLLAMA_MODEL ?? 'llama3');
+  return (m && m.trim()) ? m.trim() : defaultModel();
 }
 
 // Truncate a finished summary to the char budget, preferring a sentence/word cut.
@@ -55,10 +56,9 @@ function capSummary(text, limit) {
   return (lastSp >= limit * 0.6 ? head.slice(0, lastSp) : head).trimEnd();
 }
 
-// One Ollama call: fold `segment` (entry[]) into `prev` (string) → new summary.
+// One LLM call: fold `segment` (entry[]) into `prev` (string) → new summary.
 // Throws on connection/HTTP error so callers can keep the segment for a retry.
 export async function summarize(prev, segment) {
-  const base  = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
   const model = summaryModel();
   const segmentText = segment.map(lineFor).join('\n');
   const userContent = [
@@ -66,29 +66,21 @@ export async function summarize(prev, segment) {
     `Neue Gesprächsausschnitte:\n${segmentText}`,
   ].filter(Boolean).join('\n\n');
 
-  let res;
+  let raw;
   try {
-    res = await fetch(`${base}/api/chat`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: SUMMARY_SYSTEM },
-          { role: 'user',   content: userContent },
-        ],
-        stream: false,
-      }),
-    });
+    ({ content: raw } = await complete({
+      model,
+      messages: [
+        { role: 'system', content: SUMMARY_SYSTEM },
+        { role: 'user',   content: userContent },
+      ],
+      // A fold runs in the background, but a hung model must not pin the
+      // single-flight slot forever.
+      timeoutMs: 180_000,
+    }));
   } catch (e) {
-    throw new Error(`summarize: connection failed: ${e.message}`);
+    throw new Error(`summarize: ${e.message}`);
   }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`summarize: HTTP ${res.status}: ${body.slice(0, 200)}`);
-  }
-  const data = await res.json();
-  const raw  = (data.message?.content ?? '').trim();
   // An empty reply is a failed fold, not an empty history: throw so callers
   // keep the segment (maybeFold) / the raw history (rebuild) instead of
   // dropping turns that never made it into the summary.

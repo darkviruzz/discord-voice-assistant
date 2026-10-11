@@ -86,7 +86,7 @@ test('request: base system prompt, non-blank system blocks in order, trimmed his
 
 test('HTTP and connection errors are thrown with context', async () => {
   reply = { status: 500 };
-  await assert.rejects(() => chat([], 'q'), /llm: HTTP 500: boom/);
+  await assert.rejects(() => chat([], 'q'), /llm: HTTP 500 \(http:.*\/api\/chat\): boom/);
   process.env.OLLAMA_URL = 'http://127.0.0.1:1';
   await assert.rejects(() => chat([], 'q'), /llm: connection failed/);
 });

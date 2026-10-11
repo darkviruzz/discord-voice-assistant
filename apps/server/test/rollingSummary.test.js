@@ -93,9 +93,9 @@ test('summarize caps the reply at SUMMARY_MAX_CHARS, preferring a sentence bound
 
 test('summarize throws on HTTP errors and connection failures (callers keep the segment)', async () => {
   script.push({ status: 404 });
-  await assert.rejects(() => summarize('', [e('A', 'x', 1)]), /summarize: HTTP 404: model not found/);
+  await assert.rejects(() => summarize('', [e('A', 'x', 1)]), /summarize: llm: HTTP 404 \(http:.*\): model not found/);
   process.env.OLLAMA_URL = 'http://127.0.0.1:1';
-  await assert.rejects(() => summarize('', [e('A', 'x', 1)]), /summarize: connection failed/);
+  await assert.rejects(() => summarize('', [e('A', 'x', 1)]), /summarize: llm: connection failed/);
 });
 
 // ── maybeFold ────────────────────────────────────────────────────────────────

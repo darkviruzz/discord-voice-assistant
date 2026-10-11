@@ -206,7 +206,10 @@ async function handleFinalize(ws, msg) {
   // the session's archive (audio/) — the archive is never cleaned up.
   const transientDir = path.join(uploadRootDir(), String(sessionId));
   const archiveRoot = (process.env.ARCHIVE_DIR ?? './archive').replace(/\/+$/, '');
-  const archiveName = typeof msg.sessionName === 'string' ? msg.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  let archiveName = typeof msg.sessionName === 'string' ? msg.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
+  // '.'/'..' survive the charset filter but would read manifest + audio from the
+  // archive root itself or its parent (same guard as finalize/archiveDirName).
+  if (archiveName === '.' || archiveName === '..') archiveName = '';
   const archiveAudioDir = archiveName ? path.join(archiveRoot, archiveName, 'audio') : null;
 
   let manifest;

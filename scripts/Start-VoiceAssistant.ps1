@@ -332,13 +332,17 @@ function Start-Whisper-Hidden {
     )
 }
 
+# Piper und RAG lauschen nur auf 127.0.0.1: beide haben keine Authentifizierung
+# (RAG gibt per /query Vault-Inhalte heraus, beide haben POST /shutdown) und
+# werden ausschließlich vom lokalen Node-Server angesprochen. Nach außen ist
+# nur der Node-Server (Bearer-geschützt) erreichbar.
 function Start-Piper-Hidden {
     if (Test-Port $PiperPort) { Write-Warn "Piper läuft bereits auf Port $PiperPort"; return }
     Write-Step "Starte Piper hidden (Log: $PiperLog)..."
     Start-ServiceHidden -Name "piper" -LogFile $PiperLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$PiperSvcDir'"
-        "& '$PiperPython' -u -m uvicorn server:app --host 0.0.0.0 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$PiperLog' -Encoding UTF8 -Append"
+        "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$PiperLog' -Encoding UTF8 -Append"
     )
 }
 
@@ -352,7 +356,7 @@ function Start-Rag-Hidden {
     Start-ServiceHidden -Name "rag" -LogFile $RagLog -ScriptLines @(
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
         "Set-Location '$RagSvcDir'"
-        "& '$RagPython' -u -m uvicorn server:app --host 0.0.0.0 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$RagLog' -Encoding UTF8 -Append"
+        "& '$RagPython' -u -m uvicorn server:app --host 127.0.0.1 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Out-File -FilePath '$RagLog' -Encoding UTF8 -Append"
     )
 }
 
@@ -490,12 +494,12 @@ if ($Mode -eq "all") {
 
     $piperPane = New-PaneScript "piper" @(
         "Set-Location '$PiperSvcDir'"
-        "& '$PiperPython' -u -m uvicorn server:app --host 0.0.0.0 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
+        "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
     )
 
     $ragPane = New-PaneScript "rag" @(
         "Set-Location '$RagSvcDir'"
-        "& '$RagPython' -u -m uvicorn server:app --host 0.0.0.0 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$RagLog'"
+        "& '$RagPython' -u -m uvicorn server:app --host 127.0.0.1 --port $RagPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$RagLog'"
     )
 
     Write-Step "Öffne Windows Terminal mit 4 Panes..."

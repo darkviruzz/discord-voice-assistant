@@ -28,14 +28,24 @@ function debug(...args) { if (process.env.DEBUG === '1') console.log('[configOve
 // Bot den Push; fehlt der Katalog-Eintrag, taucht sie nie im Settings-Panel auf.
 const BOT_KEYS = new Set([
   'GUILD_IDS', 'GUILD_ID', 'DEBUG',
-  'SERVER_BASE_URL', 'CONTROL_WS_URL', 'SERVER_START_CMD',
-  'SERVER_START_TIMEOUT_MS', 'SERVER_STOP_CMD', 'SERVER_STOP_DELAY_MS',
+  'SERVER_START_TIMEOUT_MS', 'SERVER_STOP_DELAY_MS',
   'DATA_DIR', 'SESSION_IDLE_HOURS', 'AUTO_FINALIZE_AFTER_LEAVE',
   'BOT_TRANSCRIPT_DIR', 'BOT_TRANSCRIPT_RETENTION_DAYS',
   'BOT_ARCHIVE_DIR', 'BOT_ARCHIVE_RETENTION_DAYS',
-  'FINALIZE_UPLOAD_CMD', 'ARCHIVE_RETENTION',
+  'ARCHIVE_RETENTION',
   'GATE_MS', 'PLAYOUT_MAX_MS', 'INTERRUPT_MIN_MS', 'RESUME_GATE_MS', 'REWIND_MS',
 ]);
+
+// Nur per .env änderbar (Katalog: editable:false), aber im config_state als
+// Ist-Wert gemeldet. Die *_CMD-Keys laufen durch eine Shell auf dem Bot-Host —
+// über das (nur per Basic-Auth geschützte) Web-Panel wären sie Remote-Code-
+// Ausführung; an SERVER_BASE_URL/CONTROL_WS_URL schickt der Bot sein
+// CONTROL_BEARER. Ein früher persistierter Override dieser Keys wird beim Boot
+// ignoriert (applyOverridesAtBoot prüft BOT_KEYS).
+const ENV_ONLY_KEYS = [
+  'SERVER_BASE_URL', 'CONTROL_WS_URL',
+  'SERVER_START_CMD', 'SERVER_STOP_CMD', 'FINALIZE_UPLOAD_CMD',
+];
 
 // Keys, die zusätzlich zum Report gehören, obwohl sie nicht pushbar sind
 // (Secrets, per Blacklist erkannt): der Server zeigt für sie nur „gesetzt?" an.
@@ -130,6 +140,10 @@ export function reportableConfig() {
   for (const k of BOT_KEYS) {
     const v = process.env[k];
     if (isSecretKey(k)) { secretsSet[k] = typeof v === 'string' && v.length > 0; continue; }
+    if (v !== undefined) values[k] = String(v);
+  }
+  for (const k of ENV_ONLY_KEYS) {
+    const v = process.env[k];
     if (v !== undefined) values[k] = String(v);
   }
   for (const k of REPORT_ONLY_KEYS) {

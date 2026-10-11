@@ -123,7 +123,7 @@ test('reportableConfig reports bot values but never secret values — only wheth
 test('contract: every non-secret bot key in the server catalog is accepted by the bot', async () => {
   // configCatalog.js (server) and BOT_KEYS (bot) must list the same keys —
   // otherwise the settings panel offers a key the bot silently ignores.
-  const catalogKeys = CATALOG.filter((e) => e.scope === 'bot' && !isSecretEntry(e)).map((e) => e.key);
+  const catalogKeys = CATALOG.filter((e) => e.scope === 'bot' && !isSecretEntry(e) && e.editable !== false).map((e) => e.key);
   assert.ok(catalogKeys.length > 10);
   const { applyConfigUpdate } = mod;
   const r = applyConfigUpdate({ set: Object.fromEntries(catalogKeys.map((k) => [k, '1'])), persist: false });
@@ -134,4 +134,14 @@ test('contract: every non-secret bot key in the server catalog is accepted by th
   const secretKeys = CATALOG.filter((e) => e.scope === 'bot' && isSecretEntry(e)).map((e) => e.key);
   const s = applyConfigUpdate({ set: Object.fromEntries(secretKeys.map((k) => [k, 'x'])), persist: false });
   assert.deepEqual(s.applied, []);
+
+  // …and env-only keys (shell commands, server URLs that receive the bearer)
+  // are refused even though the server would never send them.
+  const envOnly = CATALOG.filter((e) => e.scope === 'bot' && !isSecretEntry(e) && e.editable === false).map((e) => e.key);
+  for (const k of ['SERVER_START_CMD', 'SERVER_STOP_CMD', 'FINALIZE_UPLOAD_CMD', 'SERVER_BASE_URL', 'CONTROL_WS_URL']) {
+    assert.ok(envOnly.includes(k), `${k} must be editable:false in the catalog`);
+  }
+  const e = applyConfigUpdate({ set: Object.fromEntries(envOnly.map((k) => [k, 'touch /tmp/pwned'])), persist: false });
+  assert.deepEqual(e.applied, []);
+  assert.deepEqual(e.ignored.sort(), [...envOnly].sort());
 });

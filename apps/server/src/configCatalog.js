@@ -627,6 +627,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_BASE_URL',
     label: 'Server-Basis-URL', type: 'string', def: 'ws://192.168.x.x:7440',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: der Bot schickt CONTROL_BEARER an diese Adresse.',
     applyMode: 'reconnect',
     desc: 'ws:// oder wss:// Basis-URL des LAN-Servers. Der Bot verbindet sich hierüber '
       + 'zu /control, /uplink, /downlink. Wird beim Verbindungsaufbau gelesen — greift '
@@ -635,6 +636,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'CONTROL_WS_URL',
     label: 'Control-WS-URL (Alternative)', type: 'string', def: '', applyMode: 'reconnect',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: der Bot schickt CONTROL_BEARER an diese Adresse.',
     note: 'Alternative zu SERVER_BASE_URL; nur nötig, wenn der Control-Endpunkt separat liegt.',
     desc: 'Explizite WebSocket-URL des Control-Kanals, falls sie nicht aus SERVER_BASE_URL '
       + 'abgeleitet werden soll. Wird beim Verbindungsaufbau gelesen — greift beim Reconnect.',
@@ -649,6 +651,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_START_CMD',
     label: 'Server-Autostart-Kommando', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Optionales Shell-Kommando (z. B. SSH), das der Bot beim /join ausführt, wenn '
       + 'der Server per TCP-Probe nicht erreichbar ist, um ihn zu starten. Wird pro /join '
       + 'gelesen — Änderung sofort aktiv.',
@@ -665,6 +668,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Server-Verbindung', key: 'SERVER_STOP_CMD',
     label: 'Server-Auto-Stop-Kommando', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Optionales Shell-Kommando (z. B. SSH), das der Bot nach einer Leerlaufzeit '
       + 'ohne aktive Session ausführt, um den Cloud-GPU-Server herunterzufahren bzw. die '
       + 'Instanz zu zerstören (Verda-Abrechnung endet). Gegenstück zu SERVER_START_CMD. '
@@ -756,6 +760,7 @@ export const CATALOG = [
   {
     scope: 'bot', group: 'Bot · Finalize-Upload', key: 'FINALIZE_UPLOAD_CMD',
     label: 'Upload-Kommando (WAV→Server, Legacy)', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env auf dem Bot-Host änderbar: Shell-Kommando — über das Panel wäre es Remote-Code-Ausführung.',
     desc: 'Kommando-Template (scp/SSH), mit dem der Bot die Session-WAVs zum Server '
       + 'überträgt. Platzhalter: {src} = lokales chunks-Verzeichnis, {sessionId} = '
       + 'Session-ID. LEER (neuer Default) = HTTP-Upload über die bestehende '

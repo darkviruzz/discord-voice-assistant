@@ -6,7 +6,7 @@ import { log, warn, debug } from './logger.js';
 import { initUplinkWSS } from './uplink.js';
 import { initDownlinkWSS } from './downlink.js';
 import { initControlWSS } from './control.js';
-import { checkBearer } from './auth.js';
+import { checkBearer, isLoopback } from './auth.js';
 import { getVersion } from './version.js';
 import { registerDebugTtsRoute } from './debugTts.js';
 import { registerFinalizeHttpRoutes } from './finalizeHttp.js';
@@ -22,14 +22,25 @@ registerDebugTtsRoute(app);
 registerFinalizeHttpRoutes(app); // PUT /finalize/upload/:sessionId/:filename — bot streams session WAVs (bearer from CONTROL_BEARER)
 registerTranscriptRoutes(app); // mountet u.a. app.use('/transcript', auth) — vor den Config-Routen
 registerConfigRoutes(app);     // /transcript/config (GET/PUT), teilt sich die Transkript-Auth
-app.post('/shutdown', (_req, res) => {
+const bearer = process.env.CONTROL_BEARER;
+if (!bearer) {
+  warn('CONTROL_BEARER ist NICHT gesetzt — /control, /uplink, /downlink und /finalize/* sind '
+    + 'ohne Authentifizierung erreichbar. Für jeden Betrieb außerhalb eines isolierten LANs setzen '
+    + '(gleicher Wert in apps/bot/.env).');
+}
+
+// Unauthenticated shutdown was reachable by anyone who could reach the port.
+// Allowed now from the machine itself (the launcher scripts) or with the bearer.
+app.post('/shutdown', (req, res) => {
+  if (!isLoopback(req) && !(bearer && checkBearer(req, bearer))) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
   res.json({ status: 'shutting down' });
   setTimeout(() => shutdown('HTTP /shutdown'), 200);
 });
 
 const server = http.createServer(app);
 
-const bearer = process.env.CONTROL_BEARER;
 const wssUplink   = initUplinkWSS(  { bearer });
 const wssDownlink = initDownlinkWSS({});
 const wssControl  = initControlWSS( { bearer });
@@ -40,7 +51,9 @@ const wssControl  = initControlWSS( { bearer });
 // Using noServer: true and dispatching here avoids that.
 const ROUTES = {
   '/uplink':   { wss: wssUplink,   requireBearer: true  },
-  '/downlink': { wss: wssDownlink, requireBearer: false }, // bot needs no token to subscribe; protect via session/control later
+  // The bot's DownlinkClient sends the same bearer header as uplink/control —
+  // without the check anyone reaching the port could subscribe to TTS audio.
+  '/downlink': { wss: wssDownlink, requireBearer: true  },
   '/control':  { wss: wssControl,  requireBearer: true  },
 };
 

@@ -204,6 +204,10 @@ function Find-Dirs {
 $HomeDir = Get-VaHomeDir
 $Programs = Join-Path $HomeDir 'Programme'
 $ServerEnv = Read-VaEnvFile -Path $ServerEnvPath
+# Provider-Wahl des Servers (apps\server\.env + Web-Panel): bestimmt, welche
+# lokalen Dienste überhaupt eingerichtet/geprüft werden müssen.
+$ServerSettings = Get-VaServerSettings -RepoRoot $RepoRoot
+$Prov = Get-VaProviders -ServerSettings $ServerSettings
 
 Write-Host ""
 Write-Host "Voice Assistant – Server-Setup" -ForegroundColor Cyan
@@ -284,174 +288,211 @@ if ($archiveFormat -ne 'wav' -and -not (Get-Command ffmpeg -ErrorAction Silently
 # 3. Whisper (whisper.cpp, Vulkan)
 # ============================================================
 Write-Section '3/8  Whisper (Spracherkennung)'
-$validateWhisperDir = {
-    param($d)
-    if (-not (Test-Path -LiteralPath $d -PathType Container)) { return "Ordner existiert nicht: $d" }
-    $exe = Resolve-VaPath -Path $Cfg['VA_WHISPER_EXE'] -Base $d
-    if (-not (Test-Path -LiteralPath $exe)) { return "$($Cfg['VA_WHISPER_EXE']) nicht in $d" }
-    return $null
-}
-$whisperCands = @($Cfg['VA_WHISPER_DIR']) + @(Find-Dirs -Roots @($Programs, (Join-Path $HomeDir 'Downloads')) -Filter $Cfg['VA_WHISPER_EXE'] -Depth 3 | ForEach-Object { Split-Path -Parent $_ })
-$cmd = Get-Command $Cfg['VA_WHISPER_EXE'] -ErrorAction SilentlyContinue
-if ($cmd) { $whisperCands += (Split-Path -Parent $cmd.Source) }
-
-if ($Check) {
-    $err = & $validateWhisperDir $Cfg['VA_WHISPER_DIR']
-    if ($err) { Add-Result 'Whisper' 'FAIL' $err 'Setup-VoiceAssistant.ps1 ohne -Check ausführen' }
-    else { Add-Result 'Whisper' 'OK' "whisper-server: $($Cfg['VA_WHISPER_DIR'])" }
-} else {
-    $dir = Read-Value -Label 'Ordner mit whisper-server.exe (whisper.cpp, Vulkan-Build)' -Current $Cfg['VA_WHISPER_DIR'] -Validate $validateWhisperDir -Candidates $whisperCands
-    if (& $validateWhisperDir $dir) {
-        Add-Result 'Whisper' 'FAIL' "whisper-server nicht gefunden ($dir)" 'Vulkan-Build von https://github.com/ggml-org/whisper.cpp/releases entpacken'
-    } else {
-        Set-HostValue 'VA_WHISPER_DIR' $dir
-        Add-Result 'Whisper' 'OK' "whisper-server: $dir"
-    }
-}
-
-$whisperDir = $Cfg['VA_WHISPER_DIR']
-if (Test-Path -LiteralPath $whisperDir) {
-    $models = @(Find-Dirs -Roots @($whisperDir) -Filter 'ggml-*.bin' -Depth 2)
-    $validateModel = {
-        param($m)
-        $abs = Resolve-VaPath -Path $m -Base $whisperDir
-        if (-not (Test-Path -LiteralPath $abs -PathType Leaf)) { return "Modelldatei fehlt: $abs" }
+if ($Prov.WhisperEnabled) {
+    $validateWhisperDir = {
+        param($d)
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { return "Ordner existiert nicht: $d" }
+        $exe = Resolve-VaPath -Path $Cfg['VA_WHISPER_EXE'] -Base $d
+        if (-not (Test-Path -LiteralPath $exe)) { return "$($Cfg['VA_WHISPER_EXE']) nicht in $d" }
         return $null
     }
-    if (-not $Check) {
-        if (-not $models -or ($models | ForEach-Object { Split-Path -Leaf $_ }) -notcontains $WhisperRecommended) {
-            Write-Info "Empfehlung: $WhisperRecommended (~550 MB) – deutlich genauer als medium, auf GPU kaum langsamer."
-            if (Read-YesNo "$WhisperRecommended jetzt herunterladen?" $false) {
-                $modelsDir = Join-Path $whisperDir 'models'
-                if (-not (Test-Path $modelsDir)) { $null = New-Item -ItemType Directory -Path $modelsDir }
-                if (Save-Download "$WhisperHfBase/$WhisperRecommended" (Join-Path $modelsDir $WhisperRecommended)) {
-                    $models += (Join-Path $modelsDir $WhisperRecommended)
+    $whisperCands = @($Cfg['VA_WHISPER_DIR']) + @(Find-Dirs -Roots @($Programs, (Join-Path $HomeDir 'Downloads')) -Filter $Cfg['VA_WHISPER_EXE'] -Depth 3 | ForEach-Object { Split-Path -Parent $_ })
+    $cmd = Get-Command $Cfg['VA_WHISPER_EXE'] -ErrorAction SilentlyContinue
+    if ($cmd) { $whisperCands += (Split-Path -Parent $cmd.Source) }
+
+    if ($Check) {
+        $err = & $validateWhisperDir $Cfg['VA_WHISPER_DIR']
+        if ($err) { Add-Result 'Whisper' 'FAIL' $err 'Setup-VoiceAssistant.ps1 ohne -Check ausführen' }
+        else { Add-Result 'Whisper' 'OK' "whisper-server: $($Cfg['VA_WHISPER_DIR'])" }
+    } else {
+        $dir = Read-Value -Label 'Ordner mit whisper-server.exe (whisper.cpp, Vulkan-Build)' -Current $Cfg['VA_WHISPER_DIR'] -Validate $validateWhisperDir -Candidates $whisperCands
+        if (& $validateWhisperDir $dir) {
+            Add-Result 'Whisper' 'FAIL' "whisper-server nicht gefunden ($dir)" 'Vulkan-Build von https://github.com/ggml-org/whisper.cpp/releases entpacken'
+        } else {
+            Set-HostValue 'VA_WHISPER_DIR' $dir
+            Add-Result 'Whisper' 'OK' "whisper-server: $dir"
+        }
+    }
+
+    $whisperDir = $Cfg['VA_WHISPER_DIR']
+    if (Test-Path -LiteralPath $whisperDir) {
+        $models = @(Find-Dirs -Roots @($whisperDir) -Filter 'ggml-*.bin' -Depth 2)
+        $validateModel = {
+            param($m)
+            $abs = Resolve-VaPath -Path $m -Base $whisperDir
+            if (-not (Test-Path -LiteralPath $abs -PathType Leaf)) { return "Modelldatei fehlt: $abs" }
+            return $null
+        }
+        if (-not $Check) {
+            if (-not $models -or ($models | ForEach-Object { Split-Path -Leaf $_ }) -notcontains $WhisperRecommended) {
+                Write-Info "Empfehlung: $WhisperRecommended (~550 MB) – deutlich genauer als medium, auf GPU kaum langsamer."
+                if (Read-YesNo "$WhisperRecommended jetzt herunterladen?" $false) {
+                    $modelsDir = Join-Path $whisperDir 'models'
+                    if (-not (Test-Path $modelsDir)) { $null = New-Item -ItemType Directory -Path $modelsDir }
+                    if (Save-Download "$WhisperHfBase/$WhisperRecommended" (Join-Path $modelsDir $WhisperRecommended)) {
+                        $models += (Join-Path $modelsDir $WhisperRecommended)
+                    }
                 }
             }
-        }
-        $cur = Resolve-VaPath -Path $Cfg['VA_WHISPER_MODEL'] -Base $whisperDir
-        $m = Read-Value -Label 'Whisper-Modell (ggml-*.bin)' -Current $cur -Validate $validateModel -Candidates $models
-        if (-not (& $validateModel $m)) {
-            $abs = Resolve-VaPath -Path $m -Base $whisperDir
-            # relativ speichern, wenn unterhalb des Whisper-Ordners (überlebt Umzug des Ordners)
-            if ($abs.StartsWith($whisperDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                $abs = $abs.Substring($whisperDir.TrimEnd('\').Length + 1)
+            $cur = Resolve-VaPath -Path $Cfg['VA_WHISPER_MODEL'] -Base $whisperDir
+            $m = Read-Value -Label 'Whisper-Modell (ggml-*.bin)' -Current $cur -Validate $validateModel -Candidates $models
+            if (-not (& $validateModel $m)) {
+                $abs = Resolve-VaPath -Path $m -Base $whisperDir
+                # relativ speichern, wenn unterhalb des Whisper-Ordners (überlebt Umzug des Ordners)
+                if ($abs.StartsWith($whisperDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    $abs = $abs.Substring($whisperDir.TrimEnd('\').Length + 1)
+                }
+                Set-HostValue 'VA_WHISPER_MODEL' $abs
             }
-            Set-HostValue 'VA_WHISPER_MODEL' $abs
+        }
+        $modelErr = & $validateModel $Cfg['VA_WHISPER_MODEL']
+        if ($modelErr) { Add-Result 'Whisper-Modell' 'FAIL' $modelErr "Modell nach $whisperDir\models legen: $WhisperHfBase/$WhisperRecommended" }
+        else {
+            $leaf = Split-Path -Leaf $Cfg['VA_WHISPER_MODEL']
+            if ($leaf -match 'tiny|base|small|medium') {
+                Add-Result 'Whisper-Modell' 'WARN' "$leaf (kleines Modell)" "Genauer: $WhisperRecommended"
+            } else {
+                Add-Result 'Whisper-Modell' 'OK' $leaf
+            }
         }
     }
-    $modelErr = & $validateModel $Cfg['VA_WHISPER_MODEL']
-    if ($modelErr) { Add-Result 'Whisper-Modell' 'FAIL' $modelErr "Modell nach $whisperDir\models legen: $WhisperHfBase/$WhisperRecommended" }
-    else {
-        $leaf = Split-Path -Leaf $Cfg['VA_WHISPER_MODEL']
-        if ($leaf -match 'tiny|base|small|medium') {
-            Add-Result 'Whisper-Modell' 'WARN' "$leaf (kleines Modell)" "Genauer: $WhisperRecommended"
-        } else {
-            Add-Result 'Whisper-Modell' 'OK' $leaf
-        }
-    }
+} else {
+    Add-Result 'Whisper' 'SKIP' "STT_PROVIDER=$($Prov.Stt) — kein lokaler whisper-server nötig"
 }
 
 # ============================================================
 # 4. Piper (TTS, DirectML-Fork)
 # ============================================================
 Write-Section '4/8  Piper (Sprachausgabe)'
-$validatePiperPy = {
-    param($p)
-    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return "python.exe nicht gefunden: $p" }
-    return $null
-}
-$piperCands = @($Cfg['VA_PIPER_PYTHON']) + @(Find-Dirs -Roots @($Programs) -Filter 'python.exe' -Depth 4 |
-    Where-Object { $_ -match 'piper' -and $_ -match '\\(venv|\.venv)\\Scripts\\python\.exe$' })
-if (-not $Check) {
-    $py = Read-Value -Label 'python.exe der Piper-venv (DirectML-Fork, darkviruzz/piper1-gpl)' -Current $Cfg['VA_PIPER_PYTHON'] -Validate $validatePiperPy -Candidates $piperCands
-    if (-not (& $validatePiperPy $py)) { Set-HostValue 'VA_PIPER_PYTHON' $py }
-}
-$piperPy = $Cfg['VA_PIPER_PYTHON']
-if (& $validatePiperPy $piperPy) {
-    Add-Result 'Piper' 'FAIL' "Piper-venv fehlt ($piperPy)" 'Fork-venv anlegen: siehe piper1-gpl docs/WORKFLOW.md, dann pip install -r services\piper\requirements.txt'
-} else {
-    $imp = Invoke-Native $piperPy @('-c', 'import fastapi, uvicorn; from piper.voice import PiperVoice')
-    if ($imp.Code -ne 0) {
-        Add-Result 'Piper' 'FAIL' 'Python-Pakete fehlen in der Piper-venv' "$piperPy -m pip install -r `"$RepoRoot\services\piper\requirements.txt`"  (+ pip install -e <piper-fork>)"
+if ($Prov.PiperEnabled) {
+    $validatePiperPy = {
+        param($p)
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return "python.exe nicht gefunden: $p" }
+        return $null
+    }
+    $piperCands = @($Cfg['VA_PIPER_PYTHON']) + @(Find-Dirs -Roots @($Programs) -Filter 'python.exe' -Depth 4 |
+        Where-Object { $_ -match 'piper' -and $_ -match '\\(venv|\.venv)\\Scripts\\python\.exe$' })
+    if (-not $Check) {
+        $py = Read-Value -Label 'python.exe der Piper-venv (DirectML-Fork, darkviruzz/piper1-gpl)' -Current $Cfg['VA_PIPER_PYTHON'] -Validate $validatePiperPy -Candidates $piperCands
+        if (-not (& $validatePiperPy $py)) { Set-HostValue 'VA_PIPER_PYTHON' $py }
+    }
+    $piperPy = $Cfg['VA_PIPER_PYTHON']
+    if (& $validatePiperPy $piperPy) {
+        Add-Result 'Piper' 'FAIL' "Piper-venv fehlt ($piperPy)" 'Fork-venv anlegen: siehe piper1-gpl docs/WORKFLOW.md, dann pip install -r services\piper\requirements.txt'
     } else {
-        Add-Result 'Piper' 'OK' 'venv + Pakete ok'
-        $prov = Invoke-Native $piperPy @('-c', "import onnxruntime as o; print(','.join(o.get_available_providers()))")
-        $wantDml = Test-VaTrue $Cfg['PIPER_USE_DIRECTML']
-        if ($prov.Output -match 'DmlExecutionProvider') {
-            if (-not $wantDml -and (Read-YesNo 'DirectML (GPU) ist verfügbar, aber aus. Einschalten?' $true)) { Set-HostValue 'PIPER_USE_DIRECTML' '1'; $wantDml = $true }
-            Add-Result 'Piper-GPU' 'OK' ("DirectML verfügbar" + $(if ($wantDml) { ', aktiv' } else { ', inaktiv' }))
-        } elseif ($wantDml) {
-            Add-Result 'Piper-GPU' 'WARN' "PIPER_USE_DIRECTML=1, aber onnxruntime meldet kein DirectML ($($prov.Output.Trim()))" "$piperPy -m pip install onnxruntime-directml   (oder PIPER_USE_DIRECTML=0 für CPU)"
+        $imp = Invoke-Native $piperPy @('-c', 'import fastapi, uvicorn; from piper.voice import PiperVoice')
+        if ($imp.Code -ne 0) {
+            Add-Result 'Piper' 'FAIL' 'Python-Pakete fehlen in der Piper-venv' "$piperPy -m pip install -r `"$RepoRoot\services\piper\requirements.txt`"  (+ pip install -e <piper-fork>)"
         } else {
-            Add-Result 'Piper-GPU' 'OK' 'CPU-Modus'
+            Add-Result 'Piper' 'OK' 'venv + Pakete ok'
+            $prov = Invoke-Native $piperPy @('-c', "import onnxruntime as o; print(','.join(o.get_available_providers()))")
+            $wantDml = Test-VaTrue $Cfg['PIPER_USE_DIRECTML']
+            if ($prov.Output -match 'DmlExecutionProvider') {
+                if (-not $wantDml -and (Read-YesNo 'DirectML (GPU) ist verfügbar, aber aus. Einschalten?' $true)) { Set-HostValue 'PIPER_USE_DIRECTML' '1'; $wantDml = $true }
+                Add-Result 'Piper-GPU' 'OK' ("DirectML verfügbar" + $(if ($wantDml) { ', aktiv' } else { ', inaktiv' }))
+            } elseif ($wantDml) {
+                Add-Result 'Piper-GPU' 'WARN' "PIPER_USE_DIRECTML=1, aber onnxruntime meldet kein DirectML ($($prov.Output.Trim()))" "$piperPy -m pip install onnxruntime-directml   (oder PIPER_USE_DIRECTML=0 für CPU)"
+            } else {
+                Add-Result 'Piper-GPU' 'OK' 'CPU-Modus'
+            }
         }
     }
-}
 
-$validateVoices = {
-    param($d)
-    if (-not (Test-Path -LiteralPath $d -PathType Container)) { return "Ordner existiert nicht: $d" }
-    foreach ($f in $PiperVoiceFiles.Keys) {
-        if ((Test-Path -LiteralPath (Join-Path $d $f)) -and (Test-Path -LiteralPath (Join-Path $d "$f.json"))) { return $null }
-    }
-    return "keine der erwarteten Stimmen ($($PiperVoiceFiles.Keys -join ', ') + .json) in $d"
-}
-$voiceCands = @($Cfg['PIPER_VOICES_DIR']) + @(Find-Dirs -Roots @($Programs) -Filter 'de_DE-thorsten*.onnx' -Depth 4 | ForEach-Object { Split-Path -Parent $_ })
-if (-not $Check) {
-    $vd = Read-Value -Label 'Ordner mit den Piper-Stimmen (*.onnx + *.onnx.json)' -Current $Cfg['PIPER_VOICES_DIR'] -Validate { param($d) if (Test-Path -LiteralPath $d -PathType Container) { $null } else { "Ordner existiert nicht: $d" } } -Candidates $voiceCands
-    if ($vd -and (& $validateVoices $vd) -and (Test-Path -LiteralPath $vd -PathType Container)) {
-        if (Read-YesNo 'Keine passende Stimme gefunden. de_DE-thorsten-high (~110 MB) herunterladen?' $true) {
-            $f = 'de_DE-thorsten-high.onnx'
-            $null = (Save-Download "$PiperVoiceBase/$($PiperVoiceFiles[$f])/$f" (Join-Path $vd $f)) -and
-                    (Save-Download "$PiperVoiceBase/$($PiperVoiceFiles[$f])/$f.json" (Join-Path $vd "$f.json"))
+    $validateVoices = {
+        param($d)
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { return "Ordner existiert nicht: $d" }
+        foreach ($f in $PiperVoiceFiles.Keys) {
+            if ((Test-Path -LiteralPath (Join-Path $d $f)) -and (Test-Path -LiteralPath (Join-Path $d "$f.json"))) { return $null }
         }
+        return "keine der erwarteten Stimmen ($($PiperVoiceFiles.Keys -join ', ') + .json) in $d"
     }
-    if ($vd) { Set-HostValue 'PIPER_VOICES_DIR' $vd }
+    $voiceCands = @($Cfg['PIPER_VOICES_DIR']) + @(Find-Dirs -Roots @($Programs) -Filter 'de_DE-thorsten*.onnx' -Depth 4 | ForEach-Object { Split-Path -Parent $_ })
+    if (-not $Check) {
+        $vd = Read-Value -Label 'Ordner mit den Piper-Stimmen (*.onnx + *.onnx.json)' -Current $Cfg['PIPER_VOICES_DIR'] -Validate { param($d) if (Test-Path -LiteralPath $d -PathType Container) { $null } else { "Ordner existiert nicht: $d" } } -Candidates $voiceCands
+        if ($vd -and (& $validateVoices $vd) -and (Test-Path -LiteralPath $vd -PathType Container)) {
+            if (Read-YesNo 'Keine passende Stimme gefunden. de_DE-thorsten-high (~110 MB) herunterladen?' $true) {
+                $f = 'de_DE-thorsten-high.onnx'
+                $null = (Save-Download "$PiperVoiceBase/$($PiperVoiceFiles[$f])/$f" (Join-Path $vd $f)) -and
+                        (Save-Download "$PiperVoiceBase/$($PiperVoiceFiles[$f])/$f.json" (Join-Path $vd "$f.json"))
+            }
+        }
+        if ($vd) { Set-HostValue 'PIPER_VOICES_DIR' $vd }
+    }
+    $voiceErr = & $validateVoices $Cfg['PIPER_VOICES_DIR']
+    if ($voiceErr) { Add-Result 'Piper-Stimmen' 'FAIL' $voiceErr "Download: $PiperVoiceBase/thorsten/high/" }
+    else { Add-Result 'Piper-Stimmen' 'OK' $Cfg['PIPER_VOICES_DIR'] }
+} else {
+    Add-Result 'Piper' 'SKIP' "TTS_PROVIDER=$($Prov.Tts) — kein lokales Piper nötig"
 }
-$voiceErr = & $validateVoices $Cfg['PIPER_VOICES_DIR']
-if ($voiceErr) { Add-Result 'Piper-Stimmen' 'FAIL' $voiceErr "Download: $PiperVoiceBase/thorsten/high/" }
-else { Add-Result 'Piper-Stimmen' 'OK' $Cfg['PIPER_VOICES_DIR'] }
 
 # ============================================================
 # 5. Ollama (LLM)
 # ============================================================
-Write-Section '5/8  Ollama (Sprachmodell)'
-$ollamaPort = Get-VaPortFromUrl $Cfg['OLLAMA_URL'] 11434
-$ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
-if (-not $ollamaCmd -and -not (Test-PortOpen $ollamaPort)) {
-    Add-Result 'Ollama' 'FAIL' 'Ollama nicht installiert' 'winget install Ollama.Ollama'
-} else {
-    if (-not (Test-PortOpen $ollamaPort) -and $ollamaCmd -and (Read-YesNo 'Ollama läuft nicht. Jetzt starten?' $true)) {
-        Start-Process -FilePath $ollamaCmd.Source -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
-        for ($i = 0; $i -lt 30 -and -not (Test-PortOpen $ollamaPort); $i++) { Start-Sleep -Milliseconds 500 }
+Write-Section '5/8  Sprachmodell (Ollama / OpenAI-kompatible Server)'
+
+# OpenAI-kompatible Server (LLM/STT/TTS/Embeddings über *_PROVIDER=openai):
+# GET <basis>/models zeigt, ob die URL stimmt und der Server läuft.
+$openaiTargets = @()
+if ($Prov.Llm -eq 'openai') { $openaiTargets += @{ Name = 'LLM'; Url = (Get-VaSetting $ServerSettings 'LLM_BASE_URL'); Key = (Get-VaSetting $ServerSettings 'LLM_API_KEY') } }
+if ($Prov.Stt -eq 'openai') { $openaiTargets += @{ Name = 'STT'; Url = (Get-VaSetting $ServerSettings 'STT_BASE_URL'); Key = (Get-VaSetting $ServerSettings 'STT_API_KEY') } }
+if ($Prov.Tts -eq 'openai') { $openaiTargets += @{ Name = 'TTS'; Url = (Get-VaSetting $ServerSettings 'TTS_BASE_URL'); Key = (Get-VaSetting $ServerSettings 'TTS_API_KEY') } }
+if ((Get-VaSetting $ServerSettings 'EMBED_PROVIDER').ToLower() -eq 'openai' -and -not (Test-VaRagOff -ServerSettings $ServerSettings)) {
+    $openaiTargets += @{ Name = 'Embeddings'; Url = (Get-VaSetting $ServerSettings 'EMBED_BASE_URL'); Key = (Get-VaSetting $ServerSettings 'EMBED_API_KEY') }
+}
+foreach ($t in $openaiTargets) {
+    if (-not $t.Url) { Add-Result "$($t.Name)-Server" 'FAIL' "$($t.Name): Provider openai, aber keine Basis-URL gesetzt" 'In apps\server\.env die *_BASE_URL (inkl. /v1) eintragen'; continue }
+    $hdr = @{}
+    if ($t.Key) { $hdr['Authorization'] = "Bearer $($t.Key)" }
+    try {
+        $null = Invoke-RestMethod -Uri "$($t.Url.TrimEnd('/'))/models" -Headers $hdr -TimeoutSec 5 -ErrorAction Stop
+        Add-Result "$($t.Name)-Server" 'OK' "$($t.Url) antwortet"
+    } catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        if ($code -gt 0) { Add-Result "$($t.Name)-Server" 'WARN' "$($t.Url)/models → HTTP $code (Server läuft — Pfad/Key prüfen)" 'Basis-URL muss den Versionspfad enthalten (…/v1)' }
+        else { Add-Result "$($t.Name)-Server" 'FAIL' "$($t.Url) nicht erreichbar" 'OpenAI-kompatiblen Server (z. B. Lemonade, vLLM) starten bzw. URL prüfen' }
     }
-    if (-not (Test-PortOpen $ollamaPort)) {
-        Add-Result 'Ollama' 'WARN' "Ollama antwortet nicht auf Port $ollamaPort (Modelle nicht prüfbar)" 'ollama serve'
+}
+if ($Prov.OllamaNeeded) {
+    $ollamaPort = Get-VaPortFromUrl $Cfg['OLLAMA_URL'] 11434
+    $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
+    if (-not $ollamaCmd -and -not (Test-PortOpen $ollamaPort)) {
+        Add-Result 'Ollama' 'FAIL' 'Ollama nicht installiert' 'winget install Ollama.Ollama'
     } else {
-        $have = @()
-        try { $have = @((Invoke-RestMethod -Uri "$($Cfg['OLLAMA_URL'].TrimEnd('/'))/api/tags" -TimeoutSec 5).models | ForEach-Object { $_.name }) } catch { }
-        $need = @()
-        $need += $(if ($ServerEnv.Contains('OLLAMA_MODEL') -and $ServerEnv['OLLAMA_MODEL']) { $ServerEnv['OLLAMA_MODEL'] } else { 'llama3.2' })
-        if ($ServerEnv.Contains('SUMMARY_MODEL') -and $ServerEnv['SUMMARY_MODEL']) { $need += $ServerEnv['SUMMARY_MODEL'] }
-        # Embedding-Modell der Vault-Suche (RAG läuft im Node-Server): EMBED_MODEL
-        # aus apps\server\.env bzw. dem Web-Panel, Standard nomic-embed-text.
-        # Entfällt bei RAG_ENABLED=false oder EMBED_PROVIDER=openai.
-        $needEmbed = Get-VaEmbedModel -ServerSettings (Get-VaServerSettings -RepoRoot $RepoRoot)
-        if ($needEmbed) { $need += $needEmbed }
-        Add-Result 'Ollama' 'OK' "läuft ($($have.Count) Modelle)"
-        foreach ($m in ($need | Select-Object -Unique)) {
-            $present = $have | Where-Object { $_ -eq $m -or $_ -eq "$($m):latest" -or $_.StartsWith("$($m):") }
-            if ($present) { Add-Result "Modell $m" 'OK' "$m vorhanden"; continue }
-            $isEmbed = ($needEmbed -and $m -eq $needEmbed)
-            if ($ollamaCmd -and (Read-YesNo "Modell '$m' fehlt$(if ($isEmbed) { ' (Embeddings der Vault-Suche)' }). Jetzt laden (ollama pull)?" $true)) {
-                $r = Invoke-Native $ollamaCmd.Source @('pull', $m)
-                if ($r.Code -eq 0) { Add-Result "Modell $m" 'OK' "$m geladen"; continue }
+        if (-not (Test-PortOpen $ollamaPort) -and $ollamaCmd -and (Read-YesNo 'Ollama läuft nicht. Jetzt starten?' $true)) {
+            Start-Process -FilePath $ollamaCmd.Source -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+            for ($i = 0; $i -lt 30 -and -not (Test-PortOpen $ollamaPort); $i++) { Start-Sleep -Milliseconds 500 }
+        }
+        if (-not (Test-PortOpen $ollamaPort)) {
+            Add-Result 'Ollama' 'WARN' "Ollama antwortet nicht auf Port $ollamaPort (Modelle nicht prüfbar)" 'ollama serve'
+        } else {
+            $have = @()
+            try { $have = @((Invoke-RestMethod -Uri "$($Cfg['OLLAMA_URL'].TrimEnd('/'))/api/tags" -TimeoutSec 5).models | ForEach-Object { $_.name }) } catch { }
+            $need = @()
+            if ($Prov.Llm -eq 'ollama') {
+                $need += $(if ($ServerEnv.Contains('OLLAMA_MODEL') -and $ServerEnv['OLLAMA_MODEL']) { $ServerEnv['OLLAMA_MODEL'] } else { 'llama3.2' })
+                if ($ServerEnv.Contains('SUMMARY_MODEL') -and $ServerEnv['SUMMARY_MODEL']) { $need += $ServerEnv['SUMMARY_MODEL'] }
             }
-            $lvl = if ($isEmbed) { 'WARN' } else { 'FAIL' }
-            Add-Result "Modell $m" $lvl "$m fehlt in Ollama" "ollama pull $m"
+            # Embedding-Modell der Vault-Suche (RAG läuft im Node-Server): EMBED_MODEL
+            # aus apps\server\.env bzw. dem Web-Panel, Standard nomic-embed-text.
+            # Entfällt bei RAG_ENABLED=false oder EMBED_PROVIDER=openai.
+            $needEmbed = Get-VaEmbedModel -ServerSettings (Get-VaServerSettings -RepoRoot $RepoRoot)
+            if ($needEmbed) { $need += $needEmbed }
+            Add-Result 'Ollama' 'OK' "läuft ($($have.Count) Modelle)"
+            foreach ($m in ($need | Select-Object -Unique)) {
+                $present = $have | Where-Object { $_ -eq $m -or $_ -eq "$($m):latest" -or $_.StartsWith("$($m):") }
+                if ($present) { Add-Result "Modell $m" 'OK' "$m vorhanden"; continue }
+                $isEmbed = ($needEmbed -and $m -eq $needEmbed)
+                if ($ollamaCmd -and (Read-YesNo "Modell '$m' fehlt$(if ($isEmbed) { ' (Embeddings der Vault-Suche)' }). Jetzt laden (ollama pull)?" $true)) {
+                    $r = Invoke-Native $ollamaCmd.Source @('pull', $m)
+                    if ($r.Code -eq 0) { Add-Result "Modell $m" 'OK' "$m geladen"; continue }
+                }
+                $lvl = if ($isEmbed) { 'WARN' } else { 'FAIL' }
+                Add-Result "Modell $m" $lvl "$m fehlt in Ollama" "ollama pull $m"
+            }
         }
     }
+} else {
+    Add-Result 'Ollama' 'SKIP' 'LLM und Embeddings laufen über OpenAI-kompatible Server — Ollama nicht nötig'
 }
 
 # ============================================================
@@ -513,11 +554,11 @@ if (-not $vault) {
 # 7. Ports + SSH-Autostart
 # ============================================================
 Write-Section '7/8  Ports + Autostart vom Bot'
-$ports = [ordered]@{
-    Whisper = (Get-VaPortFromUrl $Cfg['WHISPER_URL'] 8080)
-    Piper   = (Get-VaPortFromUrl $Cfg['TTS_URL'] 5000)
-    Server  = [int]$Cfg['VA_SERVER_PORT']
-}
+# Nur Ports lokal laufender Dienste (Provider-Wahl) — externe Server belegen hier nichts.
+$ports = [ordered]@{}
+if ($Prov.WhisperEnabled) { $ports['Whisper'] = (Get-VaPortFromUrl $Cfg['WHISPER_URL'] 8080) }
+if ($Prov.PiperEnabled)   { $ports['Piper'] = (Get-VaPortFromUrl $Cfg['TTS_URL'] 5000) }
+$ports['Server'] = [int]$Cfg['VA_SERVER_PORT']
 $dupes = $ports.Values | Group-Object | Where-Object { $_.Count -gt 1 }
 if ($dupes) { Add-Result 'Ports' 'FAIL' "Port doppelt vergeben: $(($dupes | ForEach-Object { $_.Name }) -join ', ')" 'WHISPER_URL/TTS_URL in deploy.env entzerren' }
 $expected = @('whisper-server', 'python', 'pythonw', 'node', 'ollama', 'powershell', 'pwsh')
@@ -561,10 +602,18 @@ Write-Section '8/8  Konfiguration'
 # Server-URLs in apps\server\.env an die Launcher-Ports angleichen — der Launcher
 # exportiert sie ohnehin, aber ein manuelles `npm start` soll dasselbe sehen.
 if (-not (Test-Path -LiteralPath $ServerEnvPath)) { $ServerChanges.Clear() }   # schon als FAIL gemeldet
-else { foreach ($k in @('WHISPER_URL', 'TTS_URL', 'OLLAMA_URL')) {
-    $want = $Cfg[$k].TrimEnd('/')
-    if (-not $ServerEnv.Contains($k) -or $ServerEnv[$k].TrimEnd('/') -ne $want) { $ServerChanges[$k] = $want }
-} }
+else {
+    # Nur URLs der lokal genutzten Dienste angleichen (bei *_PROVIDER=openai
+    # spricht der Server sie nicht an).
+    $localUrls = @()
+    if ($Prov.WhisperEnabled) { $localUrls += 'WHISPER_URL' }
+    if ($Prov.PiperEnabled)   { $localUrls += 'TTS_URL' }
+    if ($Prov.OllamaNeeded)   { $localUrls += 'OLLAMA_URL' }
+    foreach ($k in $localUrls) {
+        $want = $Cfg[$k].TrimEnd('/')
+        if (-not $ServerEnv.Contains($k) -or $ServerEnv[$k].TrimEnd('/') -ne $want) { $ServerChanges[$k] = $want }
+    }
+}
 foreach ($k in @($ServerChanges.Keys)) {
     if ($ServerEnv.Contains($k) -and $ServerEnv[$k] -eq $ServerChanges[$k]) { $ServerChanges.Remove($k) }
 }

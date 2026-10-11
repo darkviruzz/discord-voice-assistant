@@ -16,12 +16,17 @@ $RepoRoot = $PSScriptRoot | Split-Path -Parent
 $VaConfig = Get-VaLocalConfig -RepoRoot $RepoRoot
 $Svc      = Resolve-VaServices -Config $VaConfig -RepoRoot $RepoRoot
 
-$Services = @(
-    @{ Name = "Whisper"; Port = $Svc.WhisperPort; HealthUrl = "$($Svc.WhisperUrl)/";        HealthMatch = $null }
-    @{ Name = "Piper";   Port = $Svc.PiperPort;   HealthUrl = "$($Svc.PiperUrl)/health";    HealthMatch = "ok"  }
-    @{ Name = "Ollama";  Port = $Svc.OllamaPort;  HealthUrl = "$($Svc.OllamaUrl)/api/tags"; HealthMatch = $null }
-    @{ Name = "Server";  Port = $Svc.ServerPort;  HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
-)
+# Nur lokale Dienste, die laut Provider-Wahl (apps/server/.env) gebraucht
+# werden; die übrigen erscheinen als „extern" (OpenAI-kompatibler Server).
+$Services = @()
+if ($Svc.WhisperEnabled) { $Services += @{ Name = "Whisper"; Port = $Svc.WhisperPort; HealthUrl = "$($Svc.WhisperUrl)/";        HealthMatch = $null } }
+if ($Svc.PiperEnabled)   { $Services += @{ Name = "Piper";   Port = $Svc.PiperPort;   HealthUrl = "$($Svc.PiperUrl)/health";    HealthMatch = "ok"  } }
+if ($Svc.OllamaNeeded)   { $Services += @{ Name = "Ollama";  Port = $Svc.OllamaPort;  HealthUrl = "$($Svc.OllamaUrl)/api/tags"; HealthMatch = $null } }
+$Services += @{ Name = "Server";  Port = $Svc.ServerPort;  HealthUrl = "http://localhost:$($Svc.ServerPort)/health"; HealthMatch = $null }
+$External = @()
+if (-not $Svc.WhisperEnabled) { $External += "STT=$($Svc.Providers.Stt)" }
+if (-not $Svc.PiperEnabled)   { $External += "TTS=$($Svc.Providers.Tts)" }
+if (-not $Svc.OllamaNeeded)   { $External += "LLM=$($Svc.Providers.Llm)" }
 
 $LogDir = $Svc.LogDir
 
@@ -109,6 +114,10 @@ foreach ($svc in $Services) {
         Write-Host ("{0,-12}" -f "OK") -ForegroundColor Green -NoNewline
         Write-Host (" {0,-8} {1}" -f $pidText, "Port offen") -ForegroundColor DarkGray
     }
+}
+
+if ($External.Count -gt 0) {
+    Write-Host ("  Extern (kein lokaler Dienst): " + ($External -join ', ')) -ForegroundColor DarkGray
 }
 
 Write-Host ""

@@ -248,6 +248,34 @@ function Get-VaEmbedModel {
     return $model
 }
 
+# Welche Modell-Backends der Node-Server laut apps/server/.env (+ Panel-
+# Overrides) anspricht — und damit, welche lokalen Dienste der Launcher
+# starten/prüfen muss. Dieselben Defaults wie apps/server/src/providers/*.js:
+#   STT_PROVIDER   whispercpp (Standard) | openai   → whisper-server nötig?
+#   TTS_PROVIDER   piper (Standard) | openai | elevenlabs → Piper nötig?
+#   LLM_PROVIDER   ollama (Standard) | openai
+#   EMBED_PROVIDER ollama (Standard) | openai (nur relevant, wenn RAG an ist)
+# Ollama wird gebraucht, sobald LLM oder Embeddings über Ollama laufen.
+function Get-VaProviders {
+    param([System.Collections.IDictionary]$ServerSettings)
+    $stt = (Get-VaSetting $ServerSettings 'STT_PROVIDER').ToLower()
+    if ($stt -ne 'openai') { $stt = 'whispercpp' }
+    $tts = (Get-VaSetting $ServerSettings 'TTS_PROVIDER').ToLower()
+    if ($tts -notin @('openai', 'elevenlabs')) { $tts = 'piper' }
+    $llm = (Get-VaSetting $ServerSettings 'LLM_PROVIDER').ToLower()
+    if ($llm -ne 'openai') { $llm = 'ollama' }
+    $embedModel = Get-VaEmbedModel -ServerSettings $ServerSettings
+    return [pscustomobject]@{
+        Stt            = $stt
+        Tts            = $tts
+        Llm            = $llm
+        EmbedModel     = $embedModel   # $null = kein Ollama-Embedding nötig
+        WhisperEnabled = ($stt -eq 'whispercpp')
+        PiperEnabled   = ($tts -eq 'piper')
+        OllamaNeeded   = ($llm -eq 'ollama') -or [bool]$embedModel
+    }
+}
+
 function Get-VaPortFromUrl {
     param([string]$Url, [int]$Default)
     try {
@@ -272,10 +300,20 @@ function Test-VaTrue {
 
 # Abgeleitete, direkt nutzbare Werte für die Launcher-Skripte.
 function Resolve-VaServices {
-    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$RepoRoot)
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [System.Collections.IDictionary]$ServerSettings = $null
+    )
     $v = $Config.Values
     $whisperDir = $v['VA_WHISPER_DIR']
+    if ($null -eq $ServerSettings) { $ServerSettings = Get-VaServerSettings -RepoRoot $RepoRoot }
+    $prov = Get-VaProviders -ServerSettings $ServerSettings
     return [pscustomobject]@{
+        Providers      = $prov
+        WhisperEnabled = $prov.WhisperEnabled
+        PiperEnabled   = $prov.PiperEnabled
+        OllamaNeeded   = $prov.OllamaNeeded
         RepoRoot       = $RepoRoot
         ServerDir      = (Join-Path $RepoRoot 'apps\server')
         PiperSvcDir    = (Join-Path $RepoRoot 'services\piper')
@@ -348,16 +386,20 @@ function Test-VaServiceConfig {
     param([Parameter(Mandatory)]$Services, [hashtable]$Config)
     $issues = @()
     $hint = 'scripts\Setup-VoiceAssistant.ps1 ausführen'
-    if (-not (Test-Path -LiteralPath $Services.WhisperExe)) {
+    # Nur Dienste prüfen, die der Server laut Provider-Wahl auch braucht
+    # (Get-VaProviders) — ein Objekt ohne die Flags (alte Aufrufer) = alles prüfen.
+    $checkWhisper = ($null -eq $Services.PSObject.Properties['WhisperEnabled']) -or $Services.WhisperEnabled
+    $checkPiper = ($null -eq $Services.PSObject.Properties['PiperEnabled']) -or $Services.PiperEnabled
+    if ($checkWhisper -and -not (Test-Path -LiteralPath $Services.WhisperExe)) {
         $issues += [pscustomobject]@{ Level = 'Error'; Component = 'Whisper'; Message = "whisper-server nicht gefunden: $($Services.WhisperExe)"; Hint = $hint }
     }
-    if (-not (Test-Path -LiteralPath $Services.WhisperModel)) {
+    if ($checkWhisper -and -not (Test-Path -LiteralPath $Services.WhisperModel)) {
         $issues += [pscustomobject]@{ Level = 'Error'; Component = 'Whisper'; Message = "Whisper-Modell nicht gefunden: $($Services.WhisperModel)"; Hint = $hint }
     }
-    if (-not (Test-Path -LiteralPath $Services.PiperPython)) {
+    if ($checkPiper -and -not (Test-Path -LiteralPath $Services.PiperPython)) {
         $issues += [pscustomobject]@{ Level = 'Error'; Component = 'Piper'; Message = "Piper-Python (venv) nicht gefunden: $($Services.PiperPython)"; Hint = $hint }
     }
-    if ($Config) {
+    if ($Config -and $checkPiper) {
         $voices = $Config.Values['PIPER_VOICES_DIR']
         if (-not $voices -or -not (Test-Path -LiteralPath $voices)) {
             $issues += [pscustomobject]@{ Level = 'Error'; Component = 'Piper'; Message = "Stimmen-Ordner fehlt: $voices"; Hint = $hint }

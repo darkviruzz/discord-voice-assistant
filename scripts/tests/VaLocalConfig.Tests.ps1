@@ -99,5 +99,20 @@ $svc.VaultPath = "$t/none"
 Check 'issues: missing vault warns' (@(Test-VaServiceConfig -Services $svc -Config $cfg | Where-Object { $_.Component -eq 'Vault' -and $_.Level -eq 'Warn' }).Count -eq 1)
 Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
 Remove-Item Env:\VA_DEPLOY_ENV -ErrorAction SilentlyContinue
+# Provider-Wahl → welche lokalen Dienste nötig sind
+$pd = Get-VaProviders -ServerSettings ([ordered]@{})
+Check 'providers default: whisper+piper+ollama local' ($pd.WhisperEnabled -and $pd.PiperEnabled -and $pd.OllamaNeeded -and $pd.EmbedModel -eq 'nomic-embed-text')
+$po = Get-VaProviders -ServerSettings ([ordered]@{ STT_PROVIDER = 'OpenAI'; TTS_PROVIDER = 'elevenlabs'; LLM_PROVIDER = 'openai'; EMBED_PROVIDER = 'openai' })
+Check 'providers all external: nothing local' ((-not $po.WhisperEnabled) -and (-not $po.PiperEnabled) -and (-not $po.OllamaNeeded) -and $po.Stt -eq 'openai' -and $po.Tts -eq 'elevenlabs')
+$pe = Get-VaProviders -ServerSettings ([ordered]@{ LLM_PROVIDER = 'openai' })
+Check 'providers: ollama still needed for embeddings' ($pe.OllamaNeeded -and $pe.EmbedModel)
+$pr = Get-VaProviders -ServerSettings ([ordered]@{ LLM_PROVIDER = 'openai'; RAG_ENABLED = 'false' })
+Check 'providers: rag off + openai llm → no ollama' (-not $pr.OllamaNeeded)
+$pu = Get-VaProviders -ServerSettings ([ordered]@{ TTS_PROVIDER = 'quatsch' })
+Check 'providers: unknown tts falls back to piper' ($pu.PiperEnabled)
+$svcX = Resolve-VaServices -Config $cfg -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ STT_PROVIDER = 'openai'; TTS_PROVIDER = 'openai' })
+$issuesX = @(Test-VaServiceConfig -Services $svcX -Config $cfg)
+Check 'preflight skips whisper/piper when external' (@($issuesX | Where-Object { $_.Component -in @('Whisper', 'Piper') }).Count -eq 0)
+
 "`n$fail failure(s)"
 exit $fail

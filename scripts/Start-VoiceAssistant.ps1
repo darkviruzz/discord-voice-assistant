@@ -231,6 +231,10 @@ function Stop-AllServices {
 # ============================================================
 
 function Ensure-Ollama {
+    if (-not $Svc.OllamaNeeded) {
+        Write-Info "Ollama nicht benötigt (LLM_PROVIDER=openai, keine Ollama-Embeddings)."
+        return
+    }
     Write-Step "Prüfe Ollama..."
     if (Test-Port $OllamaPort) {
         Write-Ok "Ollama läuft bereits"
@@ -318,7 +322,20 @@ function Start-ServiceHidden {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
+# Lokale Backends, die laut Provider-Wahl gebraucht werden, alle erreichbar?
+function Test-LocalBackendsUp {
+    ((-not $Svc.WhisperEnabled) -or (Test-Port $WhisperPort)) -and
+    ((-not $Svc.PiperEnabled) -or (Test-Port $PiperPort)) -and
+    (Test-Port $ServerPort)
+}
+
+function Wait-LocalBackends {
+    if ($Svc.WhisperEnabled) { $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60 }
+    if ($Svc.PiperEnabled)   { $null = Wait-ForHttp "Piper"   "$PiperUrl/health" }
+}
+
 function Start-Whisper-Hidden {
+    if (-not $Svc.WhisperEnabled) { Write-Info "Whisper übersprungen (STT_PROVIDER=$($Svc.Providers.Stt))."; return }
     if (Test-Port $WhisperPort) { Write-Warn "Whisper läuft bereits auf Port $WhisperPort"; return }
     Write-Step "Starte Whisper hidden (Log: $WhisperLog)..."
     Start-ServiceHidden -Name "whisper" -LogFile $WhisperLog -ScriptLines @(
@@ -332,6 +349,7 @@ function Start-Whisper-Hidden {
 # /shutdown) und wird ausschließlich vom lokalen Node-Server angesprochen. Nach
 # außen ist nur der Node-Server (Bearer-geschützt) erreichbar.
 function Start-Piper-Hidden {
+    if (-not $Svc.PiperEnabled) { Write-Info "Piper übersprungen (TTS_PROVIDER=$($Svc.Providers.Tts))."; return }
     if (Test-Port $PiperPort) { Write-Warn "Piper läuft bereits auf Port $PiperPort"; return }
     Write-Step "Starte Piper hidden (Log: $PiperLog)..."
     Start-ServiceHidden -Name "piper" -LogFile $PiperLog -ScriptLines @(
@@ -404,7 +422,7 @@ if (@($preflight | Where-Object { $_.Level -eq 'Error' }).Count -gt 0) {
 if ($Mode -eq "silent") {
     Ensure-Ollama
 
-    if ((Test-Port $WhisperPort) -and (Test-Port $PiperPort) -and (Test-Port $ServerPort)) {
+    if (Test-LocalBackendsUp) {
         Write-Ok "Alle Dienste laufen bereits."
         Write-Info "Logs: $LogDir"
         Write-Info "Stoppen mit: .\scripts\Start-VoiceAssistant.ps1 -Mode stop"
@@ -415,9 +433,8 @@ if ($Mode -eq "silent") {
     Start-Whisper-Hidden
     Start-Piper-Hidden
 
-    Write-Step "Warte auf Whisper und Piper..."
-    $null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
-    $null = Wait-ForHttp "Piper"   "$PiperUrl/health"
+    Write-Step "Warte auf lokale Dienste..."
+    Wait-LocalBackends
 
     Start-Server-Hidden
 
@@ -475,17 +492,14 @@ if ($Mode -eq "all") {
         "& '$PiperPython' -u -m uvicorn server:app --host 127.0.0.1 --port $PiperPort 2>&1 | ForEach-Object { `"`$_`" } | Tee-Object -FilePath '$PiperLog'"
     )
 
-    Write-Step "Öffne Windows Terminal mit 3 Panes..."
-
     # WT direkt aufrufen – Array-ArgumentList umgeht PowerShell-Reparsing.
     # Die einzigen ';' sind hier WT-Subcommand-Trenner (eigene Array-Elemente).
-    $wtArgs = @(
-        'new-tab',     '--title', 'Server',  '--', 'powershell', '-NoProfile', '-File', $serverPane
-        ';'
-        'split-pane',  '--title', 'Whisper', '--', 'powershell', '-NoProfile', '-File', $whisperPane
-        ';'
-        'split-pane',  '--title', 'Piper',   '--', 'powershell', '-NoProfile', '-File', $piperPane
-    )
+    # Panes nur für Dienste, die laut Provider-Wahl lokal laufen.
+    $wtArgs = @('new-tab', '--title', 'Server', '--', 'powershell', '-NoProfile', '-File', $serverPane)
+    if ($Svc.WhisperEnabled) { $wtArgs += @(';', 'split-pane', '--title', 'Whisper', '--', 'powershell', '-NoProfile', '-File', $whisperPane) }
+    if ($Svc.PiperEnabled)   { $wtArgs += @(';', 'split-pane', '--title', 'Piper',   '--', 'powershell', '-NoProfile', '-File', $piperPane) }
+    Write-Step "Öffne Windows Terminal mit $(1 + [int]$Svc.WhisperEnabled + [int]$Svc.PiperEnabled) Pane(s)..."
+
     Start-Process -FilePath wt -ArgumentList $wtArgs
 
     Write-Ok "Windows Terminal gestartet."
@@ -500,7 +514,7 @@ if ($Mode -eq "all") {
 # ============================================================
 Ensure-Ollama
 
-if ((Test-Port $WhisperPort) -and (Test-Port $PiperPort) -and (Test-Port $ServerPort)) {
+if (Test-LocalBackendsUp) {
     Write-Ok "Alle Dienste laufen bereits."
     Write-Info "Logs: $LogDir"
     exit
@@ -510,9 +524,8 @@ Clear-AllLogs
 Start-Whisper-Hidden
 Start-Piper-Hidden
 
-Write-Step "Warte auf Whisper und Piper..."
-$null = Wait-ForHttp "Whisper" "$WhisperUrl/" -TimeoutSec 60
-$null = Wait-ForHttp "Piper"   "$PiperUrl/health"
+Write-Step "Warte auf lokale Dienste..."
+Wait-LocalBackends
 
 Write-Step "Starte Node-Server (Port $ServerPort) – Strg+C beendet alle Dienste..."
 Write-Info "Logs: $LogDir"

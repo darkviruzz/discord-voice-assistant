@@ -94,3 +94,17 @@ test('latestSessionSummary orders by session start, not by file time', () => {
     assert.equal(latestSessionSummary(path.join(root, 'missing')), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('total time budget: per-call timeout shrinks, exhausted budget → null (finalize goes on)', async () => {
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  process.env.SESSION_SUMMARY_TIMEOUT_MS = '20000';
+  let t = 0;
+  const timeouts = [];
+  const slow = async ({ timeoutMs }) => { timeouts.push(timeoutMs); t += 8000; return { content: 'Notiz' }; };
+  const out = await summarizeSession(md(80), { completeFn: slow, now: () => t });
+  assert.equal(out, null, 'budget runs out before the merge call');
+  assert.equal(timeouts[0], 20000);
+  assert.equal(timeouts[1], 12000);
+  assert.equal(timeouts[2], 4000);
+  assert.equal(timeouts.length, 3);
+});

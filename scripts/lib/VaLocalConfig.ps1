@@ -309,6 +309,14 @@ function Resolve-VaServices {
     $whisperDir = $v['VA_WHISPER_DIR']
     if ($null -eq $ServerSettings) { $ServerSettings = Get-VaServerSettings -RepoRoot $RepoRoot }
     $prov = Get-VaProviders -ServerSettings $ServerSettings
+    # Ohne Vault (weder Launcher-VA_VAULT_PATH noch OBSIDIAN_VAULT_PATH in der
+    # Server-.env) ist die Vault-Suche aus → keine Embeddings, also auch kein
+    # Ollama allein dafür starten.
+    $vaultSet = [bool]$v['VA_VAULT_PATH'] -or [bool](Get-VaSetting $ServerSettings 'OBSIDIAN_VAULT_PATH')
+    if (-not $vaultSet -and $prov.EmbedModel) {
+        $prov.EmbedModel = $null
+        $prov.OllamaNeeded = ($prov.Llm -eq 'ollama')
+    }
     return [pscustomobject]@{
         Providers      = $prov
         WhisperEnabled = $prov.WhisperEnabled

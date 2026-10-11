@@ -241,6 +241,15 @@ export const CATALOG = [
       + 'mit kleinem Kontextfenster).',
   },
   {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_TIMEOUT_MS',
+    label: 'Zeitbudget der Session-Zusammenfassung (ms)', type: 'number', def: '600000',
+    applyMode: 'next-finalize',
+    desc: 'Obergrenze für die gesamte Zusammenfassung (alle Abschnitte + Zusammenführung). '
+      + 'Sie läuft innerhalb des Finalize, auf den der Bot höchstens 30 Minuten wartet — ist '
+      + 'das Budget aufgebraucht, wird ohne Zusammenfassung finalisiert statt den ganzen '
+      + 'Finalize zu gefährden.',
+  },
+  {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_VAULT_DIR',
     label: 'Zusammenfassung zusätzlich in den Vault schreiben', type: 'string', def: '',
     applyMode: 'next-finalize',

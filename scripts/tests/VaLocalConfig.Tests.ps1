@@ -114,5 +114,13 @@ $svcX = Resolve-VaServices -Config $cfg -RepoRoot $fakeRepo -ServerSettings ([or
 $issuesX = @(Test-VaServiceConfig -Services $svcX -Config $cfg)
 Check 'preflight skips whisper/piper when external' (@($issuesX | Where-Object { $_.Component -in @('Whisper', 'Piper') }).Count -eq 0)
 
+$cfgNoVault = @{ Values = [ordered]@{}; Sources = @{} }
+foreach ($k in $cfg.Values.Keys) { $cfgNoVault.Values[$k] = $cfg.Values[$k] }
+$cfgNoVault.Values['VA_VAULT_PATH'] = ''
+$svcNV = Resolve-VaServices -Config $cfgNoVault -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ LLM_PROVIDER = 'openai' })
+Check 'no vault + openai llm → ollama not needed' (-not $svcNV.OllamaNeeded)
+$svcV = Resolve-VaServices -Config $cfg -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ LLM_PROVIDER = 'openai' })
+Check 'vault + openai llm → ollama for embeddings' ($svcV.OllamaNeeded)
+
 "`n$fail failure(s)"
 exit $fail

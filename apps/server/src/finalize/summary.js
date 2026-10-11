@@ -88,14 +88,28 @@ export function capText(text, limit) {
 }
 
 // transcriptMd → summary string, or null (disabled, empty transcript, LLM error).
-export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null } = {}) {
+// Total time budget for one summary (all chunk calls + the final merge). The
+// summary runs inside the finalize the bot waits for (30 min budget there);
+// without a total cap a long session on a slow model could eat it all and turn
+// a finished transcript into a timed-out finalize. Out of budget → no summary.
+function summaryBudgetMs() {
+  return intEnv('SESSION_SUMMARY_TIMEOUT_MS', 600_000, 10_000);
+}
+
+export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null, now = () => Date.now() } = {}) {
   if (!summaryEnabled()) return null;
   const body = transcriptBody(transcriptMd);
   if (body.length < 200) { debug('session-summary: transcript too short — skipped'); return null; }
   const chunkChars = intEnv('SESSION_SUMMARY_CHUNK_CHARS', 12000, 2000);
   const maxChars = intEnv('SESSION_SUMMARY_MAX_CHARS', 2500, 300);
   const model = summaryModel();
-  const timeoutMs = 180_000;
+  const deadline = now() + summaryBudgetMs();
+  // Per call: at most 180 s, and never past the total deadline.
+  const callTimeout = () => {
+    const left = deadline - now();
+    if (left < 1000) throw new Error(`time budget (${summaryBudgetMs()} ms) exhausted`);
+    return Math.min(180_000, left);
+  };
   try {
     const chunks = chunkLines(body, chunkChars);
     let notes;
@@ -106,7 +120,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       for (let i = 0; i < chunks.length; i++) {
         try { onProgress?.({ phase: 'summary', done: i, total: chunks.length }); } catch { /* reporting only */ }
         const { content } = await completeFn({
-          model, timeoutMs,
+          model, timeoutMs: callTimeout(),
           messages: [
             { role: 'system', content: PART_SYSTEM },
             { role: 'user', content: `Ausschnitt ${i + 1} von ${chunks.length}:\n${chunks[i]}` },
@@ -117,7 +131,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       if (notes.length === 0) return null;
     }
     const { content } = await completeFn({
-      model, timeoutMs,
+      model, timeoutMs: callTimeout(),
       messages: [
         { role: 'system', content: FINAL_SYSTEM },
         { role: 'user', content: `${chunks.length === 1 ? 'Transkript' : 'Notizen'}:\n${notes.join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.` },

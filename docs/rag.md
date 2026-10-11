@@ -3,8 +3,8 @@
 Semantische Suche über den Obsidian-Vault der Kampagne. Sie läuft **im Node-Server**
 (`apps/server/src/rag/`, reines JavaScript, keine nativen Module) — kein eigener
 Dienst, kein Port, kein Python. Pro Wake-Word-Query liefert sie die passendsten
-Vault-Abschnitte als Kampagnen-Kontext; beim `/join` einer fortgesetzten Session
-speist sie das Session-Briefing. Ist RAG aus, der Index noch nicht gebaut oder
+Vault-Abschnitte als Kampagnen-Kontext (auch für getippte Fragen wie `/ask`
+und `/recap`). Ist RAG aus, der Index noch nicht gebaut oder
 schlagen die Embeddings fehl, nutzt der Server wie bisher das statische
 `CAMPAIGN.md` — die Voice-Pipeline wartet höchstens `RAG_TIMEOUT_MS`.
 
@@ -84,7 +84,7 @@ Alle im Web-Panel (Gruppe „Server · RAG (Vault-Suche)") und in
 | Variable | Standard | Kurz |
 |---|---|---|
 | `RAG_ENABLED` | `true` | an/aus (nur mit `OBSIDIAN_VAULT_PATH`) |
-| `RAG_TIMEOUT_MS` | `800` | Budget pro Abfrage, danach `CAMPAIGN.md` (Briefing: ≥ 5000 ms) |
+| `RAG_TIMEOUT_MS` | `800` | Budget pro Abfrage, danach `CAMPAIGN.md` |
 | `RAG_SCORE_THRESHOLD` | leer | max. Cosine-Distanz (1 − Ähnlichkeit); Startwert ~0.5 |
 | `RAG_MAX_CHUNK_CHARS` | `2000` | max. Zeichen pro Abschnitt |
 | `RAG_INDEX_DIR` | `./data/rag` | Index-Verzeichnis (Docker: `/data/rag`) |

@@ -65,7 +65,7 @@ Servers unklar, `TTS_RESPONSE_FORMAT=wav` setzen. Komprimierte Antworten
 | `LLM_PROVIDER` | `ollama` (natives API, Keep-Warm per `OLLAMA_KEEP_ALIVE`) oder `openai` |
 | `OLLAMA_URL`, `OLLAMA_MODEL` | bei `ollama` |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | bei `openai` (`LLM_MODEL` leer → `OLLAMA_MODEL`) |
-| `SUMMARY_MODEL` | eigenes Modell für die rollende Zusammenfassung (beide Provider) |
+| `SUMMARY_MODEL` | eigenes Modell für die rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize (beide Provider) |
 | `LLM_TIMEOUT_MS` | Obergrenze pro Antwort (Default 120 s; vorher unbegrenzt) |
 
 Die Antwort-, Zusammenfassungs- und Session-Zusammenfassungs-Aufrufe laufen

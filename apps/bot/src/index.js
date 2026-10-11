@@ -16,7 +16,8 @@ import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
 import { startTranscriptCleanup } from './transcriptWriter.js';
 import { pullArchive, startArchiveCleanup } from './archivePuller.js';
 import { LeaveFinalizeScheduler } from './leaveFinalize.js';
-import { FinalizeStatus, formatProgress } from './finalizeStatus.js';
+import { FinalizeStatus, formatProgress, finalizeResultText } from './finalizeStatus.js';
+import { chatMessageText, splitDiscordMessage } from './discordText.js';
 import * as transport from './transport/index.js';
 
 // Last-resort crash safety: a single corrupt audio packet or stray async error
@@ -246,15 +247,13 @@ client.once('clientReady', async () => {
       ? await client.channels.fetch(msg.channelId).catch(() => null)
       : _textChannel;
     if (!targetChannel?.send) return;
-    const speaker = msg.userDisplayName || 'Spieler';
-    const assistant = msg.assistantName || 'Rabenauge';
-    let text;
-    if (msg.isStop) {
-      text = `**[${speaker}]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
-    } else {
-      text = `**[${speaker}]** ${msg.question}\n**[${assistant}]** ${msg.answer ?? ''}`;
+    // A long answer (a /recap, or a long /ask question + answer) can exceed
+    // Discord's 2000-char limit — one oversized send was rejected and the
+    // answer lost. Post it in order as several messages instead.
+    for (const part of splitDiscordMessage(chatMessageText(msg))) {
+      try { await targetChannel.send(part); }
+      catch (e) { warn('chat_message send failed:', e.message); return; }
     }
-    targetChannel.send(text).catch((e) => warn('chat_message send failed:', e.message));
   });
 });
 
@@ -324,18 +323,6 @@ async function resolveSessionTextChannel(session, preferred = null) {
   return _textChannel?.send ? _textChannel : null;
 }
 
-function finalizeResultText(session, result, retentionNote = '', { reFinalize = false } = {}) {
-  return [
-    `✅ ${reFinalize ? 'Neu finalisiert' : 'Finalisiert'}.`,
-    `Sprecher-Äußerungen: ${result.userCount}, Einträge gesamt: ${result.spanCount}`,
-    `Transkript: \`${result.transcriptPath}\``,
-    `Audio-Archiv: ${result.audioOk ? `\`${result.archiveDir}\` (${result.audioCount} Spuren)` : '⚠️ nicht erzeugt'}`,
-    retentionNote.trim(),
-    // Discord caps a message at 2000 chars; the full recap is in the archive (summary.md).
-    result.summary ? `📝 **Zusammenfassung:** ${result.summary.length > 1100 ? `${result.summary.slice(0, 1100).trimEnd()} … (vollständig: summary.md im Archiv)` : result.summary}` : '',
-  ].filter(Boolean).join('\n');
-}
-
 // Session ids with a performFinalize in flight. The persisted FINALIZING
 // status is only set once the link is up (so an unreachable server leaves the
 // session untouched); this closes the window before that against a second
@@ -377,7 +364,7 @@ async function performFinalize(session, opts = {}) {
     // the session exactly as it was, so /finalize run can simply be retried.
     await ensureFinalizeLink(onProgress);
     const out = await runFinalize(session, { ...opts, onProgress });
-    await status.done(finalizeResultText(session, out.result, out.retentionNote, { reFinalize: opts.fromArchive }));
+    await status.done(finalizeResultText(out.result, out.retentionNote, { reFinalize: opts.fromArchive, maxChars: status.textRoom() }));
     return out;
   } catch (e) {
     await status.fail(`❌ Finalize fehlgeschlagen: ${e.message}\nDie lokalen Aufnahmen bleiben erhalten — erneut mit \`/finalize run session:${session.id}\`.`);
@@ -958,7 +945,7 @@ client.on('interactionCreate', async (i) => {
           fromArchive: reFinalize,
           reason: reFinalize ? 'neu (aus dem Archiv)' : null,
         });
-        await i.editReply({ content: finalizeResultText(session, result, retentionNote, { reFinalize }) }).catch(() => {});
+        await i.editReply({ content: finalizeResultText(result, retentionNote, { reFinalize }) }).catch(() => {});
       } catch (e) {
         error(e);
         await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` }).catch(() => {});

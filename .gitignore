@@ -168,3 +168,8 @@ vite.config.ts.timestamp-*
 verda-test/
 outputs/
 sample_layouts/
+
+# STT-Benchmark: echte Aufnahmen, Referenzen und Ergebnisse bleiben lokal
+bench/stt/*
+!bench/stt/README.md
+!bench/stt/profiles.example.json

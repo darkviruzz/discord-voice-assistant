@@ -1,6 +1,6 @@
 // Vault RAG — semantic search over the Obsidian campaign vault, in-process.
 //
-// This is the server-facing API (campaignContext.js, sessionBriefing.js,
+// This is the server-facing API (campaignContext.js,
 // control.js, index.js). It replaces the former Python service (apps/rag/,
 // FastAPI + ChromaDB): the index lives in this process (rag/indexer.js +
 // rag/store.js), embeddings come from providers/embed.js (Ollama /api/embed by

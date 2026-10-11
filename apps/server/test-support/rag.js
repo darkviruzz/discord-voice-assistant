@@ -1,5 +1,5 @@
 // Shared fixtures for the vault-RAG tests (test/rag*.test.js and the
-// campaignContext/sessionBriefing/control tests that go through the real
+// campaignContext/control tests that go through the real
 // in-process RAG). Deliberately NOT under test/: `node --test` runs every .js
 // file below a `test` directory as a test file of its own.
 

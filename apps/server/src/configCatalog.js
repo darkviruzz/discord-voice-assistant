@@ -488,10 +488,10 @@ export const CATALOG = [
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'DISCORD_POST_REPLIES',
     label: 'Antwort in Discord-Chat schreiben', type: 'boolean',
     onValue: 'true', offValue: 'false', def: 'false', applyMode: 'live',
-    desc: 'Ob die Antwort des Assistenten (und Stop-Hinweise) zusätzlich als Text in '
-      + 'den Discord-Textkanal geschrieben werden. Standard: aus — Sprachausgabe + '
-      + 'Transkript sind der primäre Ausgabeweg. true = Frage/Antwort erscheinen auch '
-      + 'als Chat-Nachricht. Wird pro Anfrage gelesen.',
+    desc: 'Ob Antworten auf SPRACH-Anfragen (Wake-Word) und Stop-Hinweise zusätzlich als '
+      + 'Text in den Discord-Textkanal geschrieben werden. Standard: aus — Sprachausgabe + '
+      + 'Transkript sind der primäre Ausgabeweg. Getippte Fragen (/ask, /recap, @Erwähnung) '
+      + 'werden unabhängig davon immer im Kanal beantwortet. Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'OLLAMA_KEEP_WARM_INTERVAL_MS',
@@ -677,29 +677,18 @@ export const CATALOG = [
       + 'Änderung → Index wird neu aufgebaut.',
   },
   {
-    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_ENABLED',
-    label: 'Session-Briefing beim /join', type: 'boolean', onValue: 'true', offValue: 'false',
-    def: 'true', applyMode: 'next-session',
-    desc: 'Session-Briefing beim /join (einmal pro Session) — RAG-Query mit der aus dem '
-      + 'Transkript-JSONL dieser Session rekonstruierten rollenden Zusammenfassung, Ergebnis '
-      + 'als system-Message an den Anfang der conversationHistory. Greift damit nur beim '
-      + 'Fortsetzen einer Session mit bereits zusammengefasstem Verlauf (z. B. nach '
-      + 'Server-Neustart); eine neue Session hat noch keine Zusammenfassung. Nur wirksam '
-      + 'wenn RAG aktiv ist (RAG_ENABLED + OBSIDIAN_VAULT_PATH). Wird beim Session-Start gelesen.',
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_ENABLED',
+    label: 'Letzte Session als Kontext', type: 'boolean', onValue: 'true', offValue: 'false',
+    def: 'true', applyMode: 'live',
+    desc: 'Gibt Rabenauge bei jeder Anfrage die Zusammenfassung der zuletzt finalisierten '
+      + 'Session (summary.md im Archiv) als Hintergrund mit — damit beantwortet er „Was war '
+      + 'letztes Mal?" bzw. /recap. Nur auf Nachfrage: der Kontext ist als „nicht ungefragt '
+      + 'nacherzählen" markiert, es gibt keine Begrüßung beim /join. Wird pro Anfrage gelesen.',
   },
   {
-    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_TOP_K',
-    label: 'Vault-Chunks fürs Briefing', type: 'number', def: '3', applyMode: 'next-session',
-    desc: 'Anzahl Vault-Abschnitte fürs /join-Briefing (1–20, mehr wird gekappt). Wird beim '
-      + 'Session-Start gelesen.',
-  },
-  {
-    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_BRIEFING_POST_CHAT',
-    label: 'Briefing als Chat-Nachricht posten', type: 'boolean', onValue: 'true', offValue: 'false',
-    def: 'false', applyMode: 'next-session',
-    desc: 'Briefing zusätzlich als kurze Discord-Textnachricht in den Join-Kanal posten '
-      + '(LLM-generierter 2-3-Satz-Text). false = nur als LLM-Kontext injizieren. Wird '
-      + 'beim Session-Start gelesen.',
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_MAX_CHARS',
+    label: 'Letzte Session: max. Zeichen', type: 'number', def: '2500', applyMode: 'live',
+    desc: 'Obergrenze für den Kontextblock der letzten Session (gekürzt am Satzende).',
   },
 
   // ======================= SERVER: TTS ======================================

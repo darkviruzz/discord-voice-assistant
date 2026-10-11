@@ -289,9 +289,8 @@ Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines J
 | `RAG_MAX_CHUNK_CHARS` | `2000` | Max. Zeichen pro Vault-Abschnitt (Notizen werden an `##` geteilt, lange Abschnitte zusätzlich). Änderung → jede Notiz wird einmal neu eingebettet. |
 | `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
 | `RAG_RESCAN_INTERVAL_MS` | `300000` | Kompletter Vault-Abgleich zusätzlich zum Datei-Watcher (`0` = aus). Unveränderte Notizen kosten keine Embeddings. |
-| `RAG_BRIEFING_ENABLED` | `true` | Vault-Briefing beim `/join` (einmal pro Session): RAG-Query mit der aus dem JSONL dieser Session rekonstruierten Zusammenfassung → Vault-Kontext als `role:system`-Message am Anfang der History. Greift nur beim Fortsetzen einer Session mit schon zusammengefasstem Verlauf (z. B. nach Server-Neustart); eine neue Session hat noch kein Summary. Nur wirksam bei aktiver Vault-Suche. |
-| `RAG_BRIEFING_TOP_K` | `3` | Anzahl der Vault-Chunks fürs Briefing (1–20). |
-| `RAG_BRIEFING_POST_CHAT` | `false` | Briefing zusätzlich als kurze Discord-Textnachricht posten (einmal pro Session, nicht bei jedem Reconnect). `false` = nur als LLM-Kontext injizieren. |
+| `LAST_SESSION_CONTEXT_ENABLED` | `true` | Zusammenfassung der letzten finalisierten Session (`summary.md`) als Kontext bei jeder Anfrage — für „Was war letztes Mal?“ bzw. `/recap`; nur auf Nachfrage, keine Begrüßung beim `/join`. |
+| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks. |
 
 #### TTS (Text-to-Speech)
 

@@ -13,7 +13,6 @@ import { CATALOG, catalogEntry, isSecretEntry } from '../src/configCatalog.js';
 import { coerce } from '../src/configStore.js';
 import { ragConfig } from '../src/rag/index.js';
 import { embedPrefixes } from '../src/providers/embed.js';
-import { briefingConfig } from '../src/sessionBriefing.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverDir = path.resolve(here, '..');
@@ -57,7 +56,7 @@ function withEnvCleared(fn) {
 test('every RAG_* / EMBED_* read by the server is a server-scope catalog entry in the RAG group', () => {
   const used = ragKeysUsedInServerCode();
   for (const k of ['RAG_ENABLED', 'RAG_INDEX_DIR', 'RAG_TIMEOUT_MS', 'RAG_SCORE_THRESHOLD', 'RAG_MAX_CHUNK_CHARS',
-    'RAG_RESCAN_INTERVAL_MS', 'RAG_BRIEFING_ENABLED', 'EMBED_PROVIDER', 'EMBED_MODEL', 'EMBED_API_KEY',
+    'RAG_RESCAN_INTERVAL_MS', 'EMBED_PROVIDER', 'EMBED_MODEL', 'EMBED_API_KEY',
     'EMBED_BASE_URL', 'EMBED_KEEP_ALIVE', 'EMBED_QUERY_PREFIX', 'EMBED_DOC_PREFIX']) {
     assert.ok(used.includes(k), `scan should find ${k} (found ${used.join(', ')})`);
   }
@@ -97,10 +96,6 @@ test('RAG/EMBED catalog defaults == code fallbacks', () => withEnvCleared(() => 
   process.env.EMBED_QUERY_PREFIX = def('EMBED_QUERY_PREFIX');
   process.env.EMBED_DOC_PREFIX = def('EMBED_DOC_PREFIX');
   assert.deepEqual(embedPrefixes(), { query: 'search_query: ', doc: 'search_document: ' });
-  const b = briefingConfig();
-  assert.equal(String(b.briefingEnabled), def('RAG_BRIEFING_ENABLED'));
-  assert.equal(String(b.briefingTopK), def('RAG_BRIEFING_TOP_K'));
-  assert.equal(String(b.briefingPostChat), def('RAG_BRIEFING_POST_CHAT'));
 }));
 
 test('env(\'EMBED_*\', fallback) defaults in providers/embed.js == catalog defaults', () => {

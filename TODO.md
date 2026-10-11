@@ -151,11 +151,10 @@ Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
   - `RAG_SCORE_THRESHOLD` (2.1.0) filtert schwache Treffer bereits im RAG-Service weg, bevor sie hier ankommen (s. `feature/rag-service`)
 
 - [x] **`feature/obsidian-session-start`** — Briefing beim `/join`.
-  - `apps/server/src/sessionBriefing.js`: nach dem Live-Context-Rebuild RAG-Query mit der rekonstruierten rollenden Zusammenfassung als Suchtext
   - Vault-Chunks als `role: system`-Message am Anfang der `conversationHistory`
-  - Optional (`RAG_BRIEFING_POST_CHAT`): LLM erzeugt kurzes Briefing → Discord-Text-Nachricht (Bot rendert `briefing`-`chat_message`)
+  - Ersetzt (Okt. 2026): kein automatisches /join-Briefing mehr — Finalize schreibt `summary.md`, die letzte Zusammenfassung ist Kontext für Anfragen, `/recap` auf Nachfrage
   - Durchgängig best-effort: No-op wenn RAG aus, kein Summary vorhanden oder ein Call fehlschlägt
-  - Alle RAG-Env-Vars (inkl. `RAG_BRIEFING_*`) seit 2.1.0 im Settings-Katalog (`configCatalog.js` + `config_state` in `control.js`) — sichtbar/konfigurierbar im Web-Panel
+  - Alle RAG-Env-Vars seit 2.1.0 im Settings-Katalog (`configCatalog.js` + `config_state` in `control.js`) — sichtbar/konfigurierbar im Web-Panel
 
 - [x] **`feat/rag-in-node`** — RAG in den Node-Server verlegt; Python-Dienst, `va-rag`-Image und pytest-CI-Job entfernt.
   - `apps/server/src/rag/`: Frontmatter (`yaml`, rein JS), `##`-Chunking, Vault-Scan, Float32-Brute-Force-Cosinus, atomar persistierter Index (`RAG_INDEX_DIR`, Compose: `/data/rag` auf `server-data`), inkrementeller Single-Flight-Sync, `fs.watch`-Watcher + periodischer Abgleich

@@ -12,7 +12,6 @@ import { publishPresence, publishEntry, publishSessionEnded } from './liveBus.js
 import { runPipeline, runTextPipeline } from './pipeline.js';
 import { rebuildLiveContext, maybeFold } from './rollingSummary.js';
 import { appendLive } from './liveContext.js';
-import { maybeSessionBriefing, briefingConfig } from './sessionBriefing.js';
 import { ragConfig } from './rag/index.js';
 import { readSessionEvents } from './sessionEvents.js';
 import { streamTtsToSession, defaultDebugTtsText, cancelTtsForSession, recordPlaybackStopped } from './ttsStream.js';
@@ -21,6 +20,10 @@ import { botConnections, broadcastToAllBots } from './broadcast.js';
 import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { FinalizeRegistry } from './finalize/inflight.js';
+import { llmConfig } from './providers/llm.js';
+import { sttConfig } from './providers/stt.js';
+import { ttsConfig } from './providers/tts.js';
+import { lastSessionContextEnabled, lastSessionContextMaxChars } from './lastSession.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 
@@ -90,9 +93,7 @@ function logSessionMeta(sessionId, msg) {
     botVersion: msg.botVersion ?? null,
     serverVersion: getVersion(),
     llm: {
-      provider: 'ollama',
-      url: process.env.OLLAMA_URL ?? 'http://localhost:11434',
-      model: process.env.OLLAMA_MODEL ?? 'llama3',
+      ...llmConfig(),
       historyTurns: Number(process.env.HISTORY_TURNS ?? 6),
       systemPromptFile: process.env.SYSTEM_PROMPT_FILE ?? null,
       systemPromptInline: !!process.env.SYSTEM_PROMPT,
@@ -108,24 +109,22 @@ function logSessionMeta(sessionId, msg) {
       campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
       campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),
     },
-    // Effective values as rag/index.js and sessionBriefing apply them (fallback
-    // timeout, sanitized threshold, embedding provider/model) plus the index
-    // stats at session start — not the raw env strings.
-    rag: { ...ragConfig(), ...briefingConfig() },
+    // Effective values as rag/index.js applies them (fallback timeout,
+    // sanitized threshold, embedding provider/model) plus the index stats at
+    // session start — not the raw env strings.
+    rag: ragConfig(),
+    lastSessionContext: {
+      enabled: lastSessionContextEnabled(),
+      maxChars: lastSessionContextMaxChars(),
+    },
     stt: {
-      provider: 'whisper.cpp',
-      url: process.env.WHISPER_URL ?? 'http://localhost:8080',
-      language: process.env.WHISPER_LANGUAGE ?? 'auto',
-      temperature: Number(process.env.WHISPER_TEMPERATURE ?? 0.2),
+      ...sttConfig(),
       noSpeechProbStored: true,
       noSpeechProbFiltersLive: false,
       maxChunkSeconds: Number(process.env.STT_MAX_CHUNK_SECONDS ?? 30),
       silenceThresh: Number(process.env.STT_SILENCE_THRESH ?? 300),
     },
-    tts: {
-      provider: process.env.TTS_PROVIDER ?? 'piper',
-      url: process.env.TTS_URL ?? 'http://localhost:5000',
-    },
+    tts: ttsConfig(),
     wakeword: {
       word: process.env.WAKE_WORD ?? 'Rabenauge',
       fuzzy: (process.env.WAKE_WORD_FUZZY ?? 'true') !== 'false',
@@ -365,15 +364,11 @@ export function initControlWSS({ bearer } = {}) {
             log('control: session_start sid=', activeSessionId.toString(), 'guild=', msg.guildId, 'channel=', msg.channelId, msg.resume ? '(resume)' : '(new)');
             // Rebuild the live-transcript context from the JSONL (resume, or any
             // start where the buffer is still empty). Fire-and-forget — must not
-            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. Once the
-            // rolling summary is reconstructed, use it to pull a vault briefing
-            // (Phase 4); also best-effort, never blocks the ack. The briefing
-            // claims its once-per-session slot right here (synchronously), so
-            // the session_start the bot re-emits after a reconnect is a no-op.
-            const rebuilt = rebuildLiveContext(startedSession, activeSessionId);
-            rebuilt.catch((e) => warn('live-context rebuild failed:', e.message));
-            maybeSessionBriefing(startedSession, activeSessionId, { channelId: msg.channelId, after: rebuilt })
-              .catch((e) => warn('session briefing failed:', e.message));
+            // block the ack. No-op when LIVE_CONTEXT_ENABLED is off. (No /join
+            // briefing any more: "what happened last time" is answered on request
+            // from the last session's summary, see pipeline.buildSystemBlocks.)
+            rebuildLiveContext(startedSession, activeSessionId)
+              .catch((e) => warn('live-context rebuild failed:', e.message));
             send(ws, { type: 'ack', cmdId: msg.cmdId, ok: true, op: 'session_start' });
             return;
           }

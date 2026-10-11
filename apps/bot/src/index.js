@@ -249,10 +249,7 @@ client.once('clientReady', async () => {
     const speaker = msg.userDisplayName || 'Spieler';
     const assistant = msg.assistantName || 'Rabenauge';
     let text;
-    if (msg.briefing) {
-      // Session-start vault briefing — assistant-only, no player turn.
-      text = `📖 **Briefing** — ${msg.briefing}`;
-    } else if (msg.isStop) {
+    if (msg.isStop) {
       text = `**[${speaker}]** ${msg.question}\n⏹ *Wiedergabe unterbrochen.*`;
     } else {
       text = `**[${speaker}]** ${msg.question}\n**[${assistant}]** ${msg.answer ?? ''}`;
@@ -507,9 +504,14 @@ client.on('interactionCreate', async (i) => {
   try {
     if (!i.isChatInputCommand()) return;
 
-    if (i.commandName === 'ask') {
+    if (i.commandName === 'ask' || i.commandName === 'recap') {
       _textChannel = i.channel;
-      const question = i.options.getString('frage', true).trim();
+      // /recap is a fixed question: the server hands the LLM the last finalized
+      // session's summary as context (LAST_SESSION_CONTEXT_*), so this works in
+      // and outside a voice session — on request only, never as a greeting.
+      const question = i.commandName === 'recap'
+        ? 'Fasse kurz zusammen, was in unserer letzten Sitzung passiert ist und wo die Gruppe steht.'
+        : i.options.getString('frage', true).trim();
       if (!question) {
         return i.reply({ content: 'Bitte eine Frage angeben.', flags: MessageFlags.Ephemeral });
       }

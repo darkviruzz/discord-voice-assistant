@@ -2,7 +2,7 @@ import { debug, warn } from '../logger.js';
 import { baseUrl, env, authHeaders, postJson } from './http.js';
 
 // LLM provider — one chat-completion call for every LLM use in the server
-// (wake-word/text answers, rolling summary, session briefing).
+// (wake-word/text answers, rolling summary, finalize session summary).
 //
 //   LLM_PROVIDER=ollama (default)  native Ollama /api/chat: OLLAMA_URL,
 //                                  OLLAMA_MODEL, OLLAMA_KEEP_ALIVE (keeps the

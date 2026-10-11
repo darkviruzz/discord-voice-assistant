@@ -2,7 +2,7 @@
 // settings from process.env, the real providers/embed.js talking to a fake
 // Ollama /api/embed over HTTP (deterministic vectors), a real tmp vault and a
 // real index directory. This is the path campaignContext.js and
-// sessionBriefing.js use.
+// pipeline use.
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -144,7 +144,7 @@ test('fail-soft: blank query, disabled, slow or failing backend → [] (bounded 
   const t0 = Date.now();
   assert.deepEqual(await queryRag('Drache'), []);
   assert.ok(Date.now() - t0 < 500, `bounded by RAG_TIMEOUT_MS (took ${Date.now() - t0} ms)`);
-  // An off-hot-path caller (the /join briefing) may wait longer.
+  // An off-hot-path caller may wait longer than the voice path.
   ollama.opts.queryDelayMs = 150;
   assert.equal((await queryRag('Drache', { timeoutMs: 3000 })).length, 2);
 

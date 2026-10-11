@@ -94,7 +94,6 @@ Alle im Web-Panel (Gruppe „Server · RAG (Vault-Suche)") und in
 | `EMBED_BASE_URL` / `EMBED_API_KEY` | leer | nur `openai` (URL inkl. `/v1`) |
 | `EMBED_KEEP_ALIVE` | `30m` | Ollama hält das Modell geladen |
 | `EMBED_QUERY_PREFIX` / `EMBED_DOC_PREFIX` | leer = auto | Task-Präfixe; `" "` = keins |
-| `RAG_BRIEFING_*` | | Session-Briefing beim `/join` |
 
 **Schwellwert kalibrieren:** mit `DEBUG=1` loggt jede Abfrage ihre Treffer samt
 Distanz (`rag: query "…" → 3 hit(s) [npc/graf.md 0.31, …]`). Gute Treffer liegen
@@ -132,3 +131,13 @@ mit `nomic-embed-text` meist bei 0.2–0.45.
 deterministischem Embedder) und `ragService.test.js` (Ende-zu-Ende über
 `queryRag` gegen ein Fake-Ollama `/api/embed`). Die Fälle sind aus der
 pytest-Suite des früheren Python-Dienstes portiert.
+
+## Vergangene Sessions
+
+Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). Die jeweils
+letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
+(`LAST_SESSION_CONTEXT_*`) — beantwortet wird das nur auf Nachfrage („Was war
+letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Damit auch ältere
+Sessions über die Vault-Suche auffindbar sind, `SESSION_SUMMARY_VAULT_DIR`
+setzen: dann landet jede Zusammenfassung als Notiz im Vault und wird
+automatisch mitindiziert.

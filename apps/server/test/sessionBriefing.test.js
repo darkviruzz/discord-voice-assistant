@@ -1,69 +1,74 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { maybeSessionBriefing, briefingConfig } from '../src/sessionBriefing.js';
 import { ensureSession, dropSession } from '../src/state.js';
 import { botConnections } from '../src/broadcast.js';
+import { startRag, stopRag, _activeIndexer, _resetState as _resetRagState } from '../src/rag/index.js';
+import { makeTmpDir, writeNote, startFakeOllama } from '../test-support/rag.js';
 
 const ENV_KEYS = [
-  'RAG_URL', 'RAG_TIMEOUT_MS', 'RAG_BRIEFING_ENABLED', 'RAG_BRIEFING_POST_CHAT',
-  'RAG_BRIEFING_TOP_K', 'CAMPAIGN_CONTEXT_MAX_CHARS', 'OLLAMA_URL',
+  'RAG_ENABLED', 'RAG_TIMEOUT_MS', 'RAG_BRIEFING_ENABLED', 'RAG_BRIEFING_POST_CHAT',
+  'RAG_BRIEFING_TOP_K', 'RAG_SCORE_THRESHOLD', 'RAG_INDEX_DIR', 'CAMPAIGN_CONTEXT_MAX_CHARS',
+  'OLLAMA_URL', 'OBSIDIAN_VAULT_PATH', 'LLM_PROVIDER', 'EMBED_PROVIDER', 'EMBED_MODEL',
 ];
 
 let savedEnv;
 let nextSid = 1000n;
 let fakeBot;
+let tmp;
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   for (const k of ENV_KEYS) delete process.env[k];
+  tmp = makeTmpDir('briefing-');
   // A fake registered bot connection that records every broadcast.
   fakeBot = { readyState: 1, sent: [], send(raw) { this.sent.push(JSON.parse(raw)); } };
   botConnections.add(fakeBot);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await stopRag();
+  _resetRagState();
   botConnections.delete(fakeBot);
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-// One in-process HTTP server standing in for both the RAG service (/query)
-// and Ollama (/api/chat). Records every request body per path.
-function withStub({ chunks = [], briefing = 'Die Gruppe stand vor dem Tor.', ragDelayMs = 0 } = {}, fn) {
-  const calls = { query: [], chat: [] };
-  return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        const json = JSON.parse(body || '{}');
-        if (req.url === '/query') {
-          calls.query.push(json);
-          setTimeout(() => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(chunks));
-          }, ragDelayMs);
-        } else if (req.url === '/api/chat') {
-          calls.chat.push(json);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ message: { content: briefing } }));
-        } else {
-          res.writeHead(404); res.end();
-        }
-      });
-    });
-    server.listen(0, '127.0.0.1', async () => {
-      const base = `http://127.0.0.1:${server.address().port}`;
-      process.env.RAG_URL = base;
-      process.env.OLLAMA_URL = base;
-      try { resolve(await fn(calls)); }
-      catch (e) { reject(e); }
-      finally { server.close(); }
-    });
-  });
+// The real in-process RAG over a tmp vault plus one fake Ollama for both the
+// embeddings (/api/embed, deterministic vectors) and the briefing text
+// (/api/chat). Every `chunks` entry becomes a vault note `source` whose whole
+// text is `text` (one chunk). `calls.query` lists the RAG searches that
+// reached the embedding backend ({ query }), `calls.chat` the LLM requests.
+async function withStub({ chunks = [], briefing = 'Die Gruppe stand vor dem Tor.', ragDelayMs = 0 } = {}, fn) {
+  const vault = path.join(tmp, 'vault');
+  fs.mkdirSync(vault, { recursive: true });
+  for (const c of chunks) writeNote(vault, c.source, c.text);
+  const ollama = await startFakeOllama({ chat: () => briefing });
+  process.env.OLLAMA_URL = ollama.url;
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.RAG_INDEX_DIR = path.join(tmp, 'rag-index');
+  const calls = {
+    get query() {
+      return ollama.calls.embed
+        .flatMap((c) => c.input)
+        .filter((t) => t.startsWith('search_query: '))
+        .map((t) => ({ query: t.slice('search_query: '.length) }));
+    },
+    get chat() { return ollama.calls.chat; },
+  };
+  try {
+    await startRag({ watch: false, saveDelayMs: 10 });
+    await _activeIndexer().whenSynced();
+    ollama.opts.queryDelayMs = ragDelayMs;
+    return await fn(calls);
+  } finally {
+    await ollama.close();
+  }
 }
 
 // A real, registered session (state.js) — the briefing only touches sessions
@@ -105,8 +110,22 @@ test('no-op when briefing is disabled', async () => {
   });
 });
 
-test('no-op when RAG is down (connection refused)', async () => {
-  process.env.RAG_URL = 'http://127.0.0.1:1';
+test('no-op when the embedding backend is down (connection refused)', async () => {
+  await withStub({ chunks: [{ text: 'Baron Kelthur herrscht.', source: 'k.md' }] }, async () => {
+    process.env.OLLAMA_URL = 'http://127.0.0.1:1';
+    const { sid, session } = makeSession('Wir trafen Baron Kelthur.');
+    await maybeSessionBriefing(session, sid, { channelId: 'c1' });
+    assert.equal(session.conversationHistory.length, 0);
+    dropSession(sid);
+  });
+});
+
+test('no-op while the vault index is not built yet', async () => {
+  writeNote(path.join(tmp, 'vault'), 'k.md', 'Baron Kelthur herrscht.');
+  process.env.OBSIDIAN_VAULT_PATH = path.join(tmp, 'vault');
+  process.env.RAG_INDEX_DIR = path.join(tmp, 'rag-index');
+  process.env.OLLAMA_URL = 'http://127.0.0.1:1'; // nothing can be embedded
+  await startRag({ watch: false, retryBaseMs: 60_000 });
   const { sid, session } = makeSession('Wir trafen Baron Kelthur.');
   await maybeSessionBriefing(session, sid, { channelId: 'c1' });
   assert.equal(session.conversationHistory.length, 0);
@@ -115,13 +134,14 @@ test('no-op when RAG is down (connection refused)', async () => {
 
 test('injects vault context as a leading system message, searching with the summary', async () => {
   process.env.RAG_BRIEFING_TOP_K = '4';
-  await withStub({ chunks: [{ text: 'Baron Kelthur herrscht.', source: 'npcs/kelthur.md' }] }, async (calls) => {
+  const others = Array.from({ length: 5 }, (_, i) => ({ text: `Notiz ${i} über Baron Kelthur.`, source: `n${i}.md` }));
+  await withStub({ chunks: [{ text: 'Baron Kelthur herrscht.', source: 'npcs/kelthur.md' }, ...others] }, async (calls) => {
     const { sid, session } = makeSession('Wir trafen Baron Kelthur.');
     session.conversationHistory.push({ role: 'user', content: 'hallo' });
     await maybeSessionBriefing(session, sid, { channelId: 'c1' });
     assert.equal(calls.query.length, 1);
     assert.equal(calls.query[0].query, 'Wir trafen Baron Kelthur.');
-    assert.equal(calls.query[0].top_k, 4);
+    assert.equal(session.conversationHistory[0].content.match(/\[Quelle: /g).length, 4, 'RAG_BRIEFING_TOP_K chunks');
     assert.equal(session.conversationHistory[0].role, 'system');
     assert.ok(session.conversationHistory[0].content.includes('Baron Kelthur herrscht.'));
     assert.ok(session.conversationHistory[0].content.includes('[Quelle: npcs/kelthur.md]'));

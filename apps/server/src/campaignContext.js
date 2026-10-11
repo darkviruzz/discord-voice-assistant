@@ -1,10 +1,12 @@
 // Campaign context — semantic RAG lookup with a static-file fallback.
 //
-// When RAG_URL is set, `query` is sent to the Python RAG service (apps/rag/),
-// which returns the most relevant vault chunks for the current wake-word text.
-// When RAG is unset/unreachable/empty, this degrades to Variante A: a single
-// hand-/Cowork-maintained file (CAMPAIGN.md) read from the Obsidian vault,
-// cached with an mtime check so edits take effect without a server restart.
+// When RAG is enabled (RAG_ENABLED, default true, and OBSIDIAN_VAULT_PATH set),
+// `query` is searched in the in-process vault index (rag/index.js), which
+// returns the most relevant vault chunks for the current wake-word text. When
+// RAG is off, its index isn't built yet, the embedding backend fails or
+// nothing matches, this degrades to Variante A: a single hand-/Cowork-
+// maintained file (CAMPAIGN.md) read from the Obsidian vault, cached with an
+// mtime check so edits take effect without a server restart.
 //
 // The result is prepended as a `system` block for both the answer LLM and the
 // rolling summarizer (so proper names are known to be "game-relevant").
@@ -12,7 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { warn, debug } from './logger.js';
-import { queryRag, ragEnabled } from './ragClient.js';
+import { queryRag, ragEnabled, formatRagHits } from './rag/index.js';
 
 let cache = { path: null, mtimeMs: 0, content: '' };
 
@@ -78,14 +80,15 @@ export function capCampaignContext(text) {
 
 // Returns the campaign-context text for `query`, or '' when unavailable/disabled.
 //
-// Async because the RAG path is an HTTP call. When RAG_URL is set and the query
-// is non-empty, a semantic vault lookup is preferred; an empty/failed RAG result
-// transparently falls back to the static CAMPAIGN.md (existing behaviour).
-// Added latency is bounded by RAG_TIMEOUT_MS.
+// Async because the RAG path embeds the query (one round-trip to the embedding
+// backend). When RAG is enabled and the query is non-empty, a semantic vault
+// lookup is preferred; an empty/failed RAG result transparently falls back to
+// the static CAMPAIGN.md (existing behaviour). Added latency is bounded by
+// RAG_TIMEOUT_MS.
 export async function getCampaignContext(query = null) {
   if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return '';
   if (ragEnabled() && typeof query === 'string' && query.trim()) {
-    const rag = capCampaignContext(await queryRag(query));
+    const rag = capCampaignContext(formatRagHits(await queryRag(query)));
     if (rag) return rag;
     // RAG unreachable/empty → fall through to the static file.
   }

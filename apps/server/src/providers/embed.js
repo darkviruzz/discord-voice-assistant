@@ -12,9 +12,9 @@ import { baseUrl, env, authHeaders, postJson } from './http.js';
 //
 // nomic-embed-text was trained with task prefixes and retrieves noticeably
 // better with them; they are applied automatically for nomic models and can be
-// overridden (or disabled with a single space trimmed to '') via
-// EMBED_QUERY_PREFIX / EMBED_DOC_PREFIX. The prefixes are part of what gets
-// embedded, so the index records them and re-embeds when they change.
+// overridden (or disabled with a single space) via EMBED_QUERY_PREFIX /
+// EMBED_DOC_PREFIX. The prefixes are part of what gets embedded, so the index
+// records them (embedSignature) and rebuilds when they change.
 
 export function embedProvider() {
   return env('EMBED_PROVIDER', 'ollama').toLowerCase() === 'openai' ? 'openai' : 'ollama';
@@ -28,13 +28,21 @@ function prefixDefaults(model) {
   return /nomic/i.test(model) ? { query: 'search_query: ', doc: 'search_document: ' } : { query: '', doc: '' };
 }
 
+// Unset or '' → the model's default (so an empty .env line, a compose
+// `${EMBED_QUERY_PREFIX:-}` passthrough or a cleared settings field never
+// silently disables the nomic prefixes); whitespace only (e.g. " ") → no
+// prefix; anything else is used verbatim (quote it in .env to keep a
+// trailing space).
+function prefixSetting(raw, fallback) {
+  if (raw === undefined || raw === '') return fallback;
+  return raw.trim() === '' ? '' : raw;
+}
+
 export function embedPrefixes() {
   const d = prefixDefaults(embedModel());
-  const q = process.env.EMBED_QUERY_PREFIX;
-  const doc = process.env.EMBED_DOC_PREFIX;
   return {
-    query: q === undefined ? d.query : q,
-    doc: doc === undefined ? d.doc : doc,
+    query: prefixSetting(process.env.EMBED_QUERY_PREFIX, d.query),
+    doc: prefixSetting(process.env.EMBED_DOC_PREFIX, d.doc),
   };
 }
 

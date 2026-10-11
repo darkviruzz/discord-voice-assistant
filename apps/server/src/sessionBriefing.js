@@ -17,7 +17,7 @@
 import { randomUUID } from 'crypto';
 import { log, warn, debug } from './logger.js';
 import { complete } from './providers/llm.js';
-import { queryRag, ragEnabled, ragConfig } from './ragClient.js';
+import { queryRag, ragEnabled, ragConfig, formatRagHits } from './rag/index.js';
 import { capCampaignContext } from './campaignContext.js';
 import { broadcastToAllBots } from './broadcast.js';
 import { sessions } from './state.js';
@@ -111,7 +111,7 @@ export async function maybeSessionBriefing(session, sessionId, { channelId = nul
   }
 
   const timeoutMs = Math.max(ragConfig().timeoutMs, BRIEFING_MIN_TIMEOUT_MS);
-  const context = capCampaignContext(await queryRag(summary, briefingTopK(), { timeoutMs }));
+  const context = capCampaignContext(formatRagHits(await queryRag(summary, { topK: briefingTopK(), timeoutMs })));
   if (!context) {
     debug('sessionBriefing: RAG returned nothing — skipping');
     return;

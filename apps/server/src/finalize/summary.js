@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { warn, log, debug } from '../logger.js';
-import { complete, defaultModel } from '../providers/llm.js';
+import { complete, summaryModel } from '../providers/llm.js';
 
 // Session summary at finalize: a short German recap of the finished session,
 // built from the merged transcript. It is what Rabenauge answers "Was war
@@ -12,7 +12,9 @@ import { complete, defaultModel } from '../providers/llm.js';
 // Long sessions are summarised map-reduce style: the transcript is cut at
 // line boundaries into ~SESSION_SUMMARY_CHUNK_CHARS pieces, each piece is
 // condensed, then all partial notes are merged into one recap capped at
-// SESSION_SUMMARY_MAX_CHARS. Uses the LLM provider (SUMMARY_MODEL if set).
+// SESSION_SUMMARY_MAX_CHARS. Uses the summary endpoint of the LLM provider
+// (SUMMARY_PROVIDER/SUMMARY_BASE_URL/SUMMARY_MODEL, each falling back to the
+// answer LLM).
 //
 // Strictly best-effort: any failure returns null and the finalize result is
 // unaffected.
@@ -43,19 +45,20 @@ function intEnv(key, def, min) {
   return Number.isFinite(n) && n >= min ? Math.floor(n) : def;
 }
 
-function summaryModel() {
-  const m = (process.env.SUMMARY_MODEL || '').trim();
-  return m || defaultModel();
-}
-
-// Transcript markdown → only the spoken lines, no headers/front matter, so the
-// model's budget goes to content. Falls back to the raw text if nothing matches.
-// mergeTranscript writes spoken lines as "<ts> **Label:** text" and header
-// facts as "- **Beginn:** …" — keep the former, drop the latter.
-export function transcriptBody(md) {
+// Transcript markdown → only the players' spoken lines, no headers/front
+// matter, so the model's budget goes to content. Falls back to the raw text if
+// no spoken line matches. mergeTranscript writes spoken lines as
+// "<ts> **Label:** text" and header facts as "- **Beginn:** …" — keep the
+// former, drop the latter. The assistant's own replies (label = assistantName,
+// the wake word) are dropped too: a reply built from stale campaign context
+// ended up in summary.md as if it had happened in the game.
+export function transcriptBody(md, { assistantName = 'Rabenauge' } = {}) {
   const lines = String(md || '').split(/\r?\n/);
   const spoken = lines.filter((l) => /\*\*[^*\n]+:\*\*/.test(l) && !/^\s*-\s/.test(l));
-  return (spoken.length ? spoken : lines).join('\n').trim();
+  if (!spoken.length) return lines.join('\n').trim();
+  const asst = String(assistantName || '').trim().toLowerCase();
+  const label = (l) => l.match(/\*\*([^*\n]+):\*\*/)[1].trim().toLowerCase();
+  return spoken.filter((l) => !asst || label(l) !== asst).join('\n').trim();
 }
 
 // Cut at line boundaries into pieces of at most maxChars (a single overlong
@@ -97,9 +100,9 @@ function summaryBudgetMs() {
   return intEnv('SESSION_SUMMARY_TIMEOUT_MS', 600_000, 10_000);
 }
 
-export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null, now = () => Date.now() } = {}) {
+export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null, now = () => Date.now(), assistantName } = {}) {
   if (!summaryEnabled()) return null;
-  const body = transcriptBody(transcriptMd);
+  const body = transcriptBody(transcriptMd, { assistantName });
   if (body.length < 200) { debug('session-summary: transcript too short — skipped'); return null; }
   const chunkChars = intEnv('SESSION_SUMMARY_CHUNK_CHARS', 12000, 2000);
   const maxChars = intEnv('SESSION_SUMMARY_MAX_CHARS', 2500, 300);
@@ -121,7 +124,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       for (let i = 0; i < chunks.length; i++) {
         try { onProgress?.({ phase: 'summary', done: i, total: chunks.length }); } catch { /* reporting only */ }
         const { content } = await completeFn({
-          model, timeoutMs: callTimeout(),
+          model, role: 'summary', timeoutMs: callTimeout(),
           messages: [
             { role: 'system', content: PART_SYSTEM },
             { role: 'user', content: `Ausschnitt ${i + 1} von ${chunks.length}:\n${chunks[i]}` },
@@ -132,7 +135,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       if (notes.length === 0) return null;
     }
     const { content } = await completeFn({
-      model, timeoutMs: callTimeout(),
+      model, role: 'summary', timeoutMs: callTimeout(),
       messages: [
         { role: 'system', content: FINAL_SYSTEM },
         { role: 'user', content: `${chunks.length === 1 ? 'Transkript' : 'Notizen'}:\n${notes.join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.` },

@@ -12,7 +12,7 @@
 // appendLive() (pure) then maybeFold() (this module) as two distinct steps.
 
 import { log, warn, debug } from './logger.js';
-import { complete, defaultModel } from './providers/llm.js';
+import { complete, summaryModel } from './providers/llm.js';
 import {
   liveContextEnabled, rawWindowChars, foldChars, summaryMaxChars, foldMinIntervalMs,
   windowChars, selectFoldSegment, splitForRebuild, renderForLlm, removeEntries, makeEntry,
@@ -38,11 +38,6 @@ const SUMMARY_SYSTEM = [
   '- Lass Smalltalk und Wiederholungen weg, behalte den roten Faden.',
   '- Antworte NUR mit der Zusammenfassung, ohne Vorrede oder Formatierung.',
 ].join('\n');
-
-function summaryModel() {
-  const m = process.env.SUMMARY_MODEL;
-  return (m && m.trim()) ? m.trim() : defaultModel();
-}
 
 // Truncate a finished summary to the char budget, preferring a sentence/word cut.
 function capSummary(text, limit) {
@@ -70,6 +65,7 @@ export async function summarize(prev, segment) {
   try {
     ({ content: raw } = await complete({
       model,
+      role: 'summary',
       messages: [
         { role: 'system', content: SUMMARY_SYSTEM },
         { role: 'user',   content: userContent },

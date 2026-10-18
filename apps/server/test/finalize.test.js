@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { finalizeSession, buildFinalizeModel, verifyUploads, sha256File } from '../src/finalize/index.js';
+import { summarizeSession } from '../src/finalize/summary.js';
 
 const BASE = 1_700_000_000_000;
 
@@ -121,6 +122,38 @@ test('finalizeSession writes transcript + archive with checksums', async () => {
   }
   // Audio copies present.
   assert.ok(fs.existsSync(path.join(result.archiveDir, 'audio', 'a.wav')));
+});
+
+test('the session summary sees the players only — not the assistant\'s replies', async () => {
+  const upload = tmpdir();
+  const out = tmpdir();
+  const manifest = { ...baseManifest(upload), wakeWord: 'Orakel' };
+  const evs = [
+    { ...events[0], wakeword: { word: 'Orakel' } },
+    { type: 'assistant_response', sessionId: String(BASE), tsMs: BASE + 2500, text: 'Baron Kelthur herrscht noch immer über Graufurt.' },
+  ];
+  const prompts = [];
+  let opts = null;
+  await finalizeSession({
+    sessionId: String(BASE), manifest, events: evs, uploadDir: upload,
+    archiveRoot: path.join(out, 'archive'), transcriptRoot: path.join(out, 'transcripts'),
+    transcribeFn: fakeStt({
+      'a.wav': { text: 'Orakel, wir reiten nach Graufurt und reden dort mit dem Hauptmann der Wache über den gestohlenen Vertrag.', words: null },
+      'b.wav': { text: 'Ich behalte den Vertrag bei mir und lasse den Hauptmann nicht aus den Augen, bis wir wissen, wem er dient.', words: null },
+    }),
+    opts: {
+      timeZone: 'UTC',
+      summarizeFn: (md, o) => {
+        opts = o;
+        return summarizeSession(md, { ...o, completeFn: async ({ messages }) => { prompts.push(messages[1].content); return { content: 'Zusammenfassung.' }; } });
+      },
+    },
+  });
+  assert.equal(opts.assistantName, 'Orakel');
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /gestohlenen Vertrag/);
+  assert.match(prompts[0], /wem er dient/);
+  assert.doesNotMatch(prompts[0], /herrscht noch immer/);
 });
 
 test('finalizeSession finalizes the verified subset when an upload is corrupt', async () => {

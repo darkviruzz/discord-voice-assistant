@@ -118,9 +118,49 @@ Servers unklar, `TTS_RESPONSE_FORMAT=wav` setzen. Komprimierte Antworten
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | bei `openai` (`LLM_MODEL` leer → `OLLAMA_MODEL`) |
 | `SUMMARY_MODEL` | eigenes Modell für die rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize (beide Provider) |
 | `LLM_TIMEOUT_MS` | Obergrenze pro Antwort (Default 120 s; vorher unbegrenzt) |
+| `LLM_THINK` | nur `ollama`: Feld `think` jeder Anfrage. `false` (Default) = direkt antworten, `true` = denken, `low`/`medium`/`high` = Stufe (gpt-oss), `auto` = weglassen |
+| `LLM_REASONING_EFFORT` | nur `openai`, nur wenn gesetzt: `reasoning_effort` (z. B. `none`, `minimal`, `low`) |
+| `LLM_CHAT_TEMPLATE_KWARGS` | nur `openai`, nur wenn gesetzt: JSON-Objekt als `chat_template_kwargs`, z. B. `{"enable_thinking":false}` |
+| `SUMMARY_PROVIDER`, `SUMMARY_BASE_URL`, `SUMMARY_API_KEY` | optional eigener Server für beide Zusammenfassungen (siehe unten) |
 
-Die Antwort-, Zusammenfassungs- und Session-Zusammenfassungs-Aufrufe laufen
-alle über denselben Provider.
+### Denkphase (Reasoning-Modelle)
+
+Reasoning-Modelle wie `gemma4`, `qwen3` oder `deepseek-r1` „denken" vor der
+Antwort, wenn man es ihnen nicht abstellt. Für eine vorgelesene Antwort ist das
+reine Wartezeit: Am 2026-10-18 erzeugte `gemma4:12b` für eine Antwort von 290
+Zeichen 1506 Tokens (42,6 s Generierung, ~50 s bis zur Sprachausgabe); mit
+`think: false` waren es 19 Tokens in 0,7 s. Deshalb schickt der Server bei
+Ollama standardmäßig `think: false` — für Antworten, beide Zusammenfassungen und
+den Keep-Warm-Ping. Nicht-Reasoning-Modelle (llama3.2 …) akzeptieren
+`false` ebenfalls. Lehnt ein Modell den eingestellten Wert ab (HTTP 400, z. B.
+`LLM_THINK=true` bei llama3.2), fragt der Server einmal ohne `think` nach und
+merkt sich das für dieses Modell.
+
+OpenAI-kompatible Server haben dafür kein einheitliches Feld, und ein strikter
+Server lehnt unbekannte Felder ab. Deshalb wird dort nur gesendet, was gesetzt
+ist: `LLM_REASONING_EFFORT` (OpenAI-Standard, z. B. vLLM mit gpt-oss, Ollama
+`/v1`) bzw. `LLM_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}` (vLLM,
+llama.cpp-Server, SGLang mit Qwen3 & Co.).
+
+### Eigener Server für die Zusammenfassungen
+
+Die rollende und die Session-Zusammenfassung laufen standardmäßig über
+denselben Server wie die Antworten (mit `SUMMARY_MODEL` als eigenem
+Modellnamen). Mit `SUMMARY_PROVIDER` / `SUMMARY_BASE_URL` gehen sie an einen
+anderen — etwa damit eine 3-h-Session auf einem größeren Modell innerhalb von
+`SESSION_SUMMARY_TIMEOUT_MS` fertig wird, ohne das Live-Modell zu verdrängen:
+
+| Key | leer = |
+|---|---|
+| `SUMMARY_PROVIDER` | `LLM_PROVIDER` |
+| `SUMMARY_BASE_URL` | `OLLAMA_URL` bzw. `LLM_BASE_URL` des gewählten Anbieters |
+| `SUMMARY_MODEL` | `OLLAMA_MODEL` bzw. `LLM_MODEL` des gewählten Anbieters — bei abweichendem Anbieter setzen |
+| `SUMMARY_API_KEY` | `LLM_API_KEY`, aber nur, wenn es derselbe Server ist |
+
+`SUMMARY_BASE_URL` und `SUMMARY_API_KEY` sind nur über `.env` änderbar, nicht
+im Panel: der Server schickt den Schlüssel an diese Adresse.
+`LLM_REASONING_EFFORT` / `LLM_CHAT_TEMPLATE_KWARGS` gelten nur für den
+Antwort-Server; `LLM_THINK` gilt für jeden Ollama-Server.
 
 ## Embeddings
 

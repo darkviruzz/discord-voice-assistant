@@ -20,6 +20,34 @@ test('transcriptBody keeps spoken lines, drops header facts', () => {
   assert.ok(!b.includes('Beginn'));
 });
 
+// 2026-10-18: a Rabenauge reply built from an outdated CAMPAIGN.md ended up in
+// summary.md as if it had happened in the game.
+const MIXED = ['# Session', '', '- **Teilnehmer:** Anna, Ben', '', '---', '',
+  '[20:00:01] **Anna (Mira):** **Rabenauge**, wer ist Baron Kelthur?',
+  '[20:00:09] **Rabenauge:** Baron Kelthur herrscht noch immer über Graufurt.',
+  '[20:00:15] **Rabenauge:** _[weiter]_ Er ist ein Tyrann.',
+  '[20:00:20] **Ben:** _(getippt)_ Wir gehen zur Burg.',
+].join('\n');
+
+test('transcriptBody drops the assistant\'s own replies, keeps every player line', () => {
+  assert.deepEqual(transcriptBody(MIXED).split('\n'), [
+    '[20:00:01] **Anna (Mira):** **Rabenauge**, wer ist Baron Kelthur?',
+    '[20:00:20] **Ben:** _(getippt)_ Wir gehen zur Burg.',
+  ]);
+  // The label is the session's wake word (manifest.wakeWord), any case.
+  const orakel = MIXED.replaceAll('**Rabenauge:**', '**Orakel:**');
+  assert.equal(transcriptBody(orakel, { assistantName: 'orakel' }).split('\n').length, 2);
+  assert.equal(transcriptBody(orakel).split('\n').length, 4, 'another label is a player');
+});
+
+test('only assistant lines → no summary (no fallback to the raw text)', async () => {
+  const only = Array.from({ length: 8 }, (_, i) => `[20:0${i}:00] **Rabenauge:** Baron Kelthur herrscht seit vielen Jahren über Graufurt, Absatz ${i}.`).join('\n');
+  assert.equal(transcriptBody(only), '');
+  let called = false;
+  assert.equal(await summarizeSession(only, { completeFn: async () => { called = true; return { content: 'x' }; } }), null);
+  assert.equal(called, false);
+});
+
 test('chunkLines respects the budget at line boundaries; capText cuts at a sentence', () => {
   const chunks = chunkLines('aaaa\nbbbb\ncccc', 9);
   assert.deepEqual(chunks, ['aaaa\nbbbb', 'cccc']);

@@ -472,6 +472,37 @@ export const CATALOG = [
       + 'keinen). Secret — hier nur Status sichtbar; Änderung über .env.',
   },
   {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_THINK',
+    label: 'Denkphase (Ollama think)', type: 'enum',
+    enumValues: ['false', 'true', 'low', 'medium', 'high', 'auto'], def: 'false', applyMode: 'live',
+    desc: 'Steuert bei LLM_PROVIDER=ollama das Feld think jeder /api/chat-Anfrage (Antworten, '
+      + 'rollende und Session-Zusammenfassung, Keep-Warm). false = Reasoning-Modelle (gemma4, '
+      + 'qwen3, deepseek-r1 …) antworten direkt, ohne vorher zu „denken" — sonst erzeugt z. B. '
+      + 'gemma4:12b über 1000 Denk-Tokens (~40 s) vor einer Antwort von zwei Sätzen. true = '
+      + 'denken lassen; low/medium/high = Denkstufe (gpt-oss, das sich nicht abschalten lässt); '
+      + 'auto = Feld weglassen (Standard des Modells). Lehnt ein Modell den Wert ab, fragt der '
+      + 'Server einmal ohne think nach und merkt sich das. Bei LLM_PROVIDER=openai ohne Wirkung '
+      + '(dort LLM_REASONING_EFFORT / LLM_CHAT_TEMPLATE_KWARGS). Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_REASONING_EFFORT',
+    label: 'reasoning_effort (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: wird als reasoning_effort mitgeschickt, z. B. none, '
+      + 'minimal oder low, um die Denkphase eines Reasoning-Modells abzuschalten bzw. zu '
+      + 'kürzen (welche Werte gelten, sagt die Doku des Servers). Leer = Feld wird nicht '
+      + 'gesendet (Standard — ein strikter Server lehnt unbekannte Felder ab). Gilt nicht für '
+      + 'einen separaten Zusammenfassungs-Server (SUMMARY_BASE_URL). Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_CHAT_TEMPLATE_KWARGS',
+    label: 'chat_template_kwargs (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Nur bei LLM_PROVIDER=openai: JSON-Objekt, das als chat_template_kwargs mitgeschickt '
+      + 'wird — z. B. {"enable_thinking":false}, um bei vLLM, llama.cpp-Server oder SGLang die '
+      + 'Denkphase von Qwen3 & Co. abzuschalten. Leer = nicht gesendet (Standard); kein '
+      + 'gültiges JSON-Objekt = nicht gesendet + Warnung im Log. Gilt nicht für einen separaten '
+      + 'Zusammenfassungs-Server (SUMMARY_BASE_URL). Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_TIMEOUT_MS',
     label: 'LLM-Timeout (ms)', type: 'number', def: '120000', applyMode: 'live',
     desc: 'Maximale Dauer einer Antwort-Anfrage inklusive Generierung, bevor sie als '
@@ -575,8 +606,38 @@ export const CATALOG = [
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MODEL',
     label: 'Modell für Zusammenfassung', type: 'string', def: '', applyMode: 'live',
     desc: 'Separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung '
-      + 'beim Finalize (beide LLM-Anbieter). Leer = Antwort-Modell (OLLAMA_MODEL bzw. '
-      + 'LLM_MODEL). Wird pro Zusammenfassung gelesen.',
+      + 'beim Finalize (beide LLM-Anbieter). Leer = Antwort-Modell des Zusammenfassungs-'
+      + 'Anbieters (OLLAMA_MODEL bzw. LLM_MODEL) — bei einem abweichenden SUMMARY_PROVIDER '
+      + 'also hier den Modellnamen dieses Servers setzen. Wird pro Zusammenfassung gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_PROVIDER',
+    label: 'Anbieter für Zusammenfassung', type: 'enum', enumValues: ['', 'ollama', 'openai'],
+    def: '', applyMode: 'live',
+    desc: 'Eigener LLM-Anbieter für die rollende und die Session-Zusammenfassung (z. B. ein '
+      + 'größeres Modell auf einem anderen Server, damit lange Sessions im Zeitbudget '
+      + 'SESSION_SUMMARY_TIMEOUT_MS fertig werden). Leer = wie LLM_PROVIDER. ollama = natives '
+      + 'Ollama-API, openai = OpenAI-kompatibles /chat/completions. Server: SUMMARY_BASE_URL '
+      + '(leer = OLLAMA_URL bzw. LLM_BASE_URL), Modell: SUMMARY_MODEL. Wird pro '
+      + 'Zusammenfassung gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_BASE_URL',
+    label: 'Server-URL für Zusammenfassung', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt SUMMARY_API_KEY an diese Adresse.',
+    desc: 'Basis-URL des Zusammenfassungs-Servers — bei SUMMARY_PROVIDER=openai inklusive /v1 '
+      + '(angefragt wird <URL>/chat/completions), bei ollama die Ollama-URL (<URL>/api/chat). '
+      + 'Leer = OLLAMA_URL bzw. LLM_BASE_URL des gewählten Anbieters. Wird pro Zusammenfassung '
+      + 'gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_API_KEY',
+    label: 'API-Key für Zusammenfassung', type: 'string', def: '', applyMode: 'live',
+    secret: true, editable: false,
+    desc: 'Optionaler Bearer-Token für den Zusammenfassungs-Server. Leer = LLM_API_KEY, aber '
+      + 'nur, wenn die Zusammenfassung an denselben Server wie die Antworten geht — an eine '
+      + 'andere SUMMARY_BASE_URL wird LLM_API_KEY nie geschickt. Secret — hier nur Status '
+      + 'sichtbar; Änderung über .env.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MAX_CHARS',

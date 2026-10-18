@@ -20,7 +20,7 @@ import { botConnections, broadcastToAllBots } from './broadcast.js';
 import { getBotOverrides, setBotReported } from './configStore.js';
 import { AutoFinalizeTimer } from './finalize/autoTimer.js';
 import { FinalizeRegistry } from './finalize/inflight.js';
-import { llmConfig, defaultModel } from './providers/llm.js';
+import { llmConfig, summaryConfig } from './providers/llm.js';
 import { sttConfig } from './providers/stt.js';
 import { ttsConfig } from './providers/tts.js';
 import { lastSessionContextEnabled, lastSessionContextMaxChars } from './lastSession.js';
@@ -104,7 +104,8 @@ function logSessionMeta(sessionId, msg) {
       foldChars: Number(process.env.LIVE_FOLD_CHARS ?? 3000),
       renderMaxChars: Number(process.env.LIVE_RENDER_MAX_CHARS ?? 6000),
       foldMinIntervalMs: Number(process.env.LIVE_FOLD_MIN_INTERVAL_MS ?? 0),
-      summaryModel: (process.env.SUMMARY_MODEL || '').trim() || defaultModel(),
+      summaryModel: summaryConfig().model,
+      summaryEndpoint: summaryConfig(),
       summaryMaxChars: Number(process.env.SUMMARY_MAX_CHARS ?? 2000),
       campaignContextFile: process.env.CAMPAIGN_CONTEXT_FILE ?? 'CAMPAIGN.md',
       campaignContextMaxChars: Number(process.env.CAMPAIGN_CONTEXT_MAX_CHARS ?? 6000),

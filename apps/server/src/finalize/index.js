@@ -191,7 +191,7 @@ export async function finalizeSession({
   // Session summary (LLM, best-effort — null on any failure). Written before the
   // checksum pass below so it is part of the archive the bot pulls back.
   report({ phase: 'summary' });
-  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report });
+  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report, assistantName: wakeWord });
   if (summary) {
     fs.writeFileSync(path.join(archiveDir, 'summary.md'), summary + '\n');
     fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');

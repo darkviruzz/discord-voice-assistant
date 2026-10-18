@@ -22,6 +22,31 @@ const DEFAULT_TIMING = Object.freeze({
 
 function jitter(ms) { return Math.round(ms * (0.8 + Math.random() * 0.4)); }
 
+function intEnv(key, def, min) {
+  const n = Number(process.env[key]);
+  return Number.isFinite(n) && n > 0 ? Math.max(min, Math.round(n)) : def;
+}
+
+function fmtDuration(ms) {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
+}
+
+// How long the bot waits for a server finalize. An inactivity timeout, not a
+// fixed deadline: every finalize_progress for the session pushes the idle
+// deadline out, so only a server that has gone silent on it fails the wait
+// (the server sends a keepalive progress at least once a minute while a run
+// lasts, also through phases without ticks of their own). The old fixed 30 min
+// was too short for a 3 h session (re-STT ~25-30 min + LLM summary): the bot
+// gave up and left the session open while the server finished the transcript.
+// The overall cap only guards against a run that keeps ticking forever.
+// Read per finalize (panel: applyMode live).
+export function finalizeWaitLimits() {
+  return {
+    idleMs: intEnv('FINALIZE_IDLE_TIMEOUT_MS', 600_000, 120_000),
+    maxMs: intEnv('FINALIZE_MAX_MS', 10_800_000, 600_000),
+  };
+}
+
 export class ControlClient extends EventEmitter {
   constructor({ baseUrl, bearer, botId, fsm, timing = {} }) {
     super();
@@ -53,8 +78,8 @@ export class ControlClient extends EventEmitter {
     this.reconnectTimer = null;
 
     this.pendingSession = null;
-    // cmdId → { type, resolve, reject, timer, resumable, msg, needsResend } for
-    // in-flight request/response calls.
+    // cmdId → { type, resolve, reject, timer, idleTimer, idleTimeoutMs,
+    // sessionId, resumable, msg, needsResend } for in-flight request/response calls.
     this.pending = new Map();
   }
 
@@ -67,7 +92,7 @@ export class ControlClient extends EventEmitter {
   //
   // A reply can only arrive on the socket the request went out on, so when that
   // socket closes a plain request is rejected right away (waiting for its
-  // timeout would just hang the caller — up to 30 min for a finalize).
+  // timeout would just hang the caller — minutes for a finalize).
   //
   // `resumable` requests instead survive a dropped link: they stay pending and
   // are RE-SENT with the SAME cmdId as soon as the link is registered again.
@@ -77,7 +102,12 @@ export class ControlClient extends EventEmitter {
   // also be issued while the link is still (re)connecting — it then goes out on
   // registration. Only a link that is stopped or gave up rejects it. The overall
   // timeout keeps running across reconnects.
-  _request(type, payload = {}, { timeoutMs = 15_000, resumable = false } = {}) {
+  //
+  // `idleTimeoutMs` adds an inactivity timeout on top: the request also fails
+  // when no finalize_progress for it arrived for that long (each one restarts
+  // the timer, see _notePendingProgress). It runs across reconnects too — a
+  // re-sent finalize is answered with a 'joined' progress right away.
+  _request(type, payload = {}, { timeoutMs = 15_000, idleTimeoutMs = 0, resumable = false } = {}) {
     const cmdId = randomUUID();
     const msg = { type, cmdId, ...payload };
     const sent = this._sendIfReady(msg);
@@ -86,13 +116,41 @@ export class ControlClient extends EventEmitter {
     }
     if (!sent) log(`control: ${type} queued until the link is registered (cmdId ${cmdId})`);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(cmdId);
-        reject(new Error(`${type}: Timeout`));
+      const p = {
+        type, resolve, reject, timer: null, idleTimer: null, idleTimeoutMs,
+        sessionId: payload.sessionId != null ? String(payload.sessionId) : null,
+        resumable, msg: resumable ? msg : null, needsResend: !sent,
+      };
+      p.timer = setTimeout(() => {
+        this._rejectPending(cmdId, new Error(idleTimeoutMs > 0
+          ? `${type}: Timeout (Obergrenze ${fmtDuration(timeoutMs)} erreicht)`
+          : `${type}: Timeout`));
       }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(cmdId, { type, resolve, reject, timer, resumable, msg: resumable ? msg : null, needsResend: !sent });
+      p.timer.unref?.();
+      this.pending.set(cmdId, p);
+      if (idleTimeoutMs > 0) this._armIdleTimer(cmdId, p);
     });
+  }
+
+  // (Re)start a request's inactivity timer.
+  _armIdleTimer(cmdId, p) {
+    clearTimeout(p.idleTimer);
+    p.idleTimer = setTimeout(() => {
+      this._rejectPending(cmdId, new Error(`${p.type}: Timeout (${fmtDuration(p.idleTimeoutMs)} ohne Fortschritt vom Server)`));
+    }, p.idleTimeoutMs);
+    p.idleTimer.unref?.();
+  }
+
+  // A finalize_progress is a sign of life of that finalize → restart the idle
+  // timer of every request waiting on it. Matched by cmdId OR sessionId: the
+  // server sends progress to all bots keyed by session, and a request that
+  // joined a run started by an earlier request sees that run's cmdId.
+  _notePendingProgress(msg) {
+    const sessionId = msg.sessionId != null ? String(msg.sessionId) : null;
+    for (const [cmdId, p] of this.pending) {
+      if (!(p.idleTimeoutMs > 0)) continue;
+      if (cmdId === msg.cmdId || (sessionId !== null && p.sessionId === sessionId)) this._armIdleTimer(cmdId, p);
+    }
   }
 
   // True while the link is up or on its way back (connecting, handshaking,
@@ -136,6 +194,7 @@ export class ControlClient extends EventEmitter {
     const p = this.pending.get(cmdId);
     if (!p) return false;
     clearTimeout(p.timer);
+    clearTimeout(p.idleTimer);
     this.pending.delete(cmdId);
     p.resolve(value);
     return true;
@@ -145,6 +204,7 @@ export class ControlClient extends EventEmitter {
     const p = this.pending.get(cmdId);
     if (!p) return false;
     clearTimeout(p.timer);
+    clearTimeout(p.idleTimer);
     this.pending.delete(cmdId);
     p.reject(err);
     return true;
@@ -245,12 +305,18 @@ export class ControlClient extends EventEmitter {
   }
 
   // Request server-side finalize. Resolves with the server's finalize_result.
-  // Re-STT of long sessions can take minutes → long timeout. Resumable: a link
+  // Re-STT of long sessions can take half an hour and more → waits as long as
+  // finalize_progress keeps coming (see finalizeWaitLimits). Resumable: a link
   // drop mid-finalize re-sends the request with the same cmdId after the
   // reconnect; the server joins it to the run in progress (or answers from its
   // short-lived result cache) instead of starting over.
-  finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
-    return this._request('finalize_session', payload, { timeoutMs, resumable: true });
+  finalizeSession(payload = {}, { timeoutMs, idleTimeoutMs } = {}) {
+    const limits = finalizeWaitLimits();
+    return this._request('finalize_session', payload, {
+      timeoutMs: timeoutMs ?? limits.maxMs,
+      idleTimeoutMs: idleTimeoutMs ?? limits.idleMs,
+      resumable: true,
+    });
   }
 
   // Speaker-map read/write (server-persisted, per guild).
@@ -418,6 +484,7 @@ export class ControlClient extends EventEmitter {
         return;
       }
       case 'finalize_progress': {
+        this._notePendingProgress(msg);
         this.emit('finalizeProgress', msg);
         return;
       }

@@ -183,21 +183,42 @@ const finalizeRuns = new FinalizeRegistry({ deliver: deliverFinalizeResult });
 // re-send). Throttled: phase changes and the last utterance always go out,
 // per-utterance ticks at most every FINALIZE_PROGRESS_MS (default 3 s) — the
 // bot edits a Discord message per tick and Discord rate-limits edits anyway.
+//
+// report.keepalive(quietMs) re-sends the latest state (flagged keepalive) when
+// nothing went out for quietMs — see FINALIZE_KEEPALIVE_MS.
 export function finalizeProgressReporter(sessionId, cmdId, {
   emit = broadcastToAllBots, minIntervalMs = Number(process.env.FINALIZE_PROGRESS_MS) || 3000, now = () => Date.now(),
 } = {}) {
   let lastPhase = null;
   let lastAt = 0;
-  return (p = {}) => {
+  let latest = null;
+  const out = (p) => emit({ type: 'finalize_progress', cmdId, sessionId: String(sessionId), ...p });
+  const report = (p = {}) => {
+    latest = p;
     const t = now();
     const phaseChanged = p.phase !== lastPhase;
     const last = p.phase === 'stt' && p.total > 0 && p.done >= p.total;
     if (!phaseChanged && !last && t - lastAt < minIntervalMs) return;
     lastPhase = p.phase;
     lastAt = t;
-    emit({ type: 'finalize_progress', cmdId, sessionId: String(sessionId), ...p });
+    out(p);
   };
+  report.keepalive = (quietMs) => {
+    const t = now();
+    if (!latest || t - lastAt < quietMs) return;
+    lastAt = t;
+    out({ ...latest, keepalive: true });
+  };
+  return report;
 }
+
+// The bot's wait for a finalize is an inactivity timeout (its
+// FINALIZE_IDLE_TIMEOUT_MS, min. 2 min): it gives up when no progress came for
+// that long. Phases without ticks of their own (audio archive: WAV copies or
+// per-utterance Opus encodes + the merged mix; one slow LLM summary call) must
+// not look like a dead server → while a run lasts, the latest state is re-sent
+// whenever the reporter was quiet this long (worst-case gap ≈ 1.25 × this).
+const FINALIZE_KEEPALIVE_MS = 60_000;
 
 // Run a finalize request: read the uploaded manifest + JSONL, re-STT, merge,
 // archive, then reply with a checksum summary. Errors are reported back so the
@@ -262,12 +283,16 @@ async function handleFinalize(ws, msg) {
   // that joined meanwhile; a throw becomes { ok: false, error } (not cached).
   await finalizeRuns.start(sessionId, waiter, async () => {
     let result;
+    const keepalive = setInterval(() => onProgress.keepalive(FINALIZE_KEEPALIVE_MS), FINALIZE_KEEPALIVE_MS / 4);
+    keepalive.unref?.();
     try {
       result = await finalizeSession({ sessionId, manifest, events, uploadDir, jsonlPath, speakerMap, cleanupUploadDir, onProgress });
     } catch (e) {
       warn('finalize: failed for', String(sessionId), '-', e.message);
       autoTimer.release(sessionId); // allow a retry (manual or a future idle re-arm)
       throw e;
+    } finally {
+      clearInterval(keepalive);
     }
     // The session is done: drop the RAM state (snapshots rebuild from the
     // JSONL) and tell the transcript UI to flip it from active to past. Once

@@ -108,10 +108,13 @@ async function notifyOwner(content) {
 // on loss → warn the owner + one automatic SSH restart attempt; on recovery →
 // confirm. Local recording keeps running regardless (WAVs are written locally).
 async function handleServerLink(info) {
+  // The finalize wait gives up after FINALIZE_IDLE_TIMEOUT_MS without progress —
+  // and no progress gets through while the link is down.
+  const idleMin = Math.round(transport.finalizeWaitLimits().idleMs / 60_000);
   for (const st of _finalizeStatuses.values()) {
     st.update(info.connected
       ? '🔄 Server wieder verbunden — Finalize wird fortgesetzt …'
-      : '⚠️ Verbindung zum Server unterbrochen — der Finalize läuft serverseitig weiter, warte auf Reconnect (max. 30 min) …');
+      : `⚠️ Verbindung zum Server unterbrochen — der Finalize läuft serverseitig weiter, warte auf Reconnect (max. ${idleMin} min) …`);
   }
   if (!info.connected) {
     if (!hasActiveSession() || _outage.active) return;   // idle/expected, or already handling

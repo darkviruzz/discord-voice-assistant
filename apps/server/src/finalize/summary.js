@@ -89,9 +89,10 @@ export function capText(text, limit) {
 
 // transcriptMd → summary string, or null (disabled, empty transcript, LLM error).
 // Total time budget for one summary (all chunk calls + the final merge). The
-// summary runs inside the finalize the bot waits for (30 min budget there);
-// without a total cap a long session on a slow model could eat it all and turn
-// a finished transcript into a timed-out finalize. Out of budget → no summary.
+// summary runs inside the finalize the bot waits for (bot: FINALIZE_MAX_MS
+// overall cap, default 3 h); without a total cap a slow model on a long
+// session would hold the finished transcript back for that long. Out of
+// budget → no summary.
 function summaryBudgetMs() {
   return intEnv('SESSION_SUMMARY_TIMEOUT_MS', 600_000, 10_000);
 }

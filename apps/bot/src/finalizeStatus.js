@@ -5,8 +5,9 @@ import { DISCORD_MAX_CHARS, clampDiscordText } from './discordText.js';
 //
 // Why a channel message and not the slash-command reply: interaction tokens
 // expire after 15 minutes, a long session's finalize (re-STT of hours of
-// audio, 30 min budget) outlives that — editReply then fails silently and the
-// result/error never shows up. A normal message can be edited for as long as
+// audio plus the LLM summary, half an hour and more) outlives that — editReply
+// then fails silently and the result/error never shows up. A normal message
+// can be edited for as long as
 // it exists, and auto-finalizes (no interaction at all) get the same view.
 //
 // Edits are throttled (Discord rate-limits message edits; progress can tick

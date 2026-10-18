@@ -364,6 +364,8 @@ export function finalizeSession(payload, opts) {
   return _instance.control.finalizeSession(payload, opts);
 }
 
+export { finalizeWaitLimits } from './control.js';
+
 // Subscribe to server finalize_progress messages. Returns an unsubscribe
 // function (every finalize subscribes for its own duration).
 export function onFinalizeProgress(cb) {

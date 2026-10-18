@@ -245,9 +245,9 @@ export const CATALOG = [
     label: 'Zeitbudget der Session-Zusammenfassung (ms)', type: 'number', def: '600000',
     applyMode: 'next-finalize',
     desc: 'Obergrenze für die gesamte Zusammenfassung (alle Abschnitte + Zusammenführung). '
-      + 'Sie läuft innerhalb des Finalize, auf den der Bot höchstens 30 Minuten wartet — ist '
-      + 'das Budget aufgebraucht, wird ohne Zusammenfassung finalisiert statt den ganzen '
-      + 'Finalize zu gefährden.',
+      + 'Sie läuft innerhalb des Finalize, auf dessen Ergebnis der Bot wartet (Bot: '
+      + 'FINALIZE_MAX_MS, Standard 3 h) — ist das Budget aufgebraucht, wird ohne '
+      + 'Zusammenfassung finalisiert, statt das fertige Transkript weiter zurückzuhalten.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_VAULT_DIR',
@@ -1067,6 +1067,29 @@ export const CATALOG = [
     desc: 'Was nach erfolgreichem (checksum-bestätigtem) Finalize mit den lokalen WAVs '
       + 'des Bots passiert: move = in _archived/ verschieben, delete = löschen. Wird pro '
       + 'Finalize gelesen.',
+  },
+
+  // ======================= BOT: Finalize-Wartezeit ==========================
+  {
+    scope: 'bot', group: 'Bot · Finalize-Wartezeit', key: 'FINALIZE_IDLE_TIMEOUT_MS',
+    label: 'Finalize: Abbruch ohne Fortschritt (ms)', type: 'number', def: '600000',
+    applyMode: 'live',
+    desc: 'Der Bot wartet auf das Ergebnis des Server-Finalize, solange Fortschritt kommt: '
+      + 'jede Fortschrittsmeldung (x/N Äußerungen, Zusammenführen, Zusammenfassung, Audio; '
+      + 'der Server meldet sich während eines Laufs mindestens einmal pro Minute) startet '
+      + 'diese Frist neu. Erst wenn so lange gar nichts kommt — Server hängt, abgestürzt '
+      + 'oder die Verbindung bleibt weg —, gibt der Bot auf; die Session bleibt dann offen '
+      + 'und kann mit /finalize run erneut finalisiert werden. Default 600000 (10 Minuten), '
+      + 'mindestens 120000. Wird pro Finalize gelesen.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Finalize-Wartezeit', key: 'FINALIZE_MAX_MS',
+    label: 'Finalize: maximale Gesamtdauer (ms)', type: 'number', def: '10800000',
+    applyMode: 'live',
+    desc: 'Obergrenze für das Warten auf einen Finalize, auch wenn weiter Fortschritt '
+      + 'kommt — nur ein Netz gegen einen Lauf, der nie endet. Eine 3-Stunden-Session '
+      + 'braucht für Nach-Transkription + Zusammenfassung etwa eine halbe Stunde (je nach '
+      + 'GPU). Default 10800000 (3 Stunden), mindestens 600000. Wird pro Finalize gelesen.',
   },
 
   // ======================= BOT: TTS-Playback / Unterbrechung ================

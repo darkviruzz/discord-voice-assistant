@@ -12,7 +12,7 @@ import { registerDebugTtsRoute } from './debugTts.js';
 import { registerFinalizeHttpRoutes } from './finalizeHttp.js';
 import { registerTranscriptRoutes } from './transcriptApi.js';
 import { registerConfigRoutes } from './configApi.js';
-import { startRag, stopRag } from './rag/index.js';
+import { startRag, stopRag, warmRag } from './rag/index.js';
 
 const HB_INTERVAL_MS = 15000;
 
@@ -118,4 +118,7 @@ server.listen(PORT, HOST, () => {
   // background — never on the startup path (/health is up already), and
   // until the index exists queries just fall back to CAMPAIGN.md.
   startRag();
+  // Load the embedding model now: a cold one can't load within the first
+  // query's RAG_TIMEOUT_MS (no-op without RAG / for EMBED_PROVIDER=openai).
+  warmRag('server start');
 });

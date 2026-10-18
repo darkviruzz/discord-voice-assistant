@@ -174,6 +174,17 @@ Antwort-Server; `LLM_THINK` gilt für jeden Ollama-Server.
 Modell- oder Präfix-Wechsel machen alte Vektoren unbrauchbar — der Vault-Index
 erkennt das (Signatur) und baut sich neu auf.
 
+**Warm-up (Ollama):** Eine Suche hat nur `RAG_TIMEOUT_MS` (800 ms) und bricht
+danach ab. Ein kaltes Embedding-Modell lädt ungefähr so lange, und Ollama
+bricht das Laden ab, sobald der Client weg ist. Ist der Index von der Platte
+geladen, lädt sonst nichts das Modell — am 2026-10-18 fiel so jede Suche des
+Abends auf `CAMPAIGN.md` zurück. Der Server lädt das Embedding-Modell deshalb
+ohne diese Frist: beim Start, wenn der Bot den Voice-Channel betritt (und bei
+jedem Keep-Warm-Ping, `OLLAMA_KEEP_WARM_INTERVAL_MS`) und nach einer
+fehlgeschlagenen Suche im Hintergrund, damit die nächste klappt. (Die
+Ollama-Warnung `num_ctx=8192 > n_ctx_train=2048` für nomic ist harmlos: Ollama
+begrenzt den Kontext selbst auf 2048.)
+
 ## Typische Kombinationen
 
 **Windows + AMD (aktuell):** whisper.cpp (Vulkan) · Piper (DirectML) · Ollama.

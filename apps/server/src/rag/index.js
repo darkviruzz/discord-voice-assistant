@@ -14,6 +14,9 @@
 //                     disabled / not ready yet / backend down / timeout → [].
 //                     Bounded by RAG_TIMEOUT_MS (or opts.timeoutMs).
 //   formatRagHits()   hits → one text block, each chunk prefixed with its source.
+//   warmRag(reason)   load the embedding model (Ollama) without the query's
+//                     tight deadline: at boot, on the bot's voice join
+//                     (keepWarm.js) and in the background after a failed query.
 //   ragEnabled()      RAG_ENABLED (default true) AND OBSIDIAN_VAULT_PATH set.
 //   ragConfig()       effective settings + index stats (session_meta report).
 //
@@ -167,6 +170,47 @@ export function _activeIndexer() {
   return active?.indexer ?? null;
 }
 
+// ── embedding warm-up ───────────────────────────────────────────────────────
+
+// A query embed must finish within RAG_TIMEOUT_MS (800 ms) and is aborted at
+// the deadline. A cold embedding model takes about that long to load, and
+// Ollama drops a load whose client went away ("client connection closed
+// before llama-server finished loading, aborting load"). With the index loaded
+// from disk nothing else ever loaded the model, so on 2026-10-18 every query of
+// the evening fell back to CAMPAIGN.md. The warm-up embeds one short query
+// without that deadline (timeout like the indexer's), so the model gets
+// resident and its keep_alive (EMBED_KEEP_ALIVE) is reset. Ollama only — an
+// OpenAI-style server keeps its model loaded itself (like llm.js warmUp()).
+// Single-flight; never throws; resolves true when the model answered.
+const WARM_TIMEOUT_MS = 120_000;
+let warming = null;
+let warmFailing = false;
+
+async function embedWarm(reason) {
+  const embedFn = indexerOptions.embed ?? embed;
+  const t0 = Date.now();
+  try {
+    await embedFn(['warm-up'], { kind: 'query', timeoutMs: WARM_TIMEOUT_MS });
+    warmFailing = false;
+    debug(`rag: embedding model ${embedModel()} warm (${reason}, ${Date.now() - t0} ms)`);
+    return true;
+  } catch (e) {
+    // Model missing / Ollama down: say it once, not after every query.
+    if (warmFailing) debug(`rag: embedding warm-up failed again (${reason}): ${e.message}`);
+    else warn(`rag: embedding warm-up failed (${reason}): ${e.message}`);
+    warmFailing = true;
+    return false;
+  }
+}
+
+export function warmRag(reason = 'warm-up') {
+  if (!ragEnabled() || embedProvider() !== 'ollama') return Promise.resolve(false);
+  if (warming) return warming;
+  const run = embedWarm(reason).finally(() => { if (warming === run) warming = null; });
+  warming = run;
+  return run;
+}
+
 // ── query path ──────────────────────────────────────────────────────────────
 
 // Reachability state, only used to keep the log readable: warn once when RAG
@@ -233,6 +277,9 @@ export async function queryRag(query, { topK = DEFAULT_TOP_K, scoreThreshold: th
     return hits;
   } catch (e) {
     noteFailure(e.message);
+    // The aborted embed may have been the one loading the model (see
+    // warmRag): load it in the background so the next query finds it ready.
+    warmRag('after a failed query');
     return [];
   } finally {
     clearTimeout(timer);
@@ -277,4 +324,4 @@ export function ragConfig() {
 
 // Test hook: forget the reachability state (log de-duplication) and a
 // previous stopRag(), i.e. behave like a freshly imported module.
-export function _resetState() { failing = false; shutDown = false; }
+export function _resetState() { failing = false; shutDown = false; warming = null; warmFailing = false; }

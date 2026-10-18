@@ -385,13 +385,15 @@ if ($Prov.PiperEnabled) {
             Add-Result 'Piper' 'FAIL' 'Python-Pakete fehlen in der Piper-venv' "$piperPy -m pip install -r `"$RepoRoot\services\piper\requirements.txt`"  (+ pip install -e <piper-fork>)"
         } else {
             Add-Result 'Piper' 'OK' 'venv + Pakete ok'
-            $prov = Invoke-Native $piperPy @('-c', "import onnxruntime as o; print(','.join(o.get_available_providers()))")
+            # NICHT $prov nennen: PowerShell-Variablen sind case-insensitiv, das
+            # würde $Prov (Provider-Wahl, Abschnitte 5/7/8) überschreiben.
+            $ortProviders = Invoke-Native $piperPy @('-c', "import onnxruntime as o; print(','.join(o.get_available_providers()))")
             $wantDml = Test-VaTrue $Cfg['PIPER_USE_DIRECTML']
-            if ($prov.Output -match 'DmlExecutionProvider') {
+            if ($ortProviders.Output -match 'DmlExecutionProvider') {
                 if (-not $wantDml -and (Read-YesNo 'DirectML (GPU) ist verfügbar, aber aus. Einschalten?' $true)) { Set-HostValue 'PIPER_USE_DIRECTML' '1'; $wantDml = $true }
                 Add-Result 'Piper-GPU' 'OK' ("DirectML verfügbar" + $(if ($wantDml) { ', aktiv' } else { ', inaktiv' }))
             } elseif ($wantDml) {
-                Add-Result 'Piper-GPU' 'WARN' "PIPER_USE_DIRECTML=1, aber onnxruntime meldet kein DirectML ($($prov.Output.Trim()))" "$piperPy -m pip install onnxruntime-directml   (oder PIPER_USE_DIRECTML=0 für CPU)"
+                Add-Result 'Piper-GPU' 'WARN' "PIPER_USE_DIRECTML=1, aber onnxruntime meldet kein DirectML ($($ortProviders.Output.Trim()))" "$piperPy -m pip install onnxruntime-directml   (oder PIPER_USE_DIRECTML=0 für CPU)"
             } else {
                 Add-Result 'Piper-GPU' 'OK' 'CPU-Modus'
             }
@@ -513,27 +515,35 @@ $validateVault = {
 }
 $vaultRoots = @((Join-Path $HomeDir 'Documents'), (Join-Path $HomeDir 'Obsidian'), (Join-Path $HomeDir 'Desktop'), $HomeDir) +
     @(Get-ChildItem -LiteralPath $HomeDir -Filter 'OneDrive*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-$vaultCands = @($Cfg['VA_VAULT_PATH']) + @(Find-Dirs -Roots $vaultRoots -Filter '.obsidian' -Depth 3 -Directory | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique)
+# Ohne VA_VAULT_PATH nutzt der Server OBSIDIAN_VAULT_PATH aus apps\server\.env
+# bzw. dem Web-Panel — derselbe Vault wie beim Launcher (Get-VaVaultPath).
+$srvNow = Get-VaServerSettings -RepoRoot $RepoRoot
+$serverVault = (Get-VaVaultPath -ServerSettings $srvNow -RepoRoot $RepoRoot).Path
+$vaultCands = @($Cfg['VA_VAULT_PATH'], $serverVault) + @(Find-Dirs -Roots $vaultRoots -Filter '.obsidian' -Depth 3 -Directory | ForEach-Object { Split-Path -Parent $_ } | Select-Object -Unique)
 if (-not $Check) {
     Write-Info 'Der Vault liefert Kampagnen-Kontext (CAMPAIGN.md) und ist die Wissensbasis der Vault-Suche (RAG im Node-Server).'
-    $vault = Read-Value -Label 'Pfad zum Obsidian-Vault der Kampagne' -Current $Cfg['VA_VAULT_PATH'] -Validate $validateVault -Candidates $vaultCands -Optional
+    $vaultDefault = if ($Cfg['VA_VAULT_PATH']) { $Cfg['VA_VAULT_PATH'] } else { $serverVault }
+    $vault = Read-Value -Label 'Pfad zum Obsidian-Vault der Kampagne' -Current $vaultDefault -Validate $validateVault -Candidates $vaultCands -Optional
     Set-HostValue 'VA_VAULT_PATH' $vault
     if ($vault) { $ServerChanges['OBSIDIAN_VAULT_PATH'] = $vault }
 }
-$vault = $Cfg['VA_VAULT_PATH']
+$vaultInfo = Get-VaVaultPath -Config $VaConfig -ServerSettings $srvNow -RepoRoot $RepoRoot
+$vault = $vaultInfo.Path
+$fromServerEnv = ($vaultInfo.Source -eq 'OBSIDIAN_VAULT_PATH')
 if (-not $vault) {
-    Add-Result 'Vault' 'WARN' 'kein Vault konfiguriert → kein Kampagnen-Kontext, RAG aus' 'Setup erneut ausführen und Vault-Pfad angeben'
+    Add-Result 'Vault' 'WARN' 'kein Vault konfiguriert (weder VA_VAULT_PATH noch OBSIDIAN_VAULT_PATH) → kein Kampagnen-Kontext, RAG aus' 'Setup erneut ausführen und Vault-Pfad angeben'
 } elseif (& $validateVault $vault) {
-    Add-Result 'Vault' 'FAIL' (& $validateVault $vault) 'Vault-Pfad korrigieren (Setup ohne -Check)'
+    $vaultFix = if ($fromServerEnv) { 'OBSIDIAN_VAULT_PATH in apps\server\.env korrigieren oder Setup ohne -Check ausführen' } else { 'Vault-Pfad korrigieren (Setup ohne -Check)' }
+    Add-Result 'Vault' 'FAIL' (& $validateVault $vault) $vaultFix
 } else {
-    Add-Result 'Vault' 'OK' $vault
+    Add-Result 'Vault' 'OK' $(if ($fromServerEnv) { "$vault  (OBSIDIAN_VAULT_PATH aus apps\server\.env/Web-Panel)" } else { $vault })
     $campaignFile = if ($ServerEnv.Contains('CAMPAIGN_CONTEXT_FILE')) { $ServerEnv['CAMPAIGN_CONTEXT_FILE'] } else { 'CAMPAIGN.md' }
     if (-not (Test-Path -LiteralPath (Join-Path $vault $campaignFile))) {
         Add-Result 'CAMPAIGN.md' 'WARN' "$campaignFile fehlt im Vault (Fallback-Kontext leer, solange die Vault-Suche nichts liefert)" 'CAMPAIGN.md aus dem Vault generieren lassen'
     } else {
         Add-Result 'CAMPAIGN.md' 'OK' "$campaignFile vorhanden"
     }
-    if ($ServerEnv.Contains('OBSIDIAN_VAULT_PATH') -and $ServerEnv['OBSIDIAN_VAULT_PATH'] -and $ServerEnv['OBSIDIAN_VAULT_PATH'] -ne $vault -and -not $ServerChanges.Contains('OBSIDIAN_VAULT_PATH')) {
+    if (-not $fromServerEnv -and $ServerEnv.Contains('OBSIDIAN_VAULT_PATH') -and $ServerEnv['OBSIDIAN_VAULT_PATH'] -and $ServerEnv['OBSIDIAN_VAULT_PATH'] -ne $Cfg['VA_VAULT_PATH'] -and -not $ServerChanges.Contains('OBSIDIAN_VAULT_PATH')) {
         Add-Result 'Vault' 'WARN' "apps\server\.env zeigt auf anderen Vault ($($ServerEnv['OBSIDIAN_VAULT_PATH']))" 'Launcher überstimmt das; zur Konsistenz Setup ohne -Check ausführen'
     }
 
@@ -541,9 +551,8 @@ if (-not $vault) {
     # Kein eigener Dienst und kein Python mehr: der Node-Server indexiert den
     # Vault selbst (Index: apps\server\data\rag) mit dem Embedding-Modell aus
     # Abschnitt 5 und fällt auf CAMPAIGN.md zurück, solange der Index fehlt.
-    $serverSettings = Get-VaServerSettings -RepoRoot $RepoRoot
-    $embedModel = Get-VaEmbedModel -ServerSettings $serverSettings
-    if (Test-VaRagOff -ServerSettings $serverSettings) {
+    $embedModel = Get-VaEmbedModel -ServerSettings $srvNow
+    if (Test-VaRagOff -ServerSettings $srvNow) {
         Add-Result 'RAG' 'SKIP' 'RAG_ENABLED=false → nur CAMPAIGN.md'
     } elseif ($embedModel) {
         Add-Result 'RAG' 'OK' "Vault-Suche im Server aktiv (Embeddings: Ollama/$embedModel)"

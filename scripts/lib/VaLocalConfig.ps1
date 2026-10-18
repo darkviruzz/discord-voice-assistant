@@ -298,6 +298,26 @@ function Test-VaTrue {
     return ($Value -match '^(1|true|yes|ja|on)$')
 }
 
+# Vault, mit dem der Node-Server läuft: VA_VAULT_PATH exportiert der Launcher
+# als OBSIDIAN_VAULT_PATH (Prozess-Env schlägt dotenv); ohne ihn gilt
+# OBSIDIAN_VAULT_PATH aus apps\server\.env bzw. dem Web-Panel. Relative Pfade
+# löst der Server gegen sein Arbeitsverzeichnis apps\server auf.
+# Rückgabe: @{ Path; Source = 'VA_VAULT_PATH' | 'OBSIDIAN_VAULT_PATH' | '' }
+# — Path leer = kein Vault (Vault-Suche aus).
+function Get-VaVaultPath {
+    param([hashtable]$Config, [System.Collections.IDictionary]$ServerSettings, [string]$RepoRoot)
+    $path = ''
+    $source = ''
+    if ($Config -and $Config.Values['VA_VAULT_PATH']) {
+        $path = [string]$Config.Values['VA_VAULT_PATH']; $source = 'VA_VAULT_PATH'
+    } else {
+        $path = Get-VaSetting $ServerSettings 'OBSIDIAN_VAULT_PATH'
+        if ($path) { $source = 'OBSIDIAN_VAULT_PATH' }
+    }
+    if ($path -and $RepoRoot) { $path = Resolve-VaPath -Path $path -Base (Join-Path $RepoRoot 'apps\server') }
+    return [pscustomobject]@{ Path = $path; Source = $source }
+}
+
 # Abgeleitete, direkt nutzbare Werte für die Launcher-Skripte.
 function Resolve-VaServices {
     param(
@@ -312,8 +332,8 @@ function Resolve-VaServices {
     # Ohne Vault (weder Launcher-VA_VAULT_PATH noch OBSIDIAN_VAULT_PATH in der
     # Server-.env) ist die Vault-Suche aus → keine Embeddings, also auch kein
     # Ollama allein dafür starten.
-    $vaultSet = [bool]$v['VA_VAULT_PATH'] -or [bool](Get-VaSetting $ServerSettings 'OBSIDIAN_VAULT_PATH')
-    if (-not $vaultSet -and $prov.EmbedModel) {
+    $vault = Get-VaVaultPath -Config $Config -ServerSettings $ServerSettings -RepoRoot $RepoRoot
+    if (-not $vault.Path -and $prov.EmbedModel) {
         $prov.EmbedModel = $null
         $prov.OllamaNeeded = ($prov.Llm -eq 'ollama')
     }
@@ -336,7 +356,9 @@ function Resolve-VaServices {
         PiperPort      = (Get-VaPortFromUrl $v['TTS_URL'] 5000)
         OllamaUrl      = $v['OLLAMA_URL'].TrimEnd('/')
         OllamaPort     = (Get-VaPortFromUrl $v['OLLAMA_URL'] 11434)
-        VaultPath      = $v['VA_VAULT_PATH']
+        VaultPath      = $v['VA_VAULT_PATH']   # Export an den Server (leer = er nimmt seine .env)
+        EffectiveVault = $vault.Path           # was der Server tatsächlich nutzt
+        VaultSource    = $vault.Source
         ServerPort     = [int]$v['VA_SERVER_PORT']
         LogDir         = $v['VA_LOG_DIR']
     }
@@ -415,10 +437,13 @@ function Test-VaServiceConfig {
             $issues += [pscustomobject]@{ Level = 'Error'; Component = 'Piper'; Message = "Keine *.onnx-Stimme in $voices"; Hint = $hint }
         }
     }
-    if (-not $Services.VaultPath) {
-        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = 'VA_VAULT_PATH nicht gesetzt → Vault-Suche (RAG) und Kampagnen-Kontext aus'; Hint = $hint }
-    } elseif (-not (Test-Path -LiteralPath $Services.VaultPath)) {
-        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = "Vault-Pfad existiert nicht: $($Services.VaultPath)"; Hint = $hint }
+    # Den Vault prüfen, den der Server tatsächlich nutzt (auch OBSIDIAN_VAULT_PATH
+    # aus apps\server\.env) — ein Objekt ohne EffectiveVault (alte Aufrufer) = nur VA_VAULT_PATH.
+    $vaultPath = if ($null -ne $Services.PSObject.Properties['EffectiveVault']) { $Services.EffectiveVault } else { $Services.VaultPath }
+    if (-not $vaultPath) {
+        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = 'Kein Vault (weder VA_VAULT_PATH noch OBSIDIAN_VAULT_PATH in apps\server\.env) → Vault-Suche (RAG) und Kampagnen-Kontext aus'; Hint = $hint }
+    } elseif (-not (Test-Path -LiteralPath $vaultPath)) {
+        $issues += [pscustomobject]@{ Level = 'Warn'; Component = 'Vault'; Message = "Vault-Pfad existiert nicht: $vaultPath"; Hint = $hint }
     }
     # Elemente einzeln in die Pipeline (Aufrufer klammern mit @(...)).
     return $issues

@@ -95,8 +95,28 @@ $issues = Test-VaServiceConfig -Services $svc -Config $cfg
 Check 'issues: whisper exe error' (@($issues | Where-Object { $_.Component -eq 'Whisper' -and $_.Level -eq 'Error' }).Count -eq 2)
 Check 'issues: piper error' (@($issues | Where-Object { $_.Component -eq 'Piper' -and $_.Level -eq 'Error' }).Count -ge 1)
 Check 'issues: vault ok, no rag issues' (@($issues | Where-Object { $_.Component -in @('Vault', 'RAG') }).Count -eq 0)
-$svc.VaultPath = "$t/none"
+$svc.EffectiveVault = "$t/none"
 Check 'issues: missing vault warns' (@(Test-VaServiceConfig -Services $svc -Config $cfg | Where-Object { $_.Component -eq 'Vault' -and $_.Level -eq 'Warn' }).Count -eq 1)
+Check 'issues: legacy services object checks VaultPath' (@(Test-VaServiceConfig -Services ([pscustomobject]@{ WhisperEnabled = $false; PiperEnabled = $false; VaultPath = "$t/vault" }) | Where-Object { $_.Component -eq 'Vault' }).Count -eq 0)
+
+# Vault the server actually uses: VA_VAULT_PATH, else OBSIDIAN_VAULT_PATH from
+# apps/server/.env (+ panel) — Start preflight and Setup -Check must accept the latter.
+$cfgSrv = @{ Values = [ordered]@{}; Sources = @{} }
+foreach ($k in $cfg.Values.Keys) { $cfgSrv.Values[$k] = $cfg.Values[$k] }
+$cfgSrv.Values['VA_VAULT_PATH'] = ''
+$vp = Get-VaVaultPath -Config $cfg -ServerSettings ([ordered]@{ OBSIDIAN_VAULT_PATH = "$t/other" }) -RepoRoot $fakeRepo
+Check 'vault: VA_VAULT_PATH wins' ($vp.Path -eq "$t/vault" -and $vp.Source -eq 'VA_VAULT_PATH')
+$vp = Get-VaVaultPath -Config $cfgSrv -ServerSettings ([ordered]@{ OBSIDIAN_VAULT_PATH = " $t/vault " }) -RepoRoot $fakeRepo
+Check 'vault: falls back to server OBSIDIAN_VAULT_PATH' ($vp.Path -eq "$t/vault" -and $vp.Source -eq 'OBSIDIAN_VAULT_PATH')
+Check 'vault: relative path resolved against apps/server' ((Get-VaVaultPath -ServerSettings ([ordered]@{ OBSIDIAN_VAULT_PATH = 'vlt' }) -RepoRoot $fakeRepo).Path -eq (Join-Path (Join-Path $fakeRepo 'apps\server') 'vlt'))
+Check 'vault: none' ((Get-VaVaultPath -Config $cfgSrv -ServerSettings ([ordered]@{})).Path -eq '')
+$svcS = Resolve-VaServices -Config $cfgSrv -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ OBSIDIAN_VAULT_PATH = "$t/vault"; LLM_PROVIDER = 'openai' })
+Check 'server vault: effective, not re-exported, embeddings need ollama' ($svcS.EffectiveVault -eq "$t/vault" -and -not (Get-VaChildEnv -Config $cfgSrv -Services $svcS).Contains('OBSIDIAN_VAULT_PATH') -and $svcS.OllamaNeeded)
+Check 'issues: server vault ok, no vault warning' (@(Test-VaServiceConfig -Services $svcS -Config $cfgSrv | Where-Object { $_.Component -eq 'Vault' }).Count -eq 0)
+$svcS = Resolve-VaServices -Config $cfgSrv -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ OBSIDIAN_VAULT_PATH = "$t/none" })
+Check 'issues: missing server vault warns' (@(Test-VaServiceConfig -Services $svcS -Config $cfgSrv | Where-Object { $_.Component -eq 'Vault' -and $_.Message -match 'existiert nicht' }).Count -eq 1)
+$svcS = Resolve-VaServices -Config $cfgSrv -RepoRoot $fakeRepo -ServerSettings ([ordered]@{})
+Check 'issues: no vault anywhere warns' (@(Test-VaServiceConfig -Services $svcS -Config $cfgSrv | Where-Object { $_.Component -eq 'Vault' -and $_.Level -eq 'Warn' }).Count -eq 1)
 Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
 Remove-Item Env:\VA_DEPLOY_ENV -ErrorAction SilentlyContinue
 # Provider-Wahl → welche lokalen Dienste nötig sind
@@ -121,6 +141,24 @@ $svcNV = Resolve-VaServices -Config $cfgNoVault -RepoRoot $fakeRepo -ServerSetti
 Check 'no vault + openai llm → ollama not needed' (-not $svcNV.OllamaNeeded)
 $svcV = Resolve-VaServices -Config $cfg -RepoRoot $fakeRepo -ServerSettings ([ordered]@{ LLM_PROVIDER = 'openai' })
 Check 'vault + openai llm → ollama for embeddings' ($svcV.OllamaNeeded)
+
+# Launcher scripts: a script-scope variable must not reappear in another case —
+# PowerShell is case-insensitive (Setup's Piper check `$prov = …` once clobbered
+# the provider choice `$Prov`). Functions and script blocks have their own scope.
+foreach ($f in @('Setup-VoiceAssistant.ps1', 'Start-VoiceAssistant.ps1')) {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repo (Join-Path 'scripts' $f)), [ref]$null, [ref]$null)
+    $names = $ast.FindAll({
+        param($n)
+        if ($n -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+        for ($a = $n.Parent; $a; $a = $a.Parent) {
+            if ($a -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -or $a -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $false }
+        }
+        return $true
+    }, $true) | ForEach-Object { $_.VariablePath.UserPath }
+    # Select-Object -Unique compares case-sensitively
+    $clash = @($names | Group-Object { $_.ToLower() } | Where-Object { @($_.Group | Select-Object -Unique).Count -gt 1 } | ForEach-Object { $_.Name })
+    Check "$f has no case-only variable clashes [$($clash -join ', ')]" ($clash.Count -eq 0)
+}
 
 "`n$fail failure(s)"
 exit $fail

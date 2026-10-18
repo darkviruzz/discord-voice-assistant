@@ -31,6 +31,8 @@ greift ab der nächsten Anfrage.
 | `STT_BASE_URL`, `STT_MODEL`, `STT_API_KEY` | bei `openai` (`STT_BASE_URL` **mit** `/v1`) |
 | `STT_LANGUAGE` | überschreibt `WHISPER_LANGUAGE` für beide Provider (leer = `WHISPER_LANGUAGE`) |
 | `STT_TIMEOUT_MS` | Obergrenze pro Anfrage inkl. Antwort (Default 120 s; vorher unbegrenzt) |
+| `STT_VOCABULARY` | Eigennamen der Kampagne, kommagetrennt — Whisper-Prompt für jede Transkription (s. u.) |
+| `STT_VOCABULARY_FILE` | dieselbe Liste als Datei, absolut oder relativ zu `OBSIDIAN_VAULT_PATH` |
 
 Alle Wege — Live-Streaming, Wake-Word-Pass und Finalize — laufen über denselben
 Provider. Der `openai`-Adapter fordert `verbose_json` mit Wort-Zeitstempeln an;
@@ -39,6 +41,55 @@ lehnt ein Server das ab (400/415/422, z. B. ältere vLLM), fällt er einmalig au
 Ganze Wörter (OpenAI-Stil) und whisper.cpp-Subwort-Token werden automatisch
 erkannt. Auch whisper.cpp selbst spricht den `openai`-Weg, wenn es mit
 `--inference-path /v1/audio/transcriptions` gestartet wird.
+
+### Namen-Vokabular (`STT_VOCABULARY`, `STT_VOCABULARY_FILE`)
+
+Whisper liest den `prompt` als „bisheriges Transkript“: Namen, die dort stehen,
+kommen sehr viel eher genau so geschrieben heraus („Gaglath Matho“ statt
+„Gaglat Mato“). Beide Provider schicken bei **jeder** Anfrage — Live-Streaming,
+Chunk-Fallback und Finalize-Re-STT — `<Vokabular>. <bisheriger Text>`:
+
+```
+Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk. <fixierter Text des Streamers>
+```
+
+- **Quellen:** `STT_VOCABULARY` (Panel, kommagetrennt) zuerst, dann
+  `STT_VOCABULARY_FILE`. Die Datei darf eine normale Obsidian-Notiz sein: ein
+  oder mehrere Namen pro Zeile, `#` leitet einen Kommentar ein (Überschriften
+  werden ignoriert), Listenzeichen, Frontmatter und `[[Wikilinks]]` werden
+  entfernt, Doppelte fallen weg. Datei-Änderungen greifen bei der nächsten
+  Anfrage.
+- **Budget:** Whisper (whisper.cpp wie die OpenAI-API) liest nur die **letzten
+  224 Prompt-Token** und schneidet vorne ab. Deshalb wird der Prompt so gebaut,
+  dass er passt: Vokabular ≤ 250 Zeichen (≈ 15–20 Namen, ~100 Token), danach so
+  viel vom bisherigen Text, wie in 500 Zeichen insgesamt passt — gekürzt wird
+  immer der Kontext, nie das Vokabular. Reihenfolge = Priorität; was nicht
+  mehr passt, wird weggelassen und einmal pro Listenänderung im Log gewarnt.
+  Die aktive Liste steht im `session_meta` unter `stt.vocabulary`.
+- **Kandidaten aus dem Vault:** `npm run vocab:stt` (bzw.
+  `node scripts/stt-vocabulary-candidates.mjs --vault <pfad>`) liest Notiz-Titel
+  und `aliases` aus den Charakter-/NSC-/Orts-/Fraktions-Ordnern und sortiert
+  nach Erwähnungen in den letzten Session-Notizen. Die Ausgabe ist nur ein
+  Vorschlag (stdout, oder `--out <datei>`) — prüfen, kürzen, dann als
+  `STT_VOCABULARY_FILE` ablegen. Ungeprüfte Vault-Inhalte landen nie
+  automatisch im Prompt.
+- **Was gehört hinein:** Namen, die Whisper falsch schreibt — Spielercharaktere,
+  häufige NSCs, Orte. Gängige Wörter („Die Gans“, „Gregor“) kosten nur Budget.
+- **Risiko:** Ein Prompt kann Whisper in Stille oder bei Rauschen dazu bringen,
+  Namen aus der Liste zu „hören“ (Prompt-Echo). Je länger die Liste, desto
+  eher. Das Weckwort besser zunächst **nicht** in die Liste nehmen — ein Echo
+  könnte den Assistenten auslösen.
+
+**Wirkung messen** statt raten: in `bench/stt/profiles.json` dasselbe Profil
+zweimal anlegen, einmal ohne Vokabular (`"STT_VOCABULARY": ""`,
+`"STT_VOCABULARY_FILE": ""`) und einmal mit (`"STT_VOCABULARY_FILE":
+"STT-Vokabular.md"` — relativ zum `OBSIDIAN_VAULT_PATH` aus
+`apps/server/.env`; Panel-Overrides liest der Bench nicht), Vorlage in
+[`bench/stt/profiles.example.json`](../bench/stt/profiles.example.json). Dann
+`npm run bench:stt` vergleichen: **Namen-Recall** sollte steigen, **WER** darf nicht schlechter
+werden; eine steigende Insertions-Zahl (I) deutet auf halluzinierte Namen.
+Hinweis: Steht dieselbe Liste in `bench/stt/names.txt`, misst der Recall genau
+die geprompteten Namen — für nicht gelistete Namen sagt er nichts.
 
 ## Sprachausgabe (TTS)
 

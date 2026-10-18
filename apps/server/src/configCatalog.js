@@ -398,7 +398,32 @@ export const CATALOG = [
     onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
     desc: 'true = bereits fixierter Text wird Whisper als Decoder-Prompt mitgegeben, '
       + 'damit die Erkennung über die Fenstergrenze hinweg konsistent bleibt '
-      + '(Satzanfang bekannt). Wird pro Anfrage gelesen.',
+      + '(Satzanfang bekannt). Das Namen-Vokabular (STT_VOCABULARY) steht unabhängig '
+      + 'davon immer vorne im Prompt. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_VOCABULARY',
+    label: 'Namen-Vokabular für die Spracherkennung', type: 'string', def: '', applyMode: 'live',
+    desc: 'Kommagetrennte Eigennamen der Kampagne (Charaktere, NSCs, Orte), z. B. '
+      + '"Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk". Werden Whisper '
+      + 'bei JEDER Transkription (Live-Streaming, Chunk-Fallback, Finalize) als Prompt '
+      + 'vorangestellt, damit die Namen richtig geschrieben erkannt werden. Reihenfolge = '
+      + 'Priorität: höchstens 250 Zeichen gehen in den Prompt (Whisper liest nur ~224 '
+      + 'Prompt-Token), der Rest wird mit Warnung im Log weggelassen. Lange Listen erhöhen '
+      + 'das Risiko, dass Whisper in Stille Namen halluziniert — Wirkung mit npm run '
+      + 'bench:stt messen. Steht vor den Namen aus STT_VOCABULARY_FILE. Leer = aus. '
+      + 'Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_VOCABULARY_FILE',
+    label: 'Namen-Vokabular aus Datei', type: 'string', def: '', applyMode: 'live',
+    desc: 'Datei mit Eigennamen für die Spracherkennung — absoluter Pfad oder relativ zu '
+      + 'OBSIDIAN_VAULT_PATH (z. B. STT-Vokabular.md im Vault). Ein oder mehrere Namen pro '
+      + 'Zeile (Komma/Semikolon trennt), # leitet einen Kommentar ein (Markdown-Überschriften '
+      + 'werden also ignoriert), Listenzeichen, Frontmatter und [[Wikilinks]] werden entfernt. '
+      + 'Kandidaten aus dem Vault liefert npm run vocab:stt — Liste prüfen, dann ablegen. '
+      + 'Gleiches Budget wie STT_VOCABULARY (beide zusammen). Leer = aus. Wird pro '
+      + 'STT-Anfrage gelesen (Änderungen an der Datei greifen sofort).',
   },
   {
     scope: 'server', group: 'Server · STT', key: 'STT_SILENCE_THRESH',

@@ -1,5 +1,6 @@
 import { log, debug, warn } from '../logger.js';
 import { baseUrl, env, authHeaders, withTimeout, request, ProviderTimeout } from './http.js';
+import { currentVocabulary, sttPrompt } from '../sttVocabulary.js';
 
 // STT provider — one transcription call for every STT use in the server
 // (streaming ticks, the utterance-end pass, the chunked fallback and the
@@ -21,6 +22,8 @@ import { baseUrl, env, authHeaders, withTimeout, request, ProviderTimeout } from
 // which the whisper.cpp launch scripts also use; 'auto' = let the model
 // detect), WHISPER_TEMPERATURE, WHISPER_WORD_TIMESTAMPS and STT_TIMEOUT_MS
 // (default 120 s, covers connect + upload + reading the reply; 0 = none).
+// Every request's `prompt` is the campaign vocabulary (STT_VOCABULARY /
+// STT_VOCABULARY_FILE, see sttVocabulary.js) followed by the caller's context.
 //
 // Settings are read per call so a provider/URL/model switch in the settings
 // panel takes effect on the next request (= the next streaming tick).
@@ -59,12 +62,16 @@ function sttTimeoutMs() {
 // API key — only whether one is configured.
 export function sttConfig() {
   const provider = sttProvider();
+  const vocab = currentVocabulary();
   const common = {
     provider: sttProviderLabel(provider),
     language: sttLanguage(),
     temperature: sttTemperature(),
     wordTimestamps: wordTimestamps(),
     timeoutMs: sttTimeoutMs(),
+    // The names actually prompted (after the budget cut) — which list a
+    // session was transcribed with.
+    vocabulary: { names: vocab.used, dropped: vocab.dropped.length, file: vocab.file },
   };
   return provider === 'openai'
     ? { ...common, url: baseUrl(env('STT_BASE_URL')) || null, model: env('STT_MODEL') || null, apiKeySet: !!env('STT_API_KEY') }
@@ -239,8 +246,9 @@ async function transcribeWhisperCpp(wavBuffer, { prompt, signal, language, tempe
   if (language !== 'auto') form.append('language', language);
   form.append('response_format', 'verbose_json');
   form.append('temperature', String(temperature));
-  // Decoder context from already-locked streaming text — keeps wording stable
-  // across the window boundary (the model "knows" how the sentence began).
+  // Vocabulary + already-locked streaming text (transcribe() builds it within
+  // 500 chars): names spelled as in the campaign, and wording that stays
+  // stable across the window boundary. The slice is only a safety net.
   if (prompt) form.append('prompt', String(prompt).slice(-500));
   // Ask for word-level timestamps. Harmless if the server ignores it (older
   // whisper.cpp builds); parseWords() falls back to utterance-level timing.
@@ -307,6 +315,9 @@ export function _resetSttProviderState() {
 
 // transcribe(wavBuffer, { prompt?, signal? }) → { text, meta, words }
 //
+//   prompt context text (already-committed transcript); the vocabulary is
+//          put in front of it here, so every STT path gets the names.
+//
 //   text   cleaned transcript ('' for silence)
 //   meta   { provider, language, temperature, segmentCount, noSpeechProbAvg,
 //            noSpeechProbMax, wordCount?, model? }
@@ -325,7 +336,7 @@ export async function transcribe(wavBuffer, { prompt, signal } = {}) {
   const provider = sttProvider();
   const language = sttLanguage();
   const temperature = sttTemperature();
-  const args = { prompt, signal, language, temperature };
+  const args = { prompt: sttPrompt(prompt), signal, language, temperature };
   const { data, words, extra } = provider === 'openai'
     ? await transcribeOpenAI(wavBuffer, args)
     : await transcribeWhisperCpp(wavBuffer, args);

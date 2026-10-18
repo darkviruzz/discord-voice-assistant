@@ -240,6 +240,7 @@ Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster 
 | `STT_STREAM_MIN_WINDOW_MS` | `1000` | Mindest-Audio, bevor der Streamer das erste Mal transkribiert (sehr kurze Fenster liefern unbrauchbare Hypothesen). |
 | `STT_STREAM_TRIM_SECONDS` | `15` | Ab so vielen Sekunden bestätigten Audios wird das Fenster an der letzten Satzgrenze fixiert. |
 | `STT_STREAM_PROMPT` | `true` | Fixierten Text als Whisper-Decoder-Prompt mitgeben (konsistente Erkennung über die Fenstergrenze). |
+| `STT_VOCABULARY` / `STT_VOCABULARY_FILE` | leer | Eigennamen der Kampagne (kommagetrennt bzw. als Datei im Vault), die jeder Transkription — live wie Finalize — als Prompt vorangestellt werden, damit Namen richtig geschrieben erkannt werden. Kandidaten: `npm run vocab:stt`. Details und Risiken: [`docs/providers.md`](docs/providers.md#namen-vokabular-stt_vocabulary-stt_vocabulary_file). |
 
 > **GPU-Portabilität (AMD heute, NVIDIA/Cloud später):** Der Server spricht nur die whisper.cpp-HTTP-API (`WHISPER_URL`). whisper.cpp gibt es mit identischer API als **Vulkan**-Build (AMD, aktuelles Setup) und als **CUDA/cuBLAS**-Build (NVIDIA, z. B. Cloud-Instanz mit H100) — beim Umzug wechselt nur das Binary bzw. die URL, am Server-Code ändert sich nichts. Gemessen auf der RX 6800 XT (Vulkan, medium-q5_0, warm): 10 s Audio ≈ 0,6 s, 30 s ≈ 1,8 s (16–24× Echtzeit) — genug Headroom für den 1-s-Tick.
 

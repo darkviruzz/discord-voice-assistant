@@ -11,6 +11,7 @@ import {
 import { createSttStream, mergeTokensToWords, pcmToWav } from '../src/sttStreaming.js';
 import { transcribeChunked } from '../src/pipeline.js';
 import { transcribeWavFile } from '../src/finalize/sttFile.js';
+import { _resetVocabularyCache } from '../src/sttVocabulary.js';
 
 // One fake STT server speaking both dialects (whisper.cpp /inference and
 // OpenAI /audio/transcriptions). Requests are parsed as real multipart bodies.
@@ -47,13 +48,15 @@ after(() => { srv.closeAllConnections?.(); srv.close(); });
 
 const KEYS = ['STT_PROVIDER', 'STT_BASE_URL', 'STT_MODEL', 'STT_API_KEY', 'STT_LANGUAGE', 'STT_TIMEOUT_MS',
   'WHISPER_URL', 'WHISPER_LANGUAGE', 'WHISPER_TEMPERATURE', 'WHISPER_WORD_TIMESTAMPS',
-  'STT_STREAM_MIN_WINDOW_MS', 'STT_STREAM_TRIM_SECONDS', 'STT_STREAM_PROMPT', 'STT_MAX_CHUNK_SECONDS'];
+  'STT_STREAM_MIN_WINDOW_MS', 'STT_STREAM_TRIM_SECONDS', 'STT_STREAM_PROMPT', 'STT_MAX_CHUNK_SECONDS',
+  'STT_VOCABULARY', 'STT_VOCABULARY_FILE', 'OBSIDIAN_VAULT_PATH'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 beforeEach(() => {
   for (const k of KEYS) delete process.env[k];
   seen.length = 0;
   _resetSttProviderState();
+  _resetVocabularyCache();
 });
 
 const SR = 48000;
@@ -324,13 +327,13 @@ test('provider switches at runtime via env (settings panel), no restart', async 
 test('sttConfig: effective values, never the API key', () => {
   assert.deepEqual(sttConfig(), {
     provider: 'whisper.cpp', language: 'auto', temperature: 0.2, wordTimestamps: true,
-    timeoutMs: 120000, url: 'http://localhost:8080',
+    timeoutMs: 120000, url: 'http://localhost:8080', vocabulary: { names: [], dropped: 0, file: null },
   });
   useOpenAI({ STT_MODEL: 'whisper-large-v3', STT_API_KEY: 'sk-geheim', STT_LANGUAGE: 'de', STT_TIMEOUT_MS: '0' });
   const c = sttConfig();
   assert.deepEqual(c, {
     provider: 'openai', language: 'de', temperature: 0.2, wordTimestamps: true, timeoutMs: 0,
-    url: `${BASE}/v1`, model: 'whisper-large-v3', apiKeySet: true,
+    url: `${BASE}/v1`, model: 'whisper-large-v3', apiKeySet: true, vocabulary: { names: [], dropped: 0, file: null },
   });
   assert.ok(!JSON.stringify(c).includes('sk-geheim'));
   process.env.STT_TIMEOUT_MS = 'abc';
@@ -391,6 +394,82 @@ test('streaming over an OpenAI word-level provider: agreement, sentence trim and
   assert.equal(fin.stt.provider, 'openai');
   // The streamer's context prompt reaches the server.
   assert.equal(seen[2].form.get('prompt'), 'Das ist ein Satz.');
+});
+
+// ── Vocabulary prompt (STT_VOCABULARY) on every STT path ─────────────────────
+
+const VOCAB = 'Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk';
+const VOCAB_PROMPT = `${VOCAB}.`;
+
+test('vocabulary: both providers get "<names>. <context>"; a long context gives way, the names never', async () => {
+  process.env.WHISPER_URL = BASE;
+  process.env.STT_VOCABULARY = VOCAB;
+  reply = () => ({ json: { text: 'Gaglath Matho greift an.' } });
+  await transcribe(wavOfSeconds(1));
+  assert.equal(seen[0].url, '/inference');
+  assert.equal(seen[0].form.get('prompt'), VOCAB_PROMPT, 'no context → names only');
+
+  const ctx = Array.from({ length: 120 }, (_, i) => `wort${i}`).join(' ') + ' ENDE.';
+  await transcribe(wavOfSeconds(1), { prompt: ctx });
+  const p = seen[1].form.get('prompt');
+  assert.ok(p.length <= 500, String(p.length));
+  assert.ok(p.startsWith(`${VOCAB_PROMPT} wort`), p.slice(0, 80));
+  assert.ok(p.endsWith(' ENDE.'));
+
+  useOpenAI();
+  await transcribe(wavOfSeconds(1), { prompt: 'Vorher.' });
+  assert.equal(seen[2].url, '/v1/audio/transcriptions');
+  assert.equal(seen[2].form.get('prompt'), `${VOCAB_PROMPT} Vorher.`);
+
+  assert.deepEqual(sttConfig().vocabulary, { names: VOCAB.split(', '), dropped: 0, file: null },
+    'session_meta snapshot records the active list');
+});
+
+test('vocabulary: streaming ticks and the utterance-end pass carry names + locked text; STT_STREAM_PROMPT=false keeps the names', async () => {
+  useOpenAI({ STT_STREAM_MIN_WINDOW_MS: '500', STT_STREAM_TRIM_SECONDS: '5', STT_VOCABULARY: VOCAB });
+  const w = (word, start, end) => ({ word, start, end });
+  const first = {
+    text: 'Das ist ein Satz. Und mehr',
+    words: [w('Das', 0.2, 0.5), w('ist', 0.6, 0.9), w('ein', 1.0, 1.3), w('Satz', 1.4, 5.4), w('Und', 6.0, 6.3), w('mehr', 6.4, 6.8)],
+  };
+  const final = { text: 'Und mehr Text.', words: [w('Und', 0.3, 0.6), w('mehr', 0.7, 1.1), w('Text', 1.3, 1.7)] };
+  reply = (_req, _form, n) => ({ json: n <= 2 ? first : final });
+
+  const run = async () => {
+    const s = createSttStream();
+    await s.tick(pcmOfSeconds(7));
+    await s.tick(pcmOfSeconds(8)); // locks "Das ist ein Satz."
+    return s.finalize(pcmOfSeconds(9));
+  };
+  const fin = await run();
+  assert.equal(fin.text, 'Das ist ein Satz. Und mehr Text.', 'the prompt does not change the streaming result');
+  assert.deepEqual(seen.map((x) => x.form.get('prompt')),
+    [VOCAB_PROMPT, VOCAB_PROMPT, `${VOCAB_PROMPT} Das ist ein Satz.`]);
+
+  process.env.STT_STREAM_PROMPT = 'false';
+  seen.length = 0;
+  await run();
+  assert.deepEqual(seen.map((x) => x.form.get('prompt')), [VOCAB_PROMPT, VOCAB_PROMPT, VOCAB_PROMPT],
+    'STT_STREAM_PROMPT only switches the context part');
+});
+
+test('vocabulary: chunked fallback and finalize re-STT send the names with every request', async () => {
+  useOpenAI({ STT_VOCABULARY: VOCAB });
+  reply = () => ({ json: { text: 'Gaglath Matho greift an.' } });
+  await transcribeChunked(pcmOfSeconds(2.5));
+  const live = seen.length;
+  assert.ok(live >= 1);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stt-vocab-final-'));
+  try {
+    const file = path.join(dir, 'u.wav');
+    fs.writeFileSync(file, pcmToWav(pcmOfSeconds(2.5)));
+    await transcribeWavFile(file);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.ok(seen.length > live, 'finalize made its own request');
+  for (const x of seen) assert.equal(x.form.get('prompt'), VOCAB_PROMPT);
 });
 
 test('chunked + finalize re-STT over an OpenAI word-level provider: whole display words, ms offsets', async () => {

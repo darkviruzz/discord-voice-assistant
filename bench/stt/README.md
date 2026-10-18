@@ -27,6 +27,12 @@ diesen Lauf die Werte aus `apps/server/.env`. Vorlage:
 [`profiles.example.json`](profiles.example.json). Ohne Datei läuft genau ein
 Profil mit der aktuellen Server-Konfiguration.
 
+Namen-Vokabular (`STT_VOCABULARY` / `STT_VOCABULARY_FILE`, siehe
+[`docs/providers.md`](../../docs/providers.md#namen-vokabular-stt_vocabulary-stt_vocabulary_file))
+vergleicht man mit zwei sonst gleichen Profilen — eins mit leeren
+Vokabular-Werten, eins mit Liste. Erwartung: Namen-Recall steigt, WER bleibt
+gleich oder sinkt; mehr Insertions (I) deuten auf halluzinierte Namen.
+
 ## Ausführen
 
 ```bash

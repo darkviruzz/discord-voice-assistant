@@ -1,7 +1,11 @@
 [
   {
-    "name": "whisper.cpp medium (aktuell)",
-    "env": { "STT_PROVIDER": "whispercpp", "WHISPER_URL": "http://localhost:8080" }
+    "name": "whisper.cpp medium (ohne Vokabular)",
+    "env": { "STT_PROVIDER": "whispercpp", "WHISPER_URL": "http://localhost:8080", "STT_VOCABULARY": "", "STT_VOCABULARY_FILE": "" }
+  },
+  {
+    "name": "whisper.cpp medium + Namen-Vokabular",
+    "env": { "STT_PROVIDER": "whispercpp", "WHISPER_URL": "http://localhost:8080", "STT_VOCABULARY": "", "STT_VOCABULARY_FILE": "STT-Vokabular.md" }
   },
   {
     "name": "whisper-large-v3-turbo",

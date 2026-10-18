@@ -160,6 +160,10 @@ services:
       STT_API_KEY: ${STT_API_KEY:-}
       STT_LANGUAGE: ${STT_LANGUAGE:-}
       STT_TIMEOUT_MS: ${STT_TIMEOUT_MS:-120000}
+      # Campaign names as Whisper prompt; a relative file is read from the
+      # campaign volume (OBSIDIAN_VAULT_PATH above).
+      STT_VOCABULARY: ${STT_VOCABULARY:-}
+      STT_VOCABULARY_FILE: ${STT_VOCABULARY_FILE:-}
       # TTS provider settings (TTS_PROVIDER=openai etc.) — see deploy/.env.example.
       TTS_TIMEOUT_MS: ${TTS_TIMEOUT_MS:-30000}
       TTS_BASE_URL: ${TTS_BASE_URL:-}

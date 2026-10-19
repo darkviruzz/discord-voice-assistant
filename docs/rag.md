@@ -149,6 +149,18 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
   bleibt jeder Aufruf im Kontextfenster.
 - **Schreibweisen:** Jeder Aufruf bekommt die Namen aus
   `STT_VOCABULARY`/`_FILE` als korrekte Schreibweisen.
+- **Nur Spielgeschehen:** Die Prompts lassen weg, was am realen Tisch
+  besprochen wird (Termine, Schichtdienste, Technik, Figurenbau), halten NSCs in
+  ihrer Rolle (kein Verbündeter wird zum Gegner, keine Person zum Gegenstand) und
+  nennen Täter und Opfer nur, wenn es eindeutig gesagt wird. Anlass war Runde 3
+  (12.10.2026): „Terminorganisation aufgrund Schichtdienste" als offene Frage,
+  „Macklepenny von Gaglath besiegt" für einen NSC-Begleiter. Die Zusammenfassung
+  endet mit `Ort: … · Ingame-Datum: …`, wenn das genannt wurde; die Zeile bleibt
+  beim Kürzen erhalten.
+- **Eigene Prompts:** `SESSION_SUMMARY_PART_PROMPT_FILE` und
+  `SESSION_SUMMARY_FINAL_PROMPT_FILE` ersetzen die eingebauten Texte, z. B. durch
+  Notizen im Vault. Vorlagen: [`docs/prompts/`](prompts/README.md). Diese Notizen
+  mit `RAG_EXCLUDE` aus dem Index heraushalten.
 - **Gemessen** am 2026-10-19 (3-h-Session, 245 KB, gemma4:12b auf der
   RX 6800 XT, Ollama-Kontext 8192): vorher 21 + 1 Aufrufe in 9,6 min, die
   Zusammenführung mit 7,5k Token fast am Limit. Jetzt 10 + 1 Aufrufe in

@@ -3,6 +3,7 @@ import path from 'path';
 import { warn, log, debug } from '../logger.js';
 import { complete, summaryModel } from '../providers/llm.js';
 import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
+import { promptText } from '../promptFiles.js';
 
 // Session summary at finalize: a short German recap of the finished session,
 // built from the merged transcript. It is what Rabenauge answers "Was war
@@ -18,7 +19,8 @@ import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
 // in batches first). Uses the summary endpoint of the LLM provider
 // (SUMMARY_PROVIDER/SUMMARY_BASE_URL/SUMMARY_MODEL, each falling back to the
 // answer LLM). The STT vocabulary (STT_VOCABULARY/_FILE) goes into every
-// prompt as the spelling reference for names.
+// prompt as the spelling reference for names. The part and final prompts can
+// come from vault notes (see PART_SYSTEM below).
 //
 // Sizing (measured 2026-10-19, gemma4:12b on Ollama with its 8192-token
 // context, 3 h session): the raw transcript lines cost 2.5 chars/token, so a
@@ -34,16 +36,35 @@ import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
 // what was condensed so far and ends with a note that it is incomplete
 // (partialNote). Only with no note at all is the result null.
 
+// The built-in prompts. PART and FINAL can be replaced by a file (vault note)
+// via SESSION_SUMMARY_PART_PROMPT_FILE / SESSION_SUMMARY_FINAL_PROMPT_FILE
+// (promptFiles.js; starters in docs/prompts/); the batch merge, needed only
+// when the notes do not fit one final call, always uses MERGE_SYSTEM. The
+// spelling hint is appended to whichever text is used.
+//
+// The rules target what round 3 (2026-10-12, gemma4:12b) got wrong: the
+// players' scheduling talk ("Terminorganisation aufgrund Schichtdienste") and
+// character building ("für Droga noch ein Druide") ended up as open questions,
+// and an allied NPC whose turn a player took in combat became "von Gaglath
+// besiegt".
 const NAME_RULE = 'Eigennamen exakt übernehmen. Ist unklar, ob ein Name eine Person, ein Ort oder ein Gegenstand ist, nenne ihn ohne Einordnung.';
+const IN_GAME_RULE = 'Nur das Spielgeschehen zählt: was die Figuren in der Spielwelt erleben, tun und entscheiden. '
+  + 'Weglassen, was am realen Spieltisch besprochen wird: Termine und Terminplanung, Arbeit, Schichtdienste und Privates, '
+  + 'Technikprobleme, Smalltalk, Regeldiskussionen, Würfelwürfe und Schadenswerte, das Erstellen, Benennen oder Verwalten von Spielfiguren.';
+const ROLE_RULE = 'NSCs behalten ihre Rolle: Begleiter und Verbündete der Gruppe nicht zu Gegnern machen, Personen nicht zu Gegenständen. '
+  + 'Wer wen angreift, besiegt, heilt oder rettet, nur nennen, wenn es eindeutig gesagt wird — sonst ohne Täter und Opfer formulieren. Nichts dazuerfinden.';
 
-const PART_SYSTEM = [
+export const PART_SYSTEM = [
   'Du protokollierst eine Pen-and-Paper-Spielrunde.',
   'Du bekommst einen Ausschnitt des Sitzungs-Transkripts (eine Zeile pro Wortbeitrag, "Spieler (Figur): Text").',
+  'Die Spielleitung beschreibt die Welt und spricht für die NSCs. Im Kampf führen Spieler oft auch die Züge von NSC-Begleitern; "X ist dran" heißt nur, dass X an der Reihe ist.',
   'Notiere knapp in deutscher Prosa (Fließtext, kein Markdown, keine Aufzählungszeichen), was in diesem Ausschnitt im Spiel passiert ist:',
   'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände, offene Fragen.',
+  'Nennt jemand ein Datum oder eine Tageszeit der Spielwelt oder wechselt die Gruppe den Ort, notiere es.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
-  'Smalltalk, Regeldiskussionen und Wiederholungen weglassen.',
-  'Antworte NUR mit den Notizen, ohne Vorrede.',
+  'Antworte NUR mit den Notizen, ohne Vorrede. Enthält der Ausschnitt kein Spielgeschehen, antworte nur: "Kein Spielgeschehen."',
 ].join('\n');
 
 // Batch merge (only when the notes do not fit one final call).
@@ -51,18 +72,23 @@ const MERGE_SYSTEM = [
   'Du protokollierst eine Pen-and-Paper-Spielrunde.',
   'Du bekommst chronologische Notizen zu einem Teil der Sitzung.',
   'Fasse sie zu kürzeren chronologischen Notizen in deutscher Prosa zusammen (Fließtext, kein Markdown). Behalte',
-  'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände und offene Fragen.',
+  'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände, offene Fragen und genannte Daten der Spielwelt.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
   'Antworte NUR mit den Notizen, ohne Vorrede.',
 ].join('\n');
 
-const FINAL_SYSTEM = [
+export const FINAL_SYSTEM = [
   'Du schreibst die Zusammenfassung einer Pen-and-Paper-Sitzung für die Spielrunde.',
-  'Du bekommst chronologische Notizen zur gesamten Sitzung.',
+  'Du bekommst chronologische Notizen zur gesamten Sitzung (bei kurzen Sitzungen direkt das Transkript, eine Zeile pro Wortbeitrag, "Spieler (Figur): Text").',
   'Schreibe daraus eine zusammenhängende deutsche Zusammenfassung:',
-  'was passiert ist, was entschieden wurde, wo die Gruppe am Ende steht und welche Fragen offen sind.',
+  'was in der Spielwelt passiert ist, was entschieden wurde, wo die Gruppe am Ende steht und welche Fragen im Spiel offen sind.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
   'Keine Aufzählungszeichen, keine Überschriften, keine Vorrede.',
+  'Letzte Zeile, nur mit dem, was genannt wurde: "Ort: … · Ingame-Datum: …" — eine fehlende Angabe weglassen, nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.',
 ].join('\n');
 
 // The STT vocabulary as a spelling reference. Whisper only reads ~224 prompt
@@ -188,6 +214,19 @@ export function capText(text, limit) {
   return (sp > 0 ? head.slice(0, sp) : head).trimEnd();
 }
 
+// capText for the finished summary: its closing "Ort: … · Ingame-Datum: …"
+// line (FINAL_SYSTEM) is kept and the text before it is shortened — a plain
+// cut keeps the front and would drop exactly that line.
+const CLOSING_LINE_RE = /\n[ \t]*((?:Ort|Ingame-Datum)[ \t]*:[^\n]{1,200}?)[ \t]*$/i;
+
+export function capSummary(text, limit) {
+  const t = String(text || '').trim();
+  const m = t.length > limit ? t.match(CLOSING_LINE_RE) : null;
+  if (!m || m[1].length + 2 > limit / 2) return capText(t, limit);
+  const head = capText(t.slice(0, m.index), limit - m[1].length - 2);
+  return head ? `${head}\n\n${m[1]}` : capText(t, limit);
+}
+
 // Total time budget for one summary (all LLM calls). The summary runs inside
 // the finalize the bot waits for: the bot gives up after FINALIZE_IDLE_TIMEOUT_MS
 // without progress (every LLM call sends a tick, the server's keepalive covers
@@ -275,6 +314,9 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
   const budgetMs = summaryBudgetMs();
   const model = summaryModel();
   const hint = spellingHint();
+  // Read once per summary, so all calls of one run use the same text.
+  const partSystem = promptText('SESSION_SUMMARY_PART_PROMPT_FILE', PART_SYSTEM);
+  const finalSystem = promptText('SESSION_SUMMARY_FINAL_PROMPT_FILE', FINAL_SYSTEM);
   const started = now();
   const deadline = started + budgetMs;
   const chunks = chunkRecords(records, chunkChars);
@@ -316,8 +358,8 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
 
   try {
     if (chunks.length === 1) {
-      const content = await ask(FINAL_SYSTEM, `Transkript:\n${chunks[0].text}\n\nHöchstens ${maxChars} Zeichen.`);
-      return capText(content, maxChars) || null;
+      const content = await ask(finalSystem, `Transkript:\n${chunks[0].text}\n\nHöchstens ${maxChars} Zeichen.`);
+      return capSummary(content, maxChars) || null;
     }
 
     // Map: one note per part, until time runs short or the LLM looks down.
@@ -330,7 +372,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       const c = chunks[i];
       const when = clockRange(c);
       try {
-        const content = await ask(PART_SYSTEM,
+        const content = await ask(partSystem,
           `Ausschnitt ${i + 1} von ${chunks.length}${when ? ` (${when})` : ''}:\n${c.text}\n\nHöchstens etwa ${noteChars} Zeichen.`,
           reserveMs());
         notes.push({ first: i + 1, last: i + 1, from: c.from, to: c.to, text: capText(content, 2 * noteChars) });
@@ -374,7 +416,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
     let text = null;
     if (!unmerged && joinedLength(level) <= mergeChars) {
       try {
-        text = await ask(FINAL_SYSTEM, `Notizen:\n${level.map(noteForLlm).join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.`);
+        text = await ask(finalSystem, `Notizen:\n${level.map(noteForLlm).join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.`);
       } catch (e) {
         warn('session-summary: final merge failed —', e.message);
         if (roomMs(0) < MIN_CALL_MS) timeUp = true;
@@ -390,7 +432,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       timeUp, failed, unmerged: !text,
     }) : '';
     const room = maxChars - (marker ? marker.length + 2 : 0);
-    const body = text ? capText(text, room) : condenseNotes(level, room);
+    const body = text ? capSummary(text, room) : condenseNotes(level, room);
     const secs = Math.round((now() - started) / 1000);
     if (marker) warn(`session-summary: ${calls} LLM calls in ${secs} s — incomplete: ${marker} (budget SESSION_SUMMARY_TIMEOUT_MS=${budgetMs})`);
     else log(`session-summary: ${calls} LLM calls in ${secs} s for ${chunks.length} parts`);

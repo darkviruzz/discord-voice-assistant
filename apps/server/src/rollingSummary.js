@@ -21,21 +21,26 @@ import {
 import { readSessionEvents } from './sessionEvents.js';
 import { buildModelFromEvents } from './finalize/merge.js';
 import { loadSpeakerMap } from './speakerMap.js';
+import { promptText } from './promptFiles.js';
 
 const { lineFor } = _internal;
 
 // Summarizer system prompt. German, neutral prose, name-preserving. Output is a
-// plain-text running summary (NOT the JSON the answer model emits).
-const SUMMARY_SYSTEM = [
+// plain-text running summary (NOT the JSON the answer model emits). Can be
+// replaced by a file (vault note) via LIVE_SUMMARY_PROMPT_FILE — promptFiles.js,
+// starter in docs/prompts/; read per fold.
+export const SUMMARY_SYSTEM = [
   'Du fasst den bisherigen Verlauf einer Pen-and-Paper-Spielrunde zusammen.',
-  'Du bekommst eine bestehende Zusammenfassung (optional) und neue Gesprächsausschnitte.',
+  'Du bekommst eine bestehende Zusammenfassung (optional) und neue Gesprächsausschnitte (Zeilen der Form [Sprecher] Text).',
   'Aktualisiere die Zusammenfassung, sodass sie den gesamten Verlauf abdeckt.',
   '',
   'Regeln:',
   '- Schreibe in zusammenhängender deutscher Prosa, keine Aufzählungen.',
   '- Bewahre Eigennamen (Charaktere, Orte, NSCs) exakt.',
-  '- Halte fest, was beschlossen wurde, was offen ist und wo die Gruppe steht.',
-  '- Lass Smalltalk und Wiederholungen weg, behalte den roten Faden.',
+  '- Halte das Spielgeschehen fest: was beschlossen wurde, was offen ist und wo die Gruppe steht.',
+  '- Lass weg, was am realen Tisch besprochen wird (Terminplanung, Arbeit und Privates, Technikprobleme, Smalltalk), und Wiederholungen; behalte den roten Faden.',
+  '- NSCs behalten ihre Rolle: Verbündete nicht zu Gegnern, Personen nicht zu Gegenständen. Wer wen besiegt oder heilt, nur wenn es eindeutig gesagt wird.',
+  '- Nenne das Datum der Spielwelt und den Ort der Gruppe, wenn sie genannt werden.',
   '- Antworte NUR mit der Zusammenfassung, ohne Vorrede oder Formatierung.',
 ].join('\n');
 
@@ -67,7 +72,7 @@ export async function summarize(prev, segment) {
       model,
       role: 'summary',
       messages: [
-        { role: 'system', content: SUMMARY_SYSTEM },
+        { role: 'system', content: promptText('LIVE_SUMMARY_PROMPT_FILE', SUMMARY_SYSTEM) },
         { role: 'user',   content: userContent },
       ],
       // A fold runs in the background, but a hung model must not pin the

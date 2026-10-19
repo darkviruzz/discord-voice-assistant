@@ -46,7 +46,7 @@ const KNOWN_DIVERGENT_FALLBACKS = {
   DATA_DIR: 'catalog entry is the bot\'s DATA_DIR (/opt/...); both processes fall back to ./data',
 };
 
-const READ_RE = /process\.env\.([A-Z][A-Z0-9_]+)|process\.env\[\s*'([A-Z][A-Z0-9_]+)'\s*\]|\b(?:env|envStr|envPositiveInt|intEnv|numberEnv|envList)\(\s*'([A-Z][A-Z0-9_]+)'/g;
+const READ_RE = /process\.env\.([A-Z][A-Z0-9_]+)|process\.env\[\s*'([A-Z][A-Z0-9_]+)'\s*\]|\b(?:env|envStr|envPositiveInt|intEnv|numberEnv|envList|promptText)\(\s*'([A-Z][A-Z0-9_]+)'/g;
 const FALLBACK_RES = [
   /process\.env\.([A-Z][A-Z0-9_]+)\s*(?:\?\?|\|\|)\s*(?:'([^']*)'|(-?[\d_.]+))/g,
   /Number\(process\.env\.([A-Z][A-Z0-9_]+)\)\s*\|\|\s*(-?[\d_.]+)()/g,

@@ -275,6 +275,29 @@ export const CATALOG = [
       + 'Pfade außerhalb des Vaults werden abgelehnt.',
   },
   {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_PART_PROMPT_FILE',
+    label: 'Prompt-Datei: Abschnitt verdichten', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Eigener System-Prompt für das Verdichten eines Transkript-Abschnitts (lange '
+      + 'Sessions), z. B. als Notiz im Vault: Rabenauge/Konfiguration/Prompt Sitzung Abschnitt.md. '
+      + 'Absoluter Pfad, ./… relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH. '
+      + 'Frontmatter und %%Kommentare%% werden entfernt. Die Namensliste (STT-Vokabular) '
+      + 'hängt der Server weiter selbst an. Leer, fehlende oder leere Datei = eingebauter '
+      + 'Prompt (Vorlage: docs/prompts/). Wird bei jeder Zusammenfassung neu gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_FINAL_PROMPT_FILE',
+    label: 'Prompt-Datei: Session-Zusammenfassung', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Eigener System-Prompt für die fertige Zusammenfassung (summary.md) — aus den '
+      + 'Abschnitts-Notizen bzw. bei kurzen Sessions direkt aus dem Transkript, z. B. '
+      + 'Rabenauge/Konfiguration/Prompt Sitzung Zusammenfassung.md. Absoluter Pfad, ./… '
+      + 'relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH; Format wie '
+      + 'SESSION_SUMMARY_PART_PROMPT_FILE. Endet die Antwort mit einer Zeile '
+      + '"Ort: … · Ingame-Datum: …", bleibt sie beim Kürzen erhalten. Leer, fehlende oder '
+      + 'leere Datei = eingebauter Prompt. Wird bei jeder Zusammenfassung neu gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'FINALIZE_PROGRESS_MS',
     label: 'Finalize-Fortschritt: Mindestabstand (ms)', type: 'number', def: '3000',
     applyMode: 'next-finalize',
@@ -600,17 +623,21 @@ export const CATALOG = [
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'SYSTEM_PROMPT_FILE',
-    label: 'System-Prompt-Datei', type: 'string', def: './prompt.txt', applyMode: 'restart',
-    desc: 'Pfad zu einer Textdatei mit dem System-Prompt (Persönlichkeit/Regeln des '
-      + 'Assistenten), relativ zu apps/server. Wird EINMALIG beim Import geladen '
-      + '(llm.js) — Änderung erst nach Neustart wirksam. Vorrang vor SYSTEM_PROMPT.',
+    label: 'System-Prompt-Datei', type: 'string', def: './prompt.txt', applyMode: 'live',
+    desc: 'Datei mit dem System-Prompt (Persönlichkeit/Regeln des Assistenten). ./… = '
+      + 'relativ zu apps/server (z. B. ./prompt.txt), absoluter Pfad, sonst relativ zu '
+      + 'OBSIDIAN_VAULT_PATH (z. B. Rabenauge/Konfiguration/Prompt Persona.md). Eine '
+      + 'Obsidian-Notiz geht: Frontmatter und %%Kommentare%% werden entfernt. Wird pro '
+      + 'Anfrage gelesen (Änderungen an der Datei greifen bei der nächsten Antwort). Vorrang '
+      + 'vor SYSTEM_PROMPT; fehlende oder leere Datei = SYSTEM_PROMPT bzw. eingebauter '
+      + 'Prompt (Vorlage: docs/prompts/), mit einer Warnung im Log.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'SYSTEM_PROMPT',
-    label: 'System-Prompt (inline)', type: 'string', def: '', applyMode: 'restart',
+    label: 'System-Prompt (inline)', type: 'string', def: '', applyMode: 'live',
     desc: 'Alternative zu SYSTEM_PROMPT_FILE: der System-Prompt direkt als Text. Wird '
-      + 'nur genutzt, wenn keine Datei gesetzt/lesbar ist, und ebenfalls einmalig beim '
-      + 'Import geladen — Änderung erst nach Neustart wirksam.',
+      + 'nur genutzt, wenn keine Datei gesetzt/lesbar ist. Leer = eingebauter Prompt. '
+      + 'Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'HISTORY_TURNS',
@@ -720,6 +747,15 @@ export const CATALOG = [
     label: 'Max. Länge Zusammenfassung (Zeichen)', type: 'number', def: '2000', applyMode: 'live',
     desc: 'Obergrenze der Zeichenzahl der rollenden Zusammenfassung. Wird bei der '
       + 'Zusammenfassung gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LIVE_SUMMARY_PROMPT_FILE',
+    label: 'Prompt-Datei: rollende Zusammenfassung', type: 'string', def: '', applyMode: 'live',
+    desc: 'Eigener System-Prompt für die rollende Zusammenfassung der laufenden Session, '
+      + 'z. B. als Notiz im Vault: Rabenauge/Konfiguration/Prompt Live-Zusammenfassung.md. '
+      + 'Absoluter Pfad, ./… relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH. '
+      + 'Frontmatter und %%Kommentare%% werden entfernt. Leer, fehlende oder leere Datei = '
+      + 'eingebauter Prompt (Vorlage: docs/prompts/). Wird bei jeder Zusammenfassung neu gelesen.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'OBSIDIAN_VAULT_PATH',

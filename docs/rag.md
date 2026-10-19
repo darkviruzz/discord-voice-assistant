@@ -160,7 +160,7 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
 - **Eigene Prompts:** `SESSION_SUMMARY_PART_PROMPT_FILE` und
   `SESSION_SUMMARY_FINAL_PROMPT_FILE` ersetzen die eingebauten Texte, z. B. durch
   Notizen im Vault. Vorlagen: [`docs/prompts/`](prompts/README.md). Diese Notizen
-  mit `RAG_EXCLUDE` aus dem Index heraushalten.
+  mit `RAG_EXCLUDE` aus dem Index heraushalten, z. B. `Rabenauge/Konfiguration/`.
 - **Gemessen** am 2026-10-19 (3-h-Session, 245 KB, gemma4:12b auf der
   RX 6800 XT, Ollama-Kontext 8192): vorher 21 + 1 Aufrufe in 9,6 min, die
   Zusammenführung mit 7,5k Token fast am Limit. Jetzt 10 + 1 Aufrufe in

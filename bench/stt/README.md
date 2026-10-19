@@ -32,6 +32,11 @@ Namen-Vokabular (`STT_VOCABULARY` / `STT_VOCABULARY_FILE`, siehe
 vergleicht man mit zwei sonst gleichen Profilen — eins mit leeren
 Vokabular-Werten, eins mit Liste. Erwartung: Namen-Recall steigt, WER bleibt
 gleich oder sinkt; mehr Insertions (I) deuten auf halluzinierte Namen.
+Samples kürzer als `STT_VOCABULARY_MIN_MS` (Default 1200 ms) laufen auch im
+Bench ohne Vokabular — wer den Prompt allein messen will, setzt im Profil `0`.
+Korrekturliste und Füllsatz-Filter (`STT_CORRECTIONS`, `STT_HALLUCINATION_*`)
+misst der Bench nicht: Sie greifen erst nach der Erkennung, in Pipeline und
+Finalize.
 
 ## Ausführen
 

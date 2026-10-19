@@ -167,6 +167,12 @@ services:
       # campaign volume (OBSIDIAN_VAULT_PATH above).
       STT_VOCABULARY: ${STT_VOCABULARY:-}
       STT_VOCABULARY_FILE: ${STT_VOCABULARY_FILE:-}
+      STT_VOCABULARY_MIN_MS: ${STT_VOCABULARY_MIN_MS:-1200}
+      # Correction map / Whisper filler filter (see deploy/.env.example).
+      STT_CORRECTIONS: ${STT_CORRECTIONS:-}
+      STT_CORRECTIONS_FILE: ${STT_CORRECTIONS_FILE:-}
+      STT_HALLUCINATION_FILTER: ${STT_HALLUCINATION_FILTER:-true}
+      STT_HALLUCINATION_PHRASES: ${STT_HALLUCINATION_PHRASES:-}
       # TTS provider settings (TTS_PROVIDER=openai etc.) — see deploy/.env.example.
       TTS_TIMEOUT_MS: ${TTS_TIMEOUT_MS:-30000}
       TTS_BASE_URL: ${TTS_BASE_URL:-}

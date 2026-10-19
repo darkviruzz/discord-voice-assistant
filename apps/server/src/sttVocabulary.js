@@ -26,13 +26,29 @@
 //
 // Read per call (statSync + cache on mtime), so a panel change or an edited
 // file applies to the next STT request.
+//
+// Short utterances. On a cough, a laugh or a single word the audio carries
+// little to decode, and Whisper leans on the prompt instead: a name list turns
+// noise into "Gnoll." or "Vielen Dank fürs Zuschauen." (round-2 logs: 41 of 49
+// such fillers came from ≤ 1.2 s of audio). Utterances shorter than
+// STT_VOCABULARY_MIN_MS (default 1200, 0 = always) therefore get the normal
+// context but no vocabulary. They are still transcribed: this is no minimum
+// utterance length.
 
 import fs from 'fs';
 import path from 'path';
-import { log, warn } from './logger.js';
+import { log, warn, debug } from './logger.js';
 
 export const PROMPT_MAX_CHARS = 500;
 export const VOCAB_MAX_CHARS = 250;
+
+// Utterances shorter than this (ms) are prompted without the vocabulary.
+// Empty or garbage → the default; only an explicit 0 means "always".
+export function vocabularyMinMs() {
+  const raw = String(process.env.STT_VOCABULARY_MIN_MS ?? '1200').trim();
+  const n = raw === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1200;
+}
 
 // Text → names, in order, deduplicated case-insensitively.
 export function parseVocabulary(text) {
@@ -101,27 +117,36 @@ function warnOnce(key, msg) {
   warn(msg);
 }
 
-function vocabularyFilePath() {
-  const file = (process.env.STT_VOCABULARY_FILE ?? '').trim();
+// The file a *_FILE setting names: absolute, or relative to
+// OBSIDIAN_VAULT_PATH. null when unset (or relative without a vault).
+// Shared with sttPostprocess.js (STT_CORRECTIONS_FILE).
+export function settingFilePath(key) {
+  const file = (process.env[key] ?? '').trim();
   if (!file) return null;
   if (path.isAbsolute(file)) return file;
   const vault = (process.env.OBSIDIAN_VAULT_PATH ?? '').trim();
   if (!vault) {
-    warnOnce(`novault|${file}`, `stt: STT_VOCABULARY_FILE "${file}" is relative but OBSIDIAN_VAULT_PATH is empty — file ignored`);
+    warnOnce(`novault|${key}|${file}`, `stt: ${key} "${file}" is relative but OBSIDIAN_VAULT_PATH is empty — file ignored`);
     return null;
   }
   return path.resolve(vault, file);
 }
 
+// statSync of a settings file, or null (warned once per path) when missing.
+export function settingFileStat(key, fp) {
+  if (!fp) return null;
+  try { return fs.statSync(fp); }
+  catch (e) {
+    warnOnce(`missing|${fp}`, `stt: ${key} ${fp} not readable (${e.code || e.message}) — file ignored`);
+    return null;
+  }
+}
+
 // The effective vocabulary: { names, text, used, dropped, file }.
 export function currentVocabulary() {
   const inline = process.env.STT_VOCABULARY ?? '';
-  const fp = vocabularyFilePath();
-  let stat = null;
-  if (fp) {
-    try { stat = fs.statSync(fp); }
-    catch (e) { warnOnce(`missing|${fp}`, `stt: STT_VOCABULARY_FILE ${fp} not readable (${e.code || e.message}) — file ignored`); }
-  }
+  const fp = settingFilePath('STT_VOCABULARY_FILE');
+  const stat = settingFileStat('STT_VOCABULARY_FILE', fp);
   const key = `${inline}\0${fp}\0${stat ? `${stat.mtimeMs}:${stat.size}` : '-'}`;
   if (cache.key === key) return cache.value;
 
@@ -144,9 +169,16 @@ export function currentVocabulary() {
 }
 
 // The prompt for one STT request: vocabulary + `context` (already-committed
-// text, or nothing). undefined when there is neither.
-export function sttPrompt(context) {
-  return joinPrompt(currentVocabulary().text, context);
+// text, or nothing). undefined when there is neither. `audioMs` = length of
+// the whole utterance (not just the window sent); below vocabularyMinMs() the
+// vocabulary is left out. Unknown length → vocabulary as usual.
+export function sttPrompt(context, { audioMs } = {}) {
+  const vocab = currentVocabulary().text;
+  if (vocab && Number.isFinite(audioMs) && audioMs < vocabularyMinMs()) {
+    debug(`stt: ${Math.round(audioMs)} ms utterance < STT_VOCABULARY_MIN_MS ${vocabularyMinMs()} — prompt without vocabulary`);
+    return joinPrompt('', context);
+  }
+  return joinPrompt(vocab, context);
 }
 
 // Test hook.

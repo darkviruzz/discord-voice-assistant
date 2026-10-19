@@ -1,5 +1,6 @@
 import { transcribe } from './stt.js';
 import { sttProviderLabel } from './providers/stt.js';
+import { applyCorrections } from './sttPostprocess.js';
 import { debug, warn } from './logger.js';
 import opus from '@discordjs/opus';
 
@@ -157,10 +158,15 @@ export function createSttStream({
   };
 
   const windowStartSec = () => st.windowStartSample / SAMPLE_RATE;
+  // The whole utterance so far (locked audio included), not just the window:
+  // decides whether the vocabulary goes into the prompt (STT_VOCABULARY_MIN_MS).
+  const utteranceMs = (pcm48k) => (pcm48k.length / 2 / SAMPLE_RATE) * 1000;
 
+  // Locked text as context, with the correction map applied, so a near-miss
+  // ("Rhoga") is not fed back to Whisper as the spelling to continue.
   function promptText() {
     if ((process.env.STT_STREAM_PROMPT ?? 'true') === 'false') return undefined;
-    const locked = st.lockedGroups.join(' ').trim();
+    const locked = applyCorrections(st.lockedGroups.join(' ').trim());
     return locked ? locked.slice(-200) : undefined;
   }
 
@@ -292,7 +298,9 @@ export function createSttStream({
       try {
         st.lastTickSamples = totalSamples;
         const window = pcm48k.subarray(st.windowStartSample * 2);
-        const { meta, words: tokens, text } = await transcribeFn(pcmToWav(window), { prompt: promptText() });
+        const { meta, words: tokens, text } = await transcribeFn(pcmToWav(window), {
+          prompt: promptText(), audioMs: utteranceMs(pcm48k),
+        });
         if (st.detached) return null;
         st.ticks++;
         st.lastMeta = meta;
@@ -403,7 +411,9 @@ export function createSttStream({
       let anyTailTimes = false;
       if (windowSec >= 0.25) {
         const window = pcm48k.subarray(st.windowStartSample * 2);
-        const { text, meta, words: tokens } = await transcribeFn(pcmToWav(window), { prompt: promptText() });
+        const { text, meta, words: tokens } = await transcribeFn(pcmToWav(window), {
+          prompt: promptText(), audioMs: utteranceMs(pcm48k),
+        });
         tailMeta = meta;
         if (Array.isArray(tokens) && tokens.length > 0) {
           let merged = mergeTokensToWords(tokens).filter((w) => !isBracketArtifact(w.text));

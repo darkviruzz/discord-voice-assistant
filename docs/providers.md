@@ -40,6 +40,9 @@ greift ab der nächsten Anfrage.
 | `STT_TIMEOUT_MS` | Obergrenze pro Anfrage inkl. Antwort (Default 120 s; vorher unbegrenzt) |
 | `STT_VOCABULARY` | Eigennamen der Kampagne, kommagetrennt — Whisper-Prompt für jede Transkription (s. u.) |
 | `STT_VOCABULARY_FILE` | dieselbe Liste als Datei, absolut oder relativ zu `OBSIDIAN_VAULT_PATH` |
+| `STT_VOCABULARY_MIN_MS` | kürzere Äußerungen bekommen kein Vokabular (Default 1200 ms, 0 = immer; s. u.) |
+| `STT_CORRECTIONS`, `STT_CORRECTIONS_FILE` | Korrekturliste `falsch => richtig` für Beinahe-Treffer (s. u.) |
+| `STT_HALLUCINATION_FILTER`, `STT_HALLUCINATION_PHRASES` | reine Whisper-Füllsätze verwerfen (Default an; s. u.) |
 
 Alle Wege — Live-Streaming, Wake-Word-Pass und Finalize — laufen über denselben
 Provider. Der `openai`-Adapter fordert `verbose_json` mit Wort-Zeitstempeln an;
@@ -54,7 +57,8 @@ erkannt. Auch whisper.cpp selbst spricht den `openai`-Weg, wenn es mit
 Whisper liest den `prompt` als „bisheriges Transkript“: Namen, die dort stehen,
 kommen sehr viel eher genau so geschrieben heraus („Gaglath Matho“ statt
 „Gaglat Mato“). Beide Provider schicken bei **jeder** Anfrage — Live-Streaming,
-Chunk-Fallback und Finalize-Re-STT — `<Vokabular>. <bisheriger Text>`:
+Chunk-Fallback und Finalize-Re-STT — `<Vokabular>. <bisheriger Text>` (nur
+Äußerungen kürzer als `STT_VOCABULARY_MIN_MS` bekommen den Text allein, s. u.):
 
 ```
 Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk. <fixierter Text des Streamers>
@@ -90,6 +94,66 @@ Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk. <fixierter Text d
   Namen aus der Liste zu „hören“ (Prompt-Echo). Je länger die Liste, desto
   eher. Das Weckwort besser zunächst **nicht** in die Liste nehmen — ein Echo
   könnte den Assistenten auslösen.
+- **Kurze Äußerungen ohne Vokabular (`STT_VOCABULARY_MIN_MS`, Default 1200):**
+  Bei Husten, Lachen oder einem Einzelwort hat Whisper kaum Audio und hält sich
+  an den Prompt. In Runde 2 (27 Namen) wurde so aus „So.“ ein „Gnoll.“, und
+  „Vielen Dank fürs Zuschauen.“ stand 38-mal im Transkript (ohne Vokabular:
+  2-mal). Von 49 solchen Füllsätzen im Server-Log kamen 41 aus ≤ 1,2 s Audio.
+  Kürzere Äußerungen bekommen
+  deshalb nur den normalen Kontext. Sie werden trotzdem transkribiert, das ist
+  **keine** Mindestlänge. Maßgeblich ist die ganze Äußerung, nicht das
+  Streaming-Fenster oder ein Chunk. `0` = Vokabular immer.
+
+### Korrekturliste (`STT_CORRECTIONS`, `STT_CORRECTIONS_FILE`)
+
+Was auch mit Vokabular knapp danebenliegt („Rhoga“, „GaGlath“, „Wyern“),
+ersetzt eine Liste nach der Erkennung — im Live-Transkript (also auch für
+Weckwort, LLM-Kontext und Live-Vorschau) und im Finalize:
+
+```
+# STT-Korrekturen.md — eine Regel pro Zeile
+Rhoga | Rhogaar => Rhogar
+Gaaglath | GaGlath | GaGlaath => Gaglath
+Wyern | Wyver => Wyvern
+```
+
+- **Regeln:** `falsch => richtig`, mehrere falsche Formen mit `|` auf ein Ziel.
+  Inline (`STT_CORRECTIONS`) durch Komma oder Semikolon getrennt, in der Datei
+  eine pro Zeile; `#` leitet einen Kommentar ein, Listenzeichen und
+  Frontmatter werden entfernt — eine Obsidian-Notiz geht also. Datei: absolut
+  oder relativ zu `OBSIDIAN_VAULT_PATH`, Änderungen greifen bei der nächsten
+  Äußerung.
+- **Abgleich:** ohne Groß-/Kleinschreibung, nur **ganze Wörter** — „Rhoga“
+  trifft „rhoga,“, aber nie „Rhogar“. Mehrwortformen („Ga Glath“) gehen auch.
+  Das Ziel wird so geschrieben, wie es in der Regel steht.
+- **Ein Durchgang:** alle Regeln auf einmal, die längste falsche Form zuerst.
+  Eine Ersetzung wird nicht noch einmal ersetzt. Ein Ziel sollte seine eigene
+  falsche Form nicht als ganzes Wort enthalten — sonst wächst ein
+  erneut bearbeiteter Text.
+- **Nachvollziehbar:** Hat die Nachbearbeitung den Text geändert, steht Whispers
+  Original im JSONL-Eintrag als `rawText`. Die Zahl der aktiven Regeln steht im
+  `session_meta` unter `stt.corrections`.
+- **Gute Kandidaten:** Fehlformen, die in mehreren Transkripten wiederkehren
+  und nie ein echtes Wort sind. Gängige Wörter („Roger“, „Silber“) nicht
+  aufnehmen — die Liste ersetzt sie überall.
+
+### Whisper-Füllsätze (`STT_HALLUCINATION_FILTER`, `STT_HALLUCINATION_PHRASES`)
+
+Whisper füllt Rauschen gern mit Sätzen aus seinen Untertitel-Trainingsdaten.
+Besteht eine Äußerung **ausschließlich** aus solchen Sätzen, wird sie verworfen
+— live (keine Blase, kein JSONL-Text, kein Weckwort) und im Finalize. Derselbe
+Satz mitten in echter Rede bleibt stehen. Verglichen wird ohne Groß-/
+Kleinschreibung, Satzzeichen und Apostrophe („für's“ = „fürs“); mehrere
+Füllsätze hintereinander zählen auch. Verworfenes steht im Debug-Log und im
+JSONL (`dropped: "hallucination"`, `rawText`).
+
+Eingebaute Liste (`STT_HALLUCINATION_PHRASES` leer): Vielen Dank fürs
+Zuschauen · Danke fürs Zuschauen · Vielen Dank für das Zuhören · Vielen Dank für
+Ihre Aufmerksamkeit · Untertitel im Auftrag des ZDF\* · Untertitelung im Auftrag
+des ZDF\* · Untertitel der Amara.org-Community · Untertitel von Stephanie Geiges
+· Untertitelung aufgrund der Audioqualität nicht möglich. Eine eigene Liste
+ersetzt sie (Semikolon-getrennt; `*` am Ende = beliebige Fortsetzung, etwa
+„für funk, 2017“). `STT_HALLUCINATION_FILTER=false` schaltet den Filter ab.
 
 **Wirkung messen** statt raten: in `bench/stt/profiles.json` dasselbe Profil
 zweimal anlegen, einmal ohne Vokabular (`"STT_VOCABULARY": ""`,

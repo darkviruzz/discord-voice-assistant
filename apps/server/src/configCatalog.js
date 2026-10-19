@@ -416,15 +416,17 @@ export const CATALOG = [
     desc: 'true = bereits fixierter Text wird Whisper als Decoder-Prompt mitgegeben, '
       + 'damit die Erkennung über die Fenstergrenze hinweg konsistent bleibt '
       + '(Satzanfang bekannt). Das Namen-Vokabular (STT_VOCABULARY) steht unabhängig '
-      + 'davon immer vorne im Prompt. Wird pro Anfrage gelesen.',
+      + 'davon vorne im Prompt (außer bei Äußerungen kürzer als STT_VOCABULARY_MIN_MS). '
+      + 'Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · STT', key: 'STT_VOCABULARY',
     label: 'Namen-Vokabular für die Spracherkennung', type: 'string', def: '', applyMode: 'live',
     desc: 'Kommagetrennte Eigennamen der Kampagne (Charaktere, NSCs, Orte), z. B. '
       + '"Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk". Werden Whisper '
-      + 'bei JEDER Transkription (Live-Streaming, Chunk-Fallback, Finalize) als Prompt '
-      + 'vorangestellt, damit die Namen richtig geschrieben erkannt werden. Reihenfolge = '
+      + 'bei jeder Transkription (Live-Streaming, Chunk-Fallback, Finalize) als Prompt '
+      + 'vorangestellt, damit die Namen richtig geschrieben erkannt werden — außer bei '
+      + 'Äußerungen kürzer als STT_VOCABULARY_MIN_MS. Reihenfolge = '
       + 'Priorität: höchstens 250 Zeichen gehen in den Prompt (Whisper liest nur ~224 '
       + 'Prompt-Token), der Rest wird mit Warnung im Log weggelassen. Lange Listen erhöhen '
       + 'das Risiko, dass Whisper in Stille Namen halluziniert — Wirkung mit npm run '
@@ -442,6 +444,60 @@ export const CATALOG = [
       + 'Kandidaten aus dem Vault liefert npm run vocab:stt — Liste prüfen, dann ablegen. '
       + 'Gleiches Budget wie STT_VOCABULARY (beide zusammen). Leer = aus. Wird pro '
       + 'STT-Anfrage gelesen (Änderungen an der Datei greifen sofort).',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_VOCABULARY_MIN_MS',
+    label: 'Namen-Vokabular erst ab Äußerungslänge (ms)', type: 'number', def: '1200',
+    applyMode: 'live',
+    desc: 'Äußerungen, die kürzer sind, bekommen das Namen-Vokabular NICHT in den Prompt '
+      + '(der normale Kontext bleibt). Bei Husten, Lachen oder einem einzelnen Wort hat '
+      + 'Whisper wenig Audio und hält sich an den Prompt: aus Rauschen wird dann "Gnoll." '
+      + 'oder "Vielen Dank fürs Zuschauen." (Runde 2: 41 von 49 solcher Füllsätze kamen '
+      + 'aus ≤ 1,2 s Audio). Kurze Äußerungen werden trotzdem transkribiert — das ist '
+      + 'keine Mindestlänge. Zählt die ganze Äußerung, nicht das Streaming-Fenster. '
+      + '0 = Vokabular immer. Wird pro STT-Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_CORRECTIONS',
+    label: 'Korrekturliste für die Spracherkennung', type: 'string', def: '', applyMode: 'live',
+    desc: 'Ersetzungen für Beinahe-Treffer, die auch das Vokabular nicht behebt, z. B. '
+      + '"Rhoga => Rhogar, Gaaglath | GaGlath => Gaglath". Regeln getrennt durch Komma '
+      + 'oder Semikolon, mehrere falsche Formen mit | auf ein Ziel. Groß-/Kleinschreibung '
+      + 'egal, nur ganze Wörter ("Rhoga" trifft nie "Rhogar"), ein Durchgang (eine '
+      + 'Ersetzung wird nicht erneut ersetzt). Gilt für Live-Transkript, Live-Vorschau, '
+      + 'Weckwort-Erkennung und Finalize. Whispers Originaltext steht im JSONL als '
+      + 'rawText. Steht vor den Regeln aus STT_CORRECTIONS_FILE. Leer = aus. Wird pro '
+      + 'Äußerung gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_CORRECTIONS_FILE',
+    label: 'Korrekturliste aus Datei', type: 'string', def: '', applyMode: 'live',
+    desc: 'Datei mit Korrekturen — absoluter Pfad oder relativ zu OBSIDIAN_VAULT_PATH. '
+      + 'Eine Regel "falsch => richtig" pro Zeile (mehrere falsche Formen mit |), '
+      + '# leitet einen Kommentar ein, Listenzeichen und Frontmatter werden entfernt. '
+      + 'Ergänzt STT_CORRECTIONS. Leer = aus. Änderungen an der Datei greifen bei der '
+      + 'nächsten Äußerung.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_HALLUCINATION_FILTER',
+    label: 'Whisper-Füllsätze verwerfen', type: 'boolean',
+    onValue: 'true', offValue: 'false', def: 'true', applyMode: 'live',
+    desc: 'true = eine Äußerung, die NUR aus einem bekannten Whisper-Füllsatz besteht '
+      + '("Vielen Dank fürs Zuschauen.", "Untertitel im Auftrag des ZDF …"), wird '
+      + 'verworfen — live wie im Finalize. Derselbe Satz mitten in echter Rede bleibt '
+      + 'stehen. Verworfenes steht im Debug-Log und im JSONL (dropped, rawText). Liste: '
+      + 'STT_HALLUCINATION_PHRASES. Wird pro Äußerung gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · STT', key: 'STT_HALLUCINATION_PHRASES',
+    label: 'Whisper-Füllsätze (Liste)', type: 'string', def: '', applyMode: 'live',
+    desc: 'Eigene Liste statt der eingebauten, Sätze getrennt durch Semikolon; ein * am '
+      + 'Ende trifft auch jede Fortsetzung. Verglichen wird ohne Groß-/Kleinschreibung, '
+      + 'Satzzeichen und Apostrophe. Leer = eingebaute Liste: Vielen Dank fürs '
+      + 'Zuschauen; Danke fürs Zuschauen; Vielen Dank für das Zuhören; Vielen Dank für '
+      + 'Ihre Aufmerksamkeit; Untertitel im Auftrag des ZDF*; Untertitelung im Auftrag des '
+      + 'ZDF*; Untertitel der Amara.org-Community; Untertitel von Stephanie Geiges; '
+      + 'Untertitelung aufgrund der Audioqualität nicht möglich.',
   },
   {
     scope: 'server', group: 'Server · STT', key: 'STT_SILENCE_THRESH',

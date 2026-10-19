@@ -5,7 +5,8 @@ import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, mar
 import { buildAudioArchive } from './archive.js';
 import { summarizeSession, writeSummaryToVault } from './summary.js';
 import { resetLastSessionCache } from '../lastSession.js';
-import { warn, log } from '../logger.js';
+import { postprocessUtterance } from '../sttPostprocess.js';
+import { warn, log, debug } from '../logger.js';
 
 // Default re-STT is lazy-loaded so importing the orchestrator (e.g. in tests
 // with an injected transcribeFn) does not pull in the whole server pipeline
@@ -79,6 +80,16 @@ export async function buildFinalizeModel({
       continue;
     }
     report({ phase: 'stt', done: ++doneCount, total: todo.length });
+    // Same post-processing as the live pipeline: drop a pure Whisper filler,
+    // apply the correction map to the text AND the words (an interrupted
+    // utterance is rendered from its words).
+    const post = postprocessUtterance({ segments: [text], words });
+    if (post.dropped) {
+      debug(`finalize: ${u.file} dropped as Whisper filler ("${post.dropped}"): ${JSON.stringify(text)}`);
+      continue;
+    }
+    text = post.segments.join(' ');
+    words = post.words;
     if (!text || isBracketOnly(text)) continue;
     const startMs = sessionStartMs + (Number(u.startMs) || 0);
     userSpans.push({

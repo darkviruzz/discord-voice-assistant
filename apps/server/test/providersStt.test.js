@@ -12,6 +12,7 @@ import { createSttStream, mergeTokensToWords, pcmToWav } from '../src/sttStreami
 import { transcribeChunked } from '../src/pipeline.js';
 import { transcribeWavFile } from '../src/finalize/sttFile.js';
 import { _resetVocabularyCache } from '../src/sttVocabulary.js';
+import { _resetPostprocessCache, DEFAULT_HALLUCINATION_PHRASES } from '../src/sttPostprocess.js';
 
 // One fake STT server speaking both dialects (whisper.cpp /inference and
 // OpenAI /audio/transcriptions). Requests are parsed as real multipart bodies.
@@ -49,7 +50,8 @@ after(() => { srv.closeAllConnections?.(); srv.close(); });
 const KEYS = ['STT_PROVIDER', 'STT_BASE_URL', 'STT_MODEL', 'STT_API_KEY', 'STT_LANGUAGE', 'STT_TIMEOUT_MS',
   'WHISPER_URL', 'WHISPER_LANGUAGE', 'WHISPER_TEMPERATURE', 'WHISPER_WORD_TIMESTAMPS',
   'STT_STREAM_MIN_WINDOW_MS', 'STT_STREAM_TRIM_SECONDS', 'STT_STREAM_PROMPT', 'STT_MAX_CHUNK_SECONDS',
-  'STT_VOCABULARY', 'STT_VOCABULARY_FILE', 'OBSIDIAN_VAULT_PATH'];
+  'STT_VOCABULARY', 'STT_VOCABULARY_FILE', 'OBSIDIAN_VAULT_PATH', 'STT_VOCABULARY_MIN_MS',
+  'STT_CORRECTIONS', 'STT_CORRECTIONS_FILE', 'STT_HALLUCINATION_FILTER', 'STT_HALLUCINATION_PHRASES'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 beforeEach(() => {
@@ -57,6 +59,7 @@ beforeEach(() => {
   seen.length = 0;
   _resetSttProviderState();
   _resetVocabularyCache();
+  _resetPostprocessCache();
 });
 
 const SR = 48000;
@@ -324,16 +327,23 @@ test('provider switches at runtime via env (settings panel), no restart', async 
   assert.equal(sttProvider(), 'whispercpp', 'unknown value → default');
 });
 
+// Defaults of the vocabulary / post-processing part of sttConfig().
+const NO_EXTRAS = {
+  vocabulary: { names: [], dropped: 0, file: null, minMs: 1200 },
+  corrections: { rules: 0, file: null },
+  hallucinationFilter: { phrases: DEFAULT_HALLUCINATION_PHRASES.length, custom: false },
+};
+
 test('sttConfig: effective values, never the API key', () => {
   assert.deepEqual(sttConfig(), {
     provider: 'whisper.cpp', language: 'auto', temperature: 0.2, wordTimestamps: true,
-    timeoutMs: 120000, url: 'http://localhost:8080', vocabulary: { names: [], dropped: 0, file: null },
+    timeoutMs: 120000, url: 'http://localhost:8080', ...NO_EXTRAS,
   });
   useOpenAI({ STT_MODEL: 'whisper-large-v3', STT_API_KEY: 'sk-geheim', STT_LANGUAGE: 'de', STT_TIMEOUT_MS: '0' });
   const c = sttConfig();
   assert.deepEqual(c, {
     provider: 'openai', language: 'de', temperature: 0.2, wordTimestamps: true, timeoutMs: 0,
-    url: `${BASE}/v1`, model: 'whisper-large-v3', apiKeySet: true, vocabulary: { names: [], dropped: 0, file: null },
+    url: `${BASE}/v1`, model: 'whisper-large-v3', apiKeySet: true, ...NO_EXTRAS,
   });
   assert.ok(!JSON.stringify(c).includes('sk-geheim'));
   process.env.STT_TIMEOUT_MS = 'abc';
@@ -405,24 +415,62 @@ test('vocabulary: both providers get "<names>. <context>"; a long context gives 
   process.env.WHISPER_URL = BASE;
   process.env.STT_VOCABULARY = VOCAB;
   reply = () => ({ json: { text: 'Gaglath Matho greift an.' } });
-  await transcribe(wavOfSeconds(1));
+  await transcribe(wavOfSeconds(2));
   assert.equal(seen[0].url, '/inference');
   assert.equal(seen[0].form.get('prompt'), VOCAB_PROMPT, 'no context → names only');
 
   const ctx = Array.from({ length: 120 }, (_, i) => `wort${i}`).join(' ') + ' ENDE.';
-  await transcribe(wavOfSeconds(1), { prompt: ctx });
+  await transcribe(wavOfSeconds(2), { prompt: ctx });
   const p = seen[1].form.get('prompt');
   assert.ok(p.length <= 500, String(p.length));
   assert.ok(p.startsWith(`${VOCAB_PROMPT} wort`), p.slice(0, 80));
   assert.ok(p.endsWith(' ENDE.'));
 
   useOpenAI();
-  await transcribe(wavOfSeconds(1), { prompt: 'Vorher.' });
+  await transcribe(wavOfSeconds(2), { prompt: 'Vorher.' });
   assert.equal(seen[2].url, '/v1/audio/transcriptions');
   assert.equal(seen[2].form.get('prompt'), `${VOCAB_PROMPT} Vorher.`);
 
-  assert.deepEqual(sttConfig().vocabulary, { names: VOCAB.split(', '), dropped: 0, file: null },
+  assert.deepEqual(sttConfig().vocabulary, { names: VOCAB.split(', '), dropped: 0, file: null, minMs: 1200 },
     'session_meta snapshot records the active list');
+});
+
+test('vocabulary: utterances shorter than STT_VOCABULARY_MIN_MS keep the context but get no names', async () => {
+  useOpenAI({ STT_VOCABULARY: VOCAB });
+  reply = () => ({ json: { text: 'Hust.' } });
+  await transcribe(wavOfSeconds(0.6));                        // default 1200 ms, length from the WAV
+  await transcribe(wavOfSeconds(0.6), { prompt: 'Vorher.' }); // the context stays
+  await transcribe(wavOfSeconds(1.2));                        // not shorter → names
+  await transcribe(wavOfSeconds(0.6), { audioMs: 5000 });     // a window of a long utterance → names
+  await transcribe(wavOfSeconds(3), { audioMs: 800 });        // the caller's length wins
+  assert.deepEqual(seen.map((x) => x.form.get('prompt')),
+    [null, 'Vorher.', VOCAB_PROMPT, VOCAB_PROMPT, null]);
+  assert.equal(seen.length, 5, 'short utterances are still transcribed');
+
+  process.env.STT_VOCABULARY_MIN_MS = '0';
+  await transcribe(wavOfSeconds(0.3));
+  assert.equal(seen[5].form.get('prompt'), VOCAB_PROMPT, '0 = always');
+  process.env.STT_VOCABULARY_MIN_MS = 'quatsch';
+  await transcribe(wavOfSeconds(0.3));
+  assert.equal(seen[6].form.get('prompt'), null, 'garbage → default 1200');
+  process.env.STT_VOCABULARY_MIN_MS = ' ';
+  await transcribe(wavOfSeconds(0.3));
+  assert.equal(seen[7].form.get('prompt'), null, 'empty → default 1200, not 0');
+});
+
+test('vocabulary guard: streaming counts the whole utterance, chunked passes its length to every chunk', async () => {
+  useOpenAI({ STT_VOCABULARY: VOCAB, STT_STREAM_MIN_WINDOW_MS: '200' });
+  reply = () => ({ json: { text: 'Ja.' } });
+  const s = createSttStream();
+  await s.tick(pcmOfSeconds(0.5));  // utterance so far 0.5 s → no names
+  await s.tick(pcmOfSeconds(1.5));  // 1.5 s → names
+  await s.finalize(pcmOfSeconds(1.6));
+  assert.deepEqual(seen.map((x) => x.form.get('prompt')), [null, VOCAB_PROMPT, VOCAB_PROMPT]);
+
+  seen.length = 0;
+  await transcribeChunked(pcmOfSeconds(0.8));
+  await transcribeChunked(pcmOfSeconds(0.8), { audioMs: 40_000 });
+  assert.deepEqual(seen.map((x) => x.form.get('prompt')), [null, VOCAB_PROMPT]);
 });
 
 test('vocabulary: streaming ticks and the utterance-end pass carry names + locked text; STT_STREAM_PROMPT=false keeps the names', async () => {

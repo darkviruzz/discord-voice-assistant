@@ -1,6 +1,7 @@
 import { log, debug, warn } from '../logger.js';
 import { baseUrl, env, authHeaders, withTimeout, request, ProviderTimeout } from './http.js';
-import { currentVocabulary, sttPrompt } from '../sttVocabulary.js';
+import { currentVocabulary, sttPrompt, vocabularyMinMs } from '../sttVocabulary.js';
+import { postprocessConfig } from '../sttPostprocess.js';
 
 // STT provider — one transcription call for every STT use in the server
 // (streaming ticks, the utterance-end pass, the chunked fallback and the
@@ -23,7 +24,8 @@ import { currentVocabulary, sttPrompt } from '../sttVocabulary.js';
 // detect), WHISPER_TEMPERATURE, WHISPER_WORD_TIMESTAMPS and STT_TIMEOUT_MS
 // (default 120 s, covers connect + upload + reading the reply; 0 = none).
 // Every request's `prompt` is the campaign vocabulary (STT_VOCABULARY /
-// STT_VOCABULARY_FILE, see sttVocabulary.js) followed by the caller's context.
+// STT_VOCABULARY_FILE, see sttVocabulary.js) followed by the caller's context
+// — for utterances shorter than STT_VOCABULARY_MIN_MS the context alone.
 //
 // Settings are read per call so a provider/URL/model switch in the settings
 // panel takes effect on the next request (= the next streaming tick).
@@ -70,8 +72,10 @@ export function sttConfig() {
     wordTimestamps: wordTimestamps(),
     timeoutMs: sttTimeoutMs(),
     // The names actually prompted (after the budget cut) — which list a
-    // session was transcribed with.
-    vocabulary: { names: vocab.used, dropped: vocab.dropped.length, file: vocab.file },
+    // session was transcribed with — and the utterance length they need.
+    vocabulary: { names: vocab.used, dropped: vocab.dropped.length, file: vocab.file, minMs: vocabularyMinMs() },
+    // Correction map / hallucination filter (sttPostprocess.js).
+    ...postprocessConfig(),
   };
   return provider === 'openai'
     ? { ...common, url: baseUrl(env('STT_BASE_URL')) || null, model: env('STT_MODEL') || null, apiKeySet: !!env('STT_API_KEY') }
@@ -313,10 +317,23 @@ export function _resetSttProviderState() {
   plainJsonOnly.clear();
 }
 
-// transcribe(wavBuffer, { prompt?, signal? }) → { text, meta, words }
+// Length of a PCM WAV in ms from its header (byte rate) and size; null when
+// the buffer is no RIFF/WAVE.
+export function wavDurationMs(wav) {
+  if (!Buffer.isBuffer(wav) || wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF'
+      || wav.toString('ascii', 8, 12) !== 'WAVE') return null;
+  const byteRate = wav.readUInt32LE(28);
+  return byteRate > 0 ? ((wav.length - 44) / byteRate) * 1000 : null;
+}
+
+// transcribe(wavBuffer, { prompt?, signal?, audioMs? }) → { text, meta, words }
 //
-//   prompt context text (already-committed transcript); the vocabulary is
-//          put in front of it here, so every STT path gets the names.
+//   prompt  context text (already-committed transcript); the vocabulary is
+//           put in front of it here, so every STT path gets the names.
+//   audioMs length of the whole utterance this request belongs to (a
+//           streaming window or a chunk is only part of it); default = the
+//           WAV's own length. Short utterances get no vocabulary
+//           (STT_VOCABULARY_MIN_MS, see sttVocabulary.js).
 //
 //   text   cleaned transcript ('' for silence)
 //   meta   { provider, language, temperature, segmentCount, noSpeechProbAvg,
@@ -332,11 +349,12 @@ export function _resetSttProviderState() {
 //     into JSONL so Finalize/offline tooling can decide what to discard later.
 // Throws Error('stt: …') on transport errors/timeouts; a caller's own abort is
 // re-thrown untouched (AbortError).
-export async function transcribe(wavBuffer, { prompt, signal } = {}) {
+export async function transcribe(wavBuffer, { prompt, signal, audioMs } = {}) {
   const provider = sttProvider();
   const language = sttLanguage();
   const temperature = sttTemperature();
-  const args = { prompt: sttPrompt(prompt), signal, language, temperature };
+  const utteranceMs = Number.isFinite(audioMs) ? audioMs : wavDurationMs(wavBuffer);
+  const args = { prompt: sttPrompt(prompt, { audioMs: utteranceMs ?? undefined }), signal, language, temperature };
   const { data, words, extra } = provider === 'openai'
     ? await transcribeOpenAI(wavBuffer, args)
     : await transcribeWhisperCpp(wavBuffer, args);

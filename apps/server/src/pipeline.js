@@ -16,6 +16,7 @@ import { getCampaignContext } from './campaignContext.js';
 import { lastSessionBlock } from './lastSession.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { speakerLabel, normalizeText } from './finalize/merge.js';
+import { postprocessUtterance, applyCorrections, matchHallucination } from './sttPostprocess.js';
 import {
   createSttStream, mergeTokensToWords, normWord,
   opusFramesToPcm, pcmToWav,
@@ -274,7 +275,10 @@ function summarizeStt(chunks, chunkResults) {
 // `rawChunks` keeps every whisper chunk verbatim ({ text, split }) for the debug
 // per-chunk view. `onProgress({ segments, chunks })` fires after each transcribed
 // chunk so the UI can update the utterance live as chunks arrive.
-export async function transcribeChunked(pcm48k, { onProgress } = {}) {
+// `audioMs` = length of the whole utterance (default: this PCM's) — every
+// chunk request is prompted by it, not by the chunk's own length.
+export async function transcribeChunked(pcm48k, { onProgress, audioMs } = {}) {
+  const utteranceMs = Number.isFinite(audioMs) ? audioMs : (pcm48k.length / 2 / SAMPLE_RATE) * 1000;
   const chunks = splitAtSilence(pcm48k);
   logSilenceSplitDebug(pcm48k, chunks);
   if (chunks.length > 1) {
@@ -288,7 +292,7 @@ export async function transcribeChunked(pcm48k, { onProgress } = {}) {
   let anyWords = false;
   const overlapSec = OVERLAP_SAMPLES / SAMPLE_RATE;
   for (const { pcm, hasOverlap, startSample, split } of chunks) {
-    const { text: rawText, meta, words: chunkWords } = await transcribe(pcmToWav(pcm));
+    const { text: rawText, meta, words: chunkWords } = await transcribe(pcmToWav(pcm), { audioMs: utteranceMs });
     const text = normalizeText(rawText); // collapse whisper's internal \n → single spaces
     const result = {
       text,
@@ -402,11 +406,15 @@ async function streamingTick(sessionId, session, userId, sp) {
   // Nichts Anzeigbares (z. B. nur weggefilterte Sound-Annotationen wie
   // "[Musik]") → keine leere Blase mit Caret in der UI erzeugen.
   if (!String(res.text || '').trim()) return;
+  // A pure Whisper filler is never shown; known near-misses are shown fixed
+  // (the same post-processing as the final entry, sttPostprocess.js).
+  if (matchHallucination(res.text)) return;
+  const segments = res.segments.map((s) => applyCorrections(s));
   publishEntry(sessionId, {
     label: stream.label,
-    text: res.text,
-    segments: res.segments,
-    chunks: res.chunks,
+    text: segments.join(' '),
+    segments,
+    chunks: res.chunks.map((c) => ({ ...c, text: applyCorrections(c.text) })),
     startMs: stream.startMs,
     kind: 'user',
     partial: true,
@@ -785,7 +793,7 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         // 30 s limit — chunk just that window and prepend the locked groups.
         const st = stream.state;
         const winPcm = pcm48k.subarray(st.windowStartSample * 2);
-        const chunked = await transcribeChunked(winPcm);
+        const chunked = await transcribeChunked(winPcm, { audioMs: (pcm48k.length / 2 / SAMPLE_RATE) * 1000 });
         const baseMs = Math.round(st.windowStartSample / (48000 / 1000));
         transcripts = [...st.lockedGroups, ...chunked.transcripts];
         rawChunks = [
@@ -799,12 +807,14 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       } else {
         const onProgress = (session && liveContextEnabled())
           ? ({ segments, chunks }) => {
+              if (matchHallucination(segments.join(' '))) return;
+              const shown = segments.map((s) => applyCorrections(s));
               partialPublished = true;
               publishEntry(sessionId, {
                 label: liveLabel,
-                text: segments.join(' '),
-                segments,
-                chunks,
+                text: shown.join(' '),
+                segments: shown,
+                chunks: chunks.map((c) => ({ ...c, text: applyCorrections(c.text) })),
                 startMs: entryStartMs,
                 kind: 'user',
                 partial: true,
@@ -823,11 +833,25 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       return;
     }
 
+    // 3b. Post-processing (sttPostprocess.js) before anything reads the text
+    //     (JSONL, live view, wake word, LLM context): an utterance that is
+    //     nothing but a Whisper filler ("Vielen Dank fürs Zuschauen.") is
+    //     dropped, the correction map fixes known near-misses.
+    const rawTranscript = transcripts.join(' ');
+    const post = postprocessUtterance({ segments: transcripts, words });
+    if (post.dropped) {
+      debug(`pipeline: dropped Whisper filler "${post.dropped}" for ${key}: ${JSON.stringify(rawTranscript)}`);
+    }
+    transcripts = post.segments;
+    words = post.words;
+    rawChunks = post.dropped ? [] : (rawChunks ?? []).map((c) => ({ ...c, text: applyCorrections(c.text) }));
+
     // Log the full utterance (all chunks joined) to disk.
     // `words` (ms relative to utterance start) enables word-level interrupt
     // splitting at finalize; absent → merge falls back to utterance-level.
     // `segments` (natural-silence groups) + `rawChunks` ({text,split}) let the
-    // reload/snapshot render identically to the live stream.
+    // reload/snapshot render identically to the live stream. `rawText` keeps
+    // Whisper's own text when post-processing changed it (to tune the map).
     const fullTranscript = transcripts.join(' ');
     logTranscriptEvent(sessionId, 'user_transcript', {
       userId,
@@ -836,6 +860,8 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
       endTsMs: metadata.endTsMs ?? null,
       durationMs: metadata.durationMs ?? null,
       text: fullTranscript,
+      ...(rawTranscript !== fullTranscript ? { rawText: rawTranscript } : {}),
+      ...(post.dropped ? { dropped: 'hallucination' } : {}),
       chunks: transcripts,
       segments: transcripts,
       rawChunks,
@@ -845,6 +871,7 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
 
     if (!fullTranscript) {
       debug('pipeline: empty transcript, skipping wake-word processing');
+      retractPartial(); // e.g. a dropped filler whose start ("Vielen Dank") was shown
       return;
     }
 

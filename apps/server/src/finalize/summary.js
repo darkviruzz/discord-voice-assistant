@@ -4,6 +4,7 @@ import { warn, log, debug } from '../logger.js';
 import { complete, summaryModel } from '../providers/llm.js';
 import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
 import { promptText } from '../promptFiles.js';
+import { campaignFileText } from '../campaignContext.js';
 
 // Session summary at finalize: a short German recap of the finished session,
 // built from the merged transcript. It is what Rabenauge answers "Was war
@@ -18,9 +19,12 @@ import { promptText } from '../promptFiles.js';
 // SESSION_SUMMARY_MAX_CHARS (notes that do not fit one merge call are merged
 // in batches first). Uses the summary endpoint of the LLM provider
 // (SUMMARY_PROVIDER/SUMMARY_BASE_URL/SUMMARY_MODEL, each falling back to the
-// answer LLM). The STT vocabulary (STT_VOCABULARY/_FILE) goes into every
-// prompt as the spelling reference for names. The part and final prompts can
-// come from vault notes (see PART_SYSTEM below).
+// answer LLM). Every prompt carries the STT vocabulary (STT_VOCABULARY/_FILE)
+// as the spelling reference for names, and as background the campaign context
+// file (CAMPAIGN.md: who is who) and the previous session's summary
+// (backgroundHint) — with the rule that neither describes this session. The
+// part and final prompts can come from vault notes (see PART_SYSTEM below);
+// both hints are appended to whichever text is used.
 //
 // Sizing (measured 2026-10-19, gemma4:12b on Ollama with its 8192-token
 // context, 3 h session): the raw transcript lines cost 2.5 chars/token, so a
@@ -105,6 +109,27 @@ export function spellingHint() {
     + 'Das Transkript stammt aus einer Spracherkennung, die solche Namen oft ähnlich klingend, '
     + 'aber falsch schreibt: falsch erkannte Varianten stillschweigend korrigieren. Die Liste '
     + 'sagt nichts darüber, wer oder was ein Name ist.';
+}
+
+// Background knowledge for every prompt, '' when there is none:
+// - the campaign context file (CAMPAIGN.md, the same one the answers use), cut
+//   to SESSION_SUMMARY_CAMPAIGN_CHARS, so the model knows who is a player
+//   character, an NSC or a place;
+// - the previous session's summary, cut to SESSION_SUMMARY_PREVIOUS_CHARS, so
+//   references to it make sense.
+// The rule matters: without it a model "summarises" the background as if it
+// had happened in this session. 0 switches a part off.
+export function backgroundHint({ campaign = '', previous = '' } = {}) {
+  const parts = [];
+  const c = capText(campaign, intEnv('SESSION_SUMMARY_CAMPAIGN_CHARS', 4000, 0));
+  if (c) {
+    parts.push('Hintergrundwissen zur Kampagne — nur, um Namen, Figuren, Orte und Beziehungen richtig einzuordnen. '
+      + 'Es beschreibt nicht diese Sitzung: übernimm daraus nichts, was im Transkript bzw. in den Notizen nicht vorkommt.\n'
+      + c);
+  }
+  const p = capText(previous, intEnv('SESSION_SUMMARY_PREVIOUS_CHARS', 1500, 0));
+  if (p) parts.push(`Kurzfassung der vorigen Sitzung — nur, damit Bezüge darauf verständlich sind; nicht wiederholen:\n${p}`);
+  return parts.join('\n\n');
 }
 
 const withHint = (system, hint) => (hint ? `${system}\n${hint}` : system);
@@ -302,18 +327,27 @@ export function partialNote({ covered, total, until = null, timeUp = false, fail
 
 // transcriptMd → summary string, or null (disabled, empty transcript, no part
 // condensed). A summary that misses parts ends with partialNote().
-export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null, now = () => Date.now(), assistantName } = {}) {
+// `previousSummary`: the summary of the session before this one (finalize
+// passes it); `campaign`: the background text, default the CAMPAIGN.md file.
+export async function summarizeSession(transcriptMd, {
+  completeFn = complete, onProgress = null, now = () => Date.now(), assistantName,
+  previousSummary = '', campaign = campaignFileText(),
+} = {}) {
   if (!summaryEnabled()) return null;
   const records = compactTranscript(transcriptBody(transcriptMd, { assistantName }));
   if (records.reduce((len, r) => len + r.line.length + 1, 0) < 200) {
     debug('session-summary: transcript too short — skipped');
     return null;
   }
-  const chunkChars = intEnv('SESSION_SUMMARY_CHUNK_CHARS', 18000, 2000);
+  const background = backgroundHint({ campaign, previous: previousSummary });
+  // The background sits in every call's prompt. It is prose (~4.3 chars/token)
+  // against the compacted transcript's ~3.2, so 3/4 of its length comes off the
+  // chunk to keep a call within the same context window (8k on Ollama here).
+  const chunkChars = Math.max(2000, intEnv('SESSION_SUMMARY_CHUNK_CHARS', 18000, 2000) - Math.ceil(background.length * 0.75));
   const maxChars = intEnv('SESSION_SUMMARY_MAX_CHARS', 2500, 300);
   const budgetMs = summaryBudgetMs();
   const model = summaryModel();
-  const hint = spellingHint();
+  const hint = [spellingHint(), background].filter(Boolean).join('\n\n');
   // Read once per summary, so all calls of one run use the same text.
   const partSystem = promptText('SESSION_SUMMARY_PART_PROMPT_FILE', PART_SYSTEM);
   const finalSystem = promptText('SESSION_SUMMARY_FINAL_PROMPT_FILE', FINAL_SYSTEM);
@@ -474,7 +508,9 @@ export function writeSummaryToVault(summary, { title, dateLabel }) {
 // happened last time"). Ordered by the session's start (manifest.json
 // sessionStartMs), not file mtime — a re-finalize of an old session must not
 // make it "the last session". Returns { text, archiveName, sessionStartMs } or null.
-export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { excludeArchiveName = null } = {}) {
+// `beforeMs`: only sessions that started before it (the previous session of a
+// re-finalized old one, not the newest).
+export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { excludeArchiveName = null, beforeMs = null } = {}) {
   let best = null;
   let dirs;
   try { dirs = fs.readdirSync(archiveRoot, { withFileTypes: true }); } catch { return null; }
@@ -487,6 +523,7 @@ export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? '.
     let start = null;
     try { start = Number(JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).sessionStartMs); } catch { /* no manifest */ }
     const key = Number.isFinite(start) && start > 0 ? start : st.mtimeMs;
+    if (Number.isFinite(beforeMs) && key >= beforeMs) continue;
     if (!best || key > best.key) best = { file: f, archiveName: d.name, key, start };
   }
   if (!best) return null;

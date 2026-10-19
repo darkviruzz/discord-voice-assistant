@@ -252,7 +252,25 @@ export const CATALOG = [
       + 'werden in Abschnitte geteilt, einzeln verdichtet und dann zusammengeführt. '
       + '18000 Zeichen ≈ 5,6k Token (gemma4, gemessen) — passt samt Prompt und Antwort in '
       + 'ein 8k-Kontextfenster (num_ctx). Größer = weniger, längere LLM-Aufrufe (nur mit '
-      + 'größerem Kontextfenster), kleiner = für Modelle mit kleinem Kontextfenster.',
+      + 'größerem Kontextfenster), kleiner = für Modelle mit kleinem Kontextfenster. Der '
+      + 'Hintergrund (SESSION_SUMMARY_CAMPAIGN_CHARS / _PREVIOUS_CHARS) geht automatisch '
+      + 'davon ab (¾ seiner Länge), damit ein Aufruf im selben Kontextfenster bleibt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_CAMPAIGN_CHARS',
+    label: 'Zusammenfassung: Kampagnen-Hintergrund (Zeichen)', type: 'number', def: '4000',
+    applyMode: 'next-finalize',
+    desc: 'So viele Zeichen aus CAMPAIGN.md (CAMPAIGN_CONTEXT_FILE) gehen in jeden Aufruf der '
+      + 'Session-Zusammenfassung, damit das Modell weiß, wer Spielerfigur, NSC oder Ort ist '
+      + '(vorher wurde z. B. ein NSC als Gegenstand eingeordnet). Mit der Regel, daraus nichts '
+      + 'als Ereignis dieser Sitzung zu übernehmen. 0 = aus.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_PREVIOUS_CHARS',
+    label: 'Zusammenfassung: vorige Sitzung (Zeichen)', type: 'number', def: '1500',
+    applyMode: 'next-finalize',
+    desc: 'So viele Zeichen der Zusammenfassung der vorigen Sitzung gehen als Hintergrund mit, '
+      + 'damit Bezüge darauf verständlich sind (nicht wiederholt). 0 = aus.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_TIMEOUT_MS',
@@ -581,6 +599,38 @@ export const CATALOG = [
       + 'auto = Feld weglassen (Standard des Modells). Lehnt ein Modell den Wert ab, fragt der '
       + 'Server einmal ohne think nach und merkt sich das. Bei LLM_PROVIDER=openai ohne Wirkung '
       + '(dort LLM_REASONING_EFFORT / LLM_CHAT_TEMPLATE_KWARGS). Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_JSON_FORMAT',
+    label: 'Antwortformat erzwingen (JSON)', type: 'enum',
+    enumValues: ['auto', 'schema', 'json', 'off'], def: 'auto', applyMode: 'live',
+    desc: 'Erzwingt bei Rabenauge-Antworten gültiges JSON {text, speaker_id, model}: das '
+      + 'Modell kann dann nur noch in dieser Form antworten (gemma4 setzte sonst ab und zu '
+      + '```json-Zäune oder antwortete als Fließtext). auto = JSON-Schema bei '
+      + 'LLM_PROVIDER=ollama, nichts bei openai (ein strikter Server lehnt response_format '
+      + 'ab); schema = Schema bei beiden; json = beliebiges JSON-Objekt; off = freier Text. '
+      + 'Ein eigener System-Prompt muss dieselben Felder verlangen. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PRIME',
+    label: 'Antwort-Prompt vorwärmen', type: 'enum',
+    enumValues: ['auto', 'true', 'false'], def: 'auto', applyMode: 'live',
+    desc: 'Schickt während einer Sprach-Session den gleichbleibenden Anfang des nächsten '
+      + 'Antwort-Prompts (System-Prompt, letzte Session, rollende Zusammenfassung, '
+      + 'Live-Transkript, Verlauf) vorab ans LLM, sobald er sich ändert (ein erzeugtes '
+      + 'Token). Eine Frage muss dann nur noch ihren eigenen Teil verarbeiten (neueste '
+      + 'Zeilen, RAG-Treffer, Frage): gemessen 6 s statt 16 s Prompt-Verarbeitung '
+      + '(gemma4:12b, RX 6800 XT). Kostet im Hintergrund ~1–4 s GPU pro Änderung. auto = an '
+      + 'bei LLM_PROVIDER=ollama, aus bei openai (ein gehosteter Dienst würde jede '
+      + 'Vorwärm-Anfrage berechnen).',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PRIME_DELAY_MS',
+    label: 'Vorwärmen: Wartezeit nach Änderung (ms)', type: 'number', def: '2500', applyMode: 'live',
+    desc: 'So lange nach einer neuen Transkriptzeile (bzw. Antwort, Zusammenfassung) '
+      + 'wartet das Vorwärmen (LLM_PRIME); weitere Zeilen in dieser Zeit fasst es zu einer '
+      + 'Anfrage zusammen. Größer = weniger GPU-Last im Hintergrund, aber mehr neue Zeilen, '
+      + 'die eine Frage selbst verarbeiten muss.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_REASONING_EFFORT',

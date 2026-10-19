@@ -196,7 +196,48 @@ Servers unklar, `TTS_RESPONSE_FORMAT=wav` setzen. Komprimierte Antworten
 | `LLM_THINK` | nur `ollama`: Feld `think` jeder Anfrage. `false` (Default) = direkt antworten, `true` = denken, `low`/`medium`/`high` = Stufe (gpt-oss), `auto` = weglassen |
 | `LLM_REASONING_EFFORT` | nur `openai`, nur wenn gesetzt: `reasoning_effort` (z. B. `none`, `minimal`, `low`) |
 | `LLM_CHAT_TEMPLATE_KWARGS` | nur `openai`, nur wenn gesetzt: JSON-Objekt als `chat_template_kwargs`, z. B. `{"enable_thinking":false}` |
+| `LLM_JSON_FORMAT` | Antworten als JSON `{text, speaker_id, model}` erzwingen: `auto` (Default) = Schema bei `ollama`, nichts bei `openai`; `schema`, `json`, `off` |
+| `LLM_PRIME`, `LLM_PRIME_DELAY_MS` | Antwort-Prompt vorwärmen (siehe unten): `auto` (Default) = an bei `ollama`; Wartezeit nach einer Änderung, Default 2500 ms |
 | `SUMMARY_PROVIDER`, `SUMMARY_BASE_URL`, `SUMMARY_API_KEY` | optional eigener Server für beide Zusammenfassungen (siehe unten) |
+
+### Antwortzeit: Prompt-Reihenfolge und Vorwärmen
+
+Gemessen am 2026-10-19 (gemma4:12b, Ollama 0.40.6 auf Vulkan, RX 6800 XT):
+- Das Erzeugen ist schnell, etwa 34 Tokens/s.
+- Das Einlesen des Prompts ist langsam, etwa 330 Tokens/s.
+- Ein voller Antwort-Prompt mit rund 5k Tokens braucht deshalb etwa 15 s, bevor
+  das erste Wort kommt.
+
+Ollamas llama.cpp-Server hat einen Prompt-Cache. Bei gemma4 kann er wegen der
+Sliding-Window-Attention aber nur an Sicherungspunkten kurz vor dem Ende eines
+Prompts weitermachen. Die frühere Reihenfolge hat ihn nie getroffen: Die
+RAG-Treffer standen an zweiter Stelle, und es wurden jedes Mal alle Tokens neu
+eingelesen.
+
+Der Antwort-Prompt ist darum so aufgebaut:
+1. System-Prompt.
+2. Fester Teil: `CAMPAIGN.md` (nur ohne RAG), letzte Session, rollende
+   Zusammenfassung, Live-Transkript.
+3. Verlauf.
+4. Eine Nachricht mit den neuesten Transkriptzeilen, den RAG-Treffern und der
+   Frage.
+
+Während einer Sprach-Session schickt der Server die Teile 1–3 nach jeder
+Änderung vorab mit einem erzeugten Token (`LLM_PRIME`). Eine Frage verarbeitet
+dann nur noch Teil 4.
+
+| Messung | Ergebnis |
+|---|---|
+| Frage mit vorgewärmtem Prompt | 1,6k von 5,6k Tokens eingelesen, 8,6 s gesamt (vorher ~18 s) |
+| Vorwärmen nach einer Antwort | ~4 s im Hintergrund |
+| Vorwärmen nach neuen Zeilen | ~1 s im Hintergrund |
+
+Der größte Rest sind die RAG-Treffer (`CAMPAIGN_CONTEXT_MAX_CHARS`, 6000
+Zeichen ≈ 1,5k Tokens). Ein kleineres Budget macht jede Antwort schneller.
+
+Flash Attention (`OLLAMA_FLASH_ATTENTION=1` als Benutzer-Umgebungsvariable,
+danach Ollama neu starten) läuft mit gemma4 auf Vulkan. Das Einlesen wurde damit
+nicht messbar schneller (336 statt ~334 Tokens/s), schadet aber auch nicht.
 
 ### Denkphase (Reasoning-Modelle)
 

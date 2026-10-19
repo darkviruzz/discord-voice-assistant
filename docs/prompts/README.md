@@ -56,12 +56,16 @@ Modell, alles andere wörtlich (auch Überschriften und Listen). In den Vorlagen
 steht im Kommentarblock, was der Server selbst anhängt:
 
 - Session-Zusammenfassung: die korrekten Schreibweisen der Namen
-  (`STT_VOCABULARY`/`_FILE`) an den Prompt, und als Nachricht den Abschnitt bzw.
-  die Notizen samt „Höchstens N Zeichen.".
-- Persona: die Kontextblöcke („Kampagnen-Kontext", „Zusammenfassung der letzten
-  abgeschlossenen Sitzung", „Bisheriger Gesprächsverlauf (Zusammenfassung)",
-  „Aktuelles Live-Transkript der Runde"). Das JSON-Format der Antwort muss
-  bleiben, der Server liest daraus Text, Stimme und Modell.
+  (`STT_VOCABULARY`/`_FILE`) und den Hintergrund (Auszug aus `CAMPAIGN.md`,
+  Zusammenfassung der vorigen Sitzung, mit der Regel, nichts davon als Ereignis
+  dieser Sitzung zu übernehmen) an den Prompt, und als Nachricht den Abschnitt
+  bzw. die Notizen samt „Höchstens N Zeichen.".
+- Persona: die Kontextblöcke („Zusammenfassung der letzten abgeschlossenen
+  Sitzung", „Bisheriger Gesprächsverlauf (Zusammenfassung)", „Aktuelles
+  Live-Transkript der Runde", und direkt vor der Frage „Neueste Beiträge im
+  Live-Transkript (Fortsetzung)" und „Kampagnen-Kontext"). Das JSON-Format der
+  Antwort muss bleiben, der Server liest daraus Text, Stimme und Modell
+  (`LLM_JSON_FORMAT` erzwingt es bei Ollama).
 
 Die Session-Zusammenfassung endet mit einer Zeile `Ort: … · Ingame-Datum: …`,
 wenn das im Spiel genannt wurde. Beim Kürzen bleibt eine letzte Zeile, die mit
@@ -87,8 +91,10 @@ from …` im Log.
 
 Wer schon eine eigene `apps/server/prompt.txt` hat: ihren Inhalt in
 `Prompt Persona.md` (unter den Kommentarblock) kopieren und den Abschnitt
-`KONTEXT:` durch den aus der Vorlage ersetzen. Seit v2.1 sind es vier
-Kontextblöcke (die Zusammenfassung der letzten Sitzung kam dazu).
+`KONTEXT:` durch den aus der Vorlage ersetzen. Seit v2.1 kam die
+Zusammenfassung der letzten Sitzung dazu; seit dem Vorwärmen (`LLM_PRIME`)
+stehen die neuesten Transkriptzeilen und der Kampagnen-Kontext direkt vor der
+Frage.
 
 ## Für Entwickler
 

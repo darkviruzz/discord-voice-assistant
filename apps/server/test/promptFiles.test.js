@@ -189,15 +189,18 @@ test('persona: SYSTEM_PROMPT_FILE (vault note or ./ file) > SYSTEM_PROMPT > buil
   } finally { process.chdir(cwd); }
 });
 
-test('the built-in persona describes the four context blocks pipeline.js sends', () => {
+test('the built-in persona describes the context blocks pipeline.js sends', () => {
   const src = fs.readFileSync(path.join(serverDir, 'src/pipeline.js'), 'utf8')
     + fs.readFileSync(path.join(serverDir, 'src/lastSession.js'), 'utf8');
   for (const heading of ['Kampagnen-Kontext', 'Zusammenfassung der letzten abgeschlossenen Sitzung',
-    'Bisheriger Gesprächsverlauf (Zusammenfassung)', 'Aktuelles Live-Transkript der Runde']) {
+    'Bisheriger Gesprächsverlauf (Zusammenfassung)', 'Aktuelles Live-Transkript der Runde',
+    'Neueste Beiträge im Live-Transkript (Fortsetzung)']) {
     assert.ok(src.includes(heading), `block "${heading}" no longer sent — update DEFAULT_SYSTEM`);
     assert.ok(DEFAULT_SYSTEM.includes(`"${heading}"`), `DEFAULT_SYSTEM does not name "${heading}"`);
   }
-  assert.match(DEFAULT_SYSTEM, /bis zu vier Kontextblöcke/);
+  // The question tail (llm.js chat: context blocks, then "Frage: …").
+  assert.match(DEFAULT_SYSTEM, /direkt vor der Frage/);
+  assert.match(DEFAULT_SYSTEM, /"Frage:"/);
 });
 
 // ── built-in summary prompts ─────────────────────────────────────────────────

@@ -65,11 +65,13 @@ test('a finalize makes its new summary the recap source at once', async () => {
   const upload = fs.mkdtempSync(path.join(root, 'up-'));
   fs.writeFileSync(path.join(upload, 'a.wav'), 'AUDIO');
   const startMs = Date.UTC(2026, 9, 8, 18);
+  let summaryOpts = null;
   await finalizeSession({
     sessionId: String(startMs), uploadDir: upload, archiveRoot: dir, transcriptRoot: path.join(root, 'tr'),
     manifest: { sessionStartMs: startMs, sessionName: '2026-10-08', utterances: [{ userId: '1', username: 'Anna', file: 'a.wav', startMs: 0, durationMs: 1000 }] },
     transcribeFn: async () => ({ text: 'Wir verlassen Graufurt.', words: null }),
-    opts: { timeZone: 'UTC', summarizeFn: async () => 'Baron Kelthur verriet die Gruppe.' },
+    opts: { timeZone: 'UTC', summarizeFn: async (md, o) => { summaryOpts = o; return 'Baron Kelthur verriet die Gruppe.'; } },
   });
   assert.match(lastSessionBlock({ now: now + 1_000 }), /Baron Kelthur verriet die Gruppe\./);
+  assert.equal(summaryOpts.previousSummary, 'Die Gruppe floh aus Graufurt.', 'the summary gets the session before as background');
 });

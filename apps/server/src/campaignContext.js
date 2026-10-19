@@ -69,6 +69,13 @@ function readCampaignFile() {
   }
 }
 
+// The static CAMPAIGN.md text (capped at CAMPAIGN_CONTEXT_MAX_CHARS), '' when
+// unavailable — independent of LIVE_CONTEXT_ENABLED and RAG. The session
+// summary reads it as background (who is who).
+export function campaignFileText() {
+  return readCampaignFile();
+}
+
 // Cap vault text (RAG hits) at the same CAMPAIGN_CONTEXT_MAX_CHARS budget as
 // the static file. RAG chunks are whole `##` sections — a note without
 // headings is one arbitrarily large chunk — so this bound is what keeps the

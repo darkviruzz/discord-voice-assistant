@@ -179,13 +179,21 @@ async function ollamaChat(ep, body, { signal, timeoutMs } = {}) {
   }
 }
 
-// complete({ messages, model?, role?, temperature?, maxTokens?, timeoutMs?, signal? })
+// Structured output. `format` is 'json' or a JSON-schema object (null/undefined
+// = free text). Ollama takes either as `format` and constrains decoding to it;
+// OpenAI-compatible servers get `response_format` (json_object / json_schema).
+function openaiResponseFormat(format) {
+  if (format === 'json') return { type: 'json_object' };
+  return { type: 'json_schema', json_schema: { name: 'response', schema: format } };
+}
+
+// complete({ messages, model?, role?, temperature?, maxTokens?, format?, timeoutMs?, signal? })
 //   → { content: string, model: string }
 // `messages` are OpenAI/Ollama-style { role, content }; `role` picks the
-// endpoint ('answer' default, 'summary' — see llmEndpoint()). Throws on
-// transport errors or an empty-looking reply shape; content may still be ''
-// (callers decide whether that is a failure).
-export async function complete({ messages, model, role = 'answer', temperature, maxTokens, timeoutMs, signal } = {}) {
+// endpoint ('answer' default, 'summary' — see llmEndpoint()). `format` — see
+// openaiResponseFormat(). Throws on transport errors or an empty-looking reply
+// shape; content may still be '' (callers decide whether that is a failure).
+export async function complete({ messages, model, role = 'answer', temperature, maxTokens, format, timeoutMs, signal } = {}) {
   const ep = llmEndpoint(role);
   const m = model || ep.model;
   if (ep.provider === 'openai') {
@@ -197,6 +205,7 @@ export async function complete({ messages, model, role = 'answer', temperature, 
     const body = { model: m, messages, stream: false, ...(ep.main ? openaiExtras() : {}) };
     if (Number.isFinite(temperature)) body.temperature = temperature;
     if (Number.isFinite(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
+    if (format) body.response_format = openaiResponseFormat(format);
     const data = await postJson('llm', `${ep.base}/chat/completions`, body, {
       headers: authHeaders(ep.apiKey), signal, timeoutMs,
     });
@@ -206,6 +215,7 @@ export async function complete({ messages, model, role = 'answer', temperature, 
   }
 
   const body = { model: m, messages, keep_alive: keepAliveParam(ollamaKeepAlive()), stream: false };
+  if (format) body.format = format;
   const options = {};
   if (Number.isFinite(temperature)) options.temperature = temperature;
   if (Number.isFinite(maxTokens) && maxTokens > 0) options.num_predict = maxTokens;

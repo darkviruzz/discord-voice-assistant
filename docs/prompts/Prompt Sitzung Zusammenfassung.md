@@ -10,6 +10,7 @@ Einstellung: SESSION_SUMMARY_FINAL_PROMPT_FILE=Rabenauge/Konfiguration/Prompt Si
 An das Modell geht alles außer dem Frontmatter und diesen Kommentarblöcken.
 Der Server hängt selbst an:
 - an diesen Prompt die korrekten Schreibweisen der Namen (STT-Vokabular),
+  den Hintergrund (Auszug aus CAMPAIGN.md, Zusammenfassung der vorigen Sitzung),
 - als Nachricht die Notizen aller Abschnitte ("Teil 3 (20:41–21:30 Uhr): …"), bei kurzen
   Sessions direkt das Transkript, und "Höchstens N Zeichen." (SESSION_SUMMARY_MAX_CHARS).
 Ist die Antwort zu lang, wird sie gekürzt. Eine letzte Zeile, die mit "Ort:" oder

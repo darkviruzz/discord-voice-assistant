@@ -5,14 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   transcriptBody, compactTranscript, chunkRecords, chunkLines, capText, capSummary, partialNote, PART_SYSTEM, FINAL_SYSTEM,
-  summarizeSession, writeSummaryToVault, latestSessionSummary,
+  summarizeSession, writeSummaryToVault, latestSessionSummary, backgroundHint,
 } from '../src/finalize/summary.js';
 import { _resetVocabularyCache } from '../src/sttVocabulary.js';
 import { _resetPromptCache } from '../src/promptFiles.js';
 
 const KEYS = ['SESSION_SUMMARY_ENABLED', 'SESSION_SUMMARY_CHUNK_CHARS', 'SESSION_SUMMARY_MAX_CHARS', 'SESSION_SUMMARY_TIMEOUT_MS',
   'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL', 'STT_VOCABULARY', 'STT_VOCABULARY_FILE',
-  'SESSION_SUMMARY_PART_PROMPT_FILE', 'SESSION_SUMMARY_FINAL_PROMPT_FILE'];
+  'SESSION_SUMMARY_PART_PROMPT_FILE', 'SESSION_SUMMARY_FINAL_PROMPT_FILE',
+  'SESSION_SUMMARY_CAMPAIGN_CHARS', 'SESSION_SUMMARY_PREVIOUS_CHARS', 'CAMPAIGN_CONTEXT_FILE'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } _resetVocabularyCache(); });
 beforeEach(() => { for (const k of KEYS) delete process.env[k]; _resetVocabularyCache(); _resetPromptCache(); });
@@ -260,6 +261,72 @@ test('vault copy: off by default, written inside the vault, refuses to escape it
   } finally { fs.rmSync(vault, { recursive: true, force: true }); }
 });
 
+test('backgroundHint: campaign + previous session, each capped, 0 = off, with the not-this-session rule', () => {
+  assert.equal(backgroundHint(), '');
+  const h = backgroundHint({ campaign: 'Spugnoir ist ein Magierlehrling.', previous: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.match(h, /^Hintergrundwissen zur Kampagne .*Es beschreibt nicht diese Sitzung: übernimm daraus nichts.*\nSpugnoir ist ein Magierlehrling\./);
+  assert.match(h, /\n\nKurzfassung der vorigen Sitzung .*nicht wiederholen:\nDie Gruppe floh aus Saltmarsh\.$/);
+  process.env.SESSION_SUMMARY_CAMPAIGN_CHARS = '0';
+  process.env.SESSION_SUMMARY_PREVIOUS_CHARS = '12';
+  const cut = backgroundHint({ campaign: 'weg', previous: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.ok(!cut.includes('Hintergrundwissen'), 'campaign off');
+  assert.match(cut, /:\nDie Gruppe$/, 'previous capped at a word boundary');
+});
+
+test('the background goes into every prompt and comes off the chunk size', async () => {
+  const systems = [];
+  const users = [];
+  const fake = async ({ messages }) => { systems.push(messages[0].content); users.push(messages[1].content); return { content: 'Notiz.' }; };
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '6000';
+  await summarizeSession(md(150), { completeFn: fake });
+  const plainParts = users.filter((u) => u.startsWith('Ausschnitt')).length;
+  assert.ok(systems.every((s) => !s.includes('Hintergrundwissen')), 'no background without CAMPAIGN.md / previous summary');
+
+  systems.length = 0; users.length = 0;
+  const campaign = `Spugnoir ist ein Magierlehrling. ${'Weiteres Wissen. '.repeat(150)}`;
+  await summarizeSession(md(150), { completeFn: fake, campaign, previousSummary: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.ok(systems.length >= 3);
+  for (const s of systems) {
+    assert.match(s, /Hintergrundwissen zur Kampagne/);
+    assert.match(s, /Spugnoir ist ein Magierlehrling/);
+    assert.match(s, /Kurzfassung der vorigen Sitzung .*\nDie Gruppe floh aus Saltmarsh\./);
+  }
+  const parts = users.filter((u) => u.startsWith('Ausschnitt'));
+  assert.ok(parts.length > plainParts, `smaller chunks with background: ${parts.length} vs ${plainParts} parts`);
+  assert.ok(parts.every((u) => u.length < 6000 - 2000), 'chunk shrank by 3/4 of the ~2.9k-char background (~2.2k)');
+});
+
+test('the background is appended to a prompt from a vault note too', async () => {
+  const vault = tmp();
+  try {
+    fs.writeFileSync(path.join(vault, 'Abschnitt.md'), '---\ntags: [x]\n---\nEigener Abschnitts-Prompt.\n');
+    fs.writeFileSync(path.join(vault, 'Final.md'), 'Eigener Schluss-Prompt.\n');
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    process.env.SESSION_SUMMARY_PART_PROMPT_FILE = 'Abschnitt.md';
+    process.env.SESSION_SUMMARY_FINAL_PROMPT_FILE = 'Final.md';
+    process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+    const systems = [];
+    await summarizeSession(md(40), {
+      completeFn: async ({ messages }) => { systems.push(messages[0].content); return { content: 'Notiz.' }; },
+      campaign: 'Spugnoir ist ein Magierlehrling.', previousSummary: 'Die Gruppe floh aus Saltmarsh.',
+    });
+    assert.ok(systems.length >= 3);
+    assert.match(systems[0], /^Eigener Abschnitts-Prompt\.\n[\s\S]*Hintergrundwissen zur Kampagne[\s\S]*Spugnoir ist ein Magierlehrling\.[\s\S]*Die Gruppe floh aus Saltmarsh\./);
+    assert.match(systems.at(-1), /^Eigener Schluss-Prompt\.\n[\s\S]*Hintergrundwissen zur Kampagne/);
+  } finally { fs.rmSync(vault, { recursive: true, force: true }); }
+});
+
+test('the background defaults to CAMPAIGN.md from the vault', async () => {
+  const vault = tmp();
+  try {
+    fs.writeFileSync(path.join(vault, 'CAMPAIGN.md'), '# Kampagne\nMacklepenny ist ein Gnom-Magier, Gaglath ein Halbork.');
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    const systems = [];
+    await summarizeSession(md(5), { completeFn: async ({ messages }) => { systems.push(messages[0].content); return { content: 'ok' }; } });
+    assert.match(systems[0], /Hintergrundwissen zur Kampagne.*\n# Kampagne\nMacklepenny ist ein Gnom-Magier/s);
+  } finally { fs.rmSync(vault, { recursive: true, force: true }); }
+});
+
 test('latestSessionSummary orders by session start, not by file time', () => {
   const root = tmp();
   try {
@@ -273,6 +340,8 @@ test('latestSessionSummary orders by session start, not by file time', () => {
     fs.mkdirSync(path.join(root, 'nosummary'));
     assert.deepEqual(latestSessionSummary(root), { text: 'neueste Sitzung', archiveName: 'new', sessionStartMs: 2000 });
     assert.equal(latestSessionSummary(root, { excludeArchiveName: 'new' }).archiveName, 'old');
+    assert.equal(latestSessionSummary(root, { beforeMs: 2000 }).archiveName, 'old', 'the previous session of the one that started at 2000');
+    assert.equal(latestSessionSummary(root, { beforeMs: 1000 }), null);
     assert.equal(latestSessionSummary(path.join(root, 'missing')), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

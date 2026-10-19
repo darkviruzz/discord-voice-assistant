@@ -161,6 +161,16 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
   `SESSION_SUMMARY_FINAL_PROMPT_FILE` ersetzen die eingebauten Texte, z. B. durch
   Notizen im Vault. Vorlagen: [`docs/prompts/`](prompts/README.md). Diese Notizen
   mit `RAG_EXCLUDE` aus dem Index heraushalten, z. B. `Rabenauge/Konfiguration/`.
+- **Hintergrund:** Jeder Aufruf bekommt außerdem zwei Texte:
+  - einen Auszug aus `CAMPAIGN.md` (`SESSION_SUMMARY_CAMPAIGN_CHARS`, Standard
+    4000 Zeichen), damit das Modell weiß, wer Spielerfigur, NSC oder Ort ist;
+  - die Zusammenfassung der vorigen Sitzung (`SESSION_SUMMARY_PREVIOUS_CHARS`,
+    Standard 1500), damit Bezüge darauf verständlich sind.
+
+  Dazu kommt die Regel, daraus nichts als Ereignis dieser Sitzung zu übernehmen.
+  Der Hintergrund geht von der Abschnittsgröße ab (¾ seiner Länge), damit jeder
+  Aufruf im Kontextfenster bleibt. 0 schaltet einen Teil ab. Er hängt wie die
+  Schreibweisen auch an eigenen Prompt-Dateien.
 - **Gemessen** am 2026-10-19 (3-h-Session, 245 KB, gemma4:12b auf der
   RX 6800 XT, Ollama-Kontext 8192): vorher 21 + 1 Aufrufe in 9,6 min, die
   Zusammenführung mit 7,5k Token fast am Limit. Jetzt 10 + 1 Aufrufe in

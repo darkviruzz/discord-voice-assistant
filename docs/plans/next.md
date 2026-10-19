@@ -50,11 +50,26 @@ Live-Test gemergt.
   Panel-Overrides (`config.overrides.json`) gingen verloren. Empfehlung:
   persistenter Pfad (z. B. `/var/lib/discord-bot/sessions`, dem `discordbot`
   gehörend).
-- **Rabenauge-Antwortqualität/Latenz:** `llama3.2` (3B) ist für Kampagnen-
-  Fragen zu schwach. Auf der RX 6800 XT (16 GB) passen z. B. Qwen3 14B /
-  Gemma 3 12B (Q4) neben whisper + Piper; per Benchmark/Live-Test
-  entscheiden. Latenz-Hebel danach: LLM-Antwort streamen und TTS ab dem
-  ersten Satz starten (heute wird die komplette JSON-Antwort abgewartet).
+- **Rabenauge-Antwortqualität/Latenz:** live läuft `gemma4:12b`.
+  - Modellwahl am 2026-10-19 besprochen: lokal ist es das beste deutsche Modell
+    bis 14B (EuroEval DE 2.01).
+  - Prompt-Reihenfolge, Vorwärmen (`LLM_PRIME`) und JSON-Schema
+    (`LLM_JSON_FORMAT`) sind umgesetzt. Damit dauert eine Antwort ~8,6 s statt
+    ~18 s, siehe `docs/providers.md`.
+  - Weitere Latenz-Hebel:
+    - RAG-Budget (`CAMPAIGN_CONTEXT_MAX_CHARS`) verkleinern;
+    - LLM-Antwort streamen und TTS ab dem ersten Satz starten (heute wird die
+      komplette JSON-Antwort abgewartet).
+- **Später: `bench:llm` gegen GWDG** (vorgemerkt 2026-10-19, nicht jetzt).
+  - Echte Archiv-Prompts (Weckwort-Fragen mit RAG- und Live-Kontext, 1–2
+    Session-Transkripte mit einer Faktenliste) gegen lokal `gemma4:12b` und
+    GWDG (`chat-ai.academiccloud.de/v1`) laufen lassen: `gemma-4-31B-it`,
+    Qwen3.8-27B.
+  - Messen: Latenz, JSON-Gültigkeit, Faktentreffer und Fehlbehauptungen.
+  - Danach entscheiden, ob Zusammenfassungen und/oder Antworten zur GWDG gehen
+    (`SUMMARY_PROVIDER=openai` geht ohne Codeänderung).
+  - Vorher klären: Nutzungsbedingungen (Forschung/Lehre) und Zustimmung der
+    Runde; live bräuchte es einen Rückfall aufs lokale Modell.
 - **STT-Modell:** `ggml-medium-q5_0` → `large-v3-turbo` testen (Setup bietet
   den Download an); mit echten Aufnahmen per `bench:stt` vergleichen.
 - **Voice-Clone für Rabenauge:** offen (Owner).

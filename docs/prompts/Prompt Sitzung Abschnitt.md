@@ -9,6 +9,7 @@ Einstellung: SESSION_SUMMARY_PART_PROMPT_FILE=Rabenauge/Konfiguration/Prompt Sit
 An das Modell geht alles außer dem Frontmatter und diesen Kommentarblöcken.
 Der Server hängt selbst an:
 - an diesen Prompt die korrekten Schreibweisen der Namen (STT-Vokabular),
+  den Hintergrund (Auszug aus CAMPAIGN.md, Zusammenfassung der vorigen Sitzung),
 - als Nachricht den Abschnitt ("Ausschnitt 3 von 10 (20:41–21:30 Uhr): …", Zeilen
   "Spieler (Figur): Text", ohne Rabenauges eigene Antworten) und "Höchstens etwa N Zeichen."
 Die Notizen aller Abschnitte gehen danach an "Prompt Sitzung Zusammenfassung".

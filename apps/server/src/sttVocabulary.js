@@ -139,7 +139,7 @@ export function settingFilePath(key) {
     warnOnce(`novault|${key}|${file}`, `stt: ${key} "${file}" is relative but OBSIDIAN_VAULT_PATH is empty — file ignored`);
     return null;
   }
-  return path.resolve(vault, file);
+  return path.resolve(vault, file.replace(/\\/g, '/')); // "a\b.md" works on Linux too
 }
 
 // statSync of a settings file, or null (warned once per path) when missing.

@@ -40,9 +40,13 @@ export function promptFilePath(key) {
   const file = String(process.env[key] ?? '').trim();
   if (!file) return null;
   if (path.isAbsolute(file)) return file;
-  if (/^\.\.?[\\/]/.test(file)) return path.resolve(file);
+  // Relative paths may be written Windows-style ("..\prompts\p.md",
+  // "Rabenauge\Konfiguration\…"); on Linux a backslash is a file-name
+  // character, so normalise before resolving (Windows takes / as well).
+  const rel = file.replace(/\\/g, '/');
+  if (/^\.\.?\//.test(rel)) return path.resolve(rel);
   const vault = String(process.env.OBSIDIAN_VAULT_PATH ?? '').trim();
-  return path.resolve(vault || '.', file);
+  return path.resolve(vault || '.', rel);
 }
 
 const cache = new Map(); // key → { fp, sig, text }

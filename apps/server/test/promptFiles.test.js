@@ -189,8 +189,8 @@ test('persona: SYSTEM_PROMPT_FILE (vault note or ./ file) > SYSTEM_PROMPT > buil
   } finally { process.chdir(cwd); }
 });
 
-test('the built-in persona describes the context blocks pipeline.js sends', () => {
-  const src = fs.readFileSync(path.join(serverDir, 'src/pipeline.js'), 'utf8')
+test('the built-in persona describes the context blocks answerPrompt.js sends', () => {
+  const src = fs.readFileSync(path.join(serverDir, 'src/answerPrompt.js'), 'utf8')
     + fs.readFileSync(path.join(serverDir, 'src/lastSession.js'), 'utf8');
   for (const heading of ['Kampagnen-Kontext', 'Zusammenfassung der letzten abgeschlossenen Sitzung',
     'Zusammenfassungen der letzten abgeschlossenen Sitzungen',

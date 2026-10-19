@@ -633,6 +633,19 @@ export const CATALOG = [
       + 'die eine Frage selbst verarbeiten muss.',
   },
   {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PROMPT_BUDGET_CHARS',
+    label: 'Antwort-Prompt: max. Zeichen', type: 'number', def: '22000', applyMode: 'live',
+    desc: 'Obergrenze für den ganzen Antwort-Prompt (alle Nachrichten zusammen), damit er ins '
+      + 'Kontextfenster des Modells passt (0 = aus). Deutsch ≈ 3,2 Zeichen pro Token: 22000 '
+      + 'Zeichen ≈ 6,9k Tokens lassen bei 8192 Tokens Kontext Platz für Vorlage und Antwort. '
+      + 'Der vorgewärmte Anfang wird vorab gegen das Budget abzüglich einer Reserve für die '
+      + 'größten RAG-Treffer gekürzt: zuerst die ältesten Session-Zusammenfassungen (die '
+      + 'neueste bleibt; eine weggelassene kommt in dieser Sprach-Session nicht zurück), dann '
+      + 'die ältesten Verlaufsrunden (2 bleiben), dann die ältesten Live-Transkript-Zeilen. '
+      + 'Bei der Frage selbst gehen zuerst die schwächsten RAG-Treffer (einer bleibt), damit '
+      + 'der vorgewärmte Anfang gültig bleibt. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_REASONING_EFFORT',
     label: 'reasoning_effort (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
     desc: 'Nur bei LLM_PROVIDER=openai: wird als reasoning_effort mitgeschickt, z. B. none, '

@@ -85,6 +85,11 @@ export function capCampaignContext(text) {
   return truncate(String(text ?? '').trim(), maxChars());
 }
 
+// CAMPAIGN_CONTEXT_MAX_CHARS (the prompt budget reserves it for the RAG hits).
+export function campaignContextMaxChars() {
+  return maxChars();
+}
+
 // Returns the campaign-context text for `query`, or '' when unavailable/disabled.
 //
 // Async because the RAG path embeds the query (one round-trip to the embedding
@@ -93,13 +98,25 @@ export function capCampaignContext(text) {
 // the static CAMPAIGN.md (existing behaviour). Added latency is bounded by
 // RAG_TIMEOUT_MS.
 export async function getCampaignContext(query = null) {
-  if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return '';
+  return campaignContextText(await getCampaignContextParts(query));
+}
+
+// The same context as parts, most relevant first: one per RAG hit, or the
+// static CAMPAIGN.md as the only part. campaignContextText(parts.slice(0, k))
+// is the context of the best k hits (the prompt budget drops the weakest).
+export async function getCampaignContextParts(query = null) {
+  if ((process.env.LIVE_CONTEXT_ENABLED ?? 'true') === 'false') return [];
   if (ragEnabled() && typeof query === 'string' && query.trim()) {
-    const rag = capCampaignContext(formatRagHits(await queryRag(query)));
-    if (rag) return rag;
+    const parts = (await queryRag(query)).map((hit) => formatRagHits([hit])).filter(Boolean);
+    if (campaignContextText(parts)) return parts;
     // RAG unreachable/empty → fall through to the static file.
   }
-  return readCampaignFile();
+  const file = readCampaignFile();
+  return file ? [file] : [];
+}
+
+export function campaignContextText(parts) {
+  return capCampaignContext(parts.join('\n\n'));
 }
 
 // Test/diagnostic hook.

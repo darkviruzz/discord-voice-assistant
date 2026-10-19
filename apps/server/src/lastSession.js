@@ -61,32 +61,48 @@ export function fairShares(lengths, total) {
   return shares;
 }
 
-// → system-block string, or '' (disabled / no finalized session with a summary).
-export function lastSessionBlock({ now = Date.now() } = {}) {
-  if (!lastSessionContextEnabled()) return '';
+// The newest session summaries for the block, newest first: [{ text,
+// archiveName, sessionStartMs }] ([] = disabled / none with a summary).
+export function lastSessionSummaries({ now = Date.now() } = {}) {
+  if (!lastSessionContextEnabled()) return [];
   const root = process.env.ARCHIVE_DIR ?? './archive';
   const count = lastSessionContextCount();
   if (cache.root !== root || cache.count !== count || now - cache.at > CACHE_MS) {
     cache = { at: now, root, count, value: latestSessionSummaries(root, { count }) };
   }
-  const sessions = cache.value;
-  if (!sessions.length) return '';
+  return cache.value;
+}
+
+// The date of each of `sessions` ("08.10.2026", '' when unknown), for logs.
+export function lastSessionDates(sessions) {
+  return sessions.map((s) => fmtDate(s.sessionStartMs) ?? '');
+}
+
+// → system-block string, or '' (disabled / no finalized session with a summary).
+export function lastSessionBlock({ now = Date.now(), keep = Infinity } = {}) {
+  return renderLastSessionBlock(lastSessionSummaries({ now }), { keep });
+}
+
+// The block for `sessions` (lastSessionSummaries()). `keep` = how many of the
+// newest go in: the prompt budget drops the oldest (answerPrompt.js). The kept
+// ones keep the share they have among all of them, so a dropped summary frees
+// its whole part instead of handing it to the others.
+export function renderLastSessionBlock(sessions, { keep = Infinity } = {}) {
+  const kept = Math.min(sessions.length, Math.max(0, Math.floor(keep)));
+  if (!kept) return '';
   const maxChars = lastSessionContextMaxChars();
-  if (sessions.length === 1) {
-    const date = fmtDate(sessions[0].sessionStartMs);
-    return [
-      `Zusammenfassung der letzten abgeschlossenen Sitzung${date ? ` (${date})` : ''} — nur verwenden, wenn danach gefragt wird; nicht ungefragt nacherzählen:`,
-      capText(sessions[0].text, maxChars),
-    ].join('\n');
-  }
-  const headings = sessions.map((s, i) => {
-    const date = fmtDate(s.sessionStartMs);
-    return `${PLACE[i]} Sitzung${date ? ` (${date})` : ''}:`;
-  });
+  const dates = sessions.map((s) => fmtDate(s.sessionStartMs));
+  const headings = dates.map((date, i) => `${PLACE[i]} Sitzung${date ? ` (${date})` : ''}:`);
   // The headings and blank lines between the parts count against the cap too.
   const overhead = headings.reduce((n, h) => n + h.length + 1, 0) + 2 * (sessions.length - 1);
-  const shares = fairShares(sessions.map((s) => s.text.length), maxChars - overhead);
-  const parts = sessions.map((s, i) => [headings[i], capText(s.text, shares[i])])
+  const shares = sessions.length === 1 ? [maxChars] : fairShares(sessions.map((s) => s.text.length), maxChars - overhead);
+  if (kept === 1) {
+    return [
+      `Zusammenfassung der letzten abgeschlossenen Sitzung${dates[0] ? ` (${dates[0]})` : ''} — nur verwenden, wenn danach gefragt wird; nicht ungefragt nacherzählen:`,
+      capText(sessions[0].text, shares[0]),
+    ].join('\n');
+  }
+  const parts = sessions.slice(0, kept).map((s, i) => [headings[i], capText(s.text, shares[i])])
     .filter(([, text]) => text)
     .map(([heading, text]) => `${heading}\n${text}`);
   return [

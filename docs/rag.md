@@ -192,8 +192,10 @@ letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
 (`LAST_SESSION_CONTEXT_*`) — beantwortet wird das nur auf Nachfrage („Was war
 letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Mit
 `LAST_SESSION_CONTEXT_COUNT=2` (empfohlen) sind es die letzten beiden, neueste
-zuerst und jede mit Datum, im Budget `LAST_SESSION_CONTEXT_MAX_CHARS`. Die
-Vault-Suche kennt kein „neueste zuerst“: bei „Fasse die letzten beiden Sessions
+zuerst und jede mit Datum, im Budget `LAST_SESSION_CONTEXT_MAX_CHARS`. Wird
+der ganze Antwort-Prompt zu groß (`LLM_PROMPT_BUDGET_CHARS`, siehe
+[providers.md](providers.md#prompt-budget)), fallen die älteren davon zuerst
+weg; die neueste bleibt. Die Vault-Suche kennt kein „neueste zuerst“: bei „Fasse die letzten beiden Sessions
 zusammen“ fand sie im Live-Test Session-Notizen von 2025. Damit auch ältere
 Sessions über die Vault-Suche auffindbar sind, `SESSION_SUMMARY_VAULT_DIR`
 setzen: dann landet jede Zusammenfassung als Notiz im Vault und wird

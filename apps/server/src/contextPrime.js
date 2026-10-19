@@ -29,7 +29,7 @@ import { debug } from './logger.js';
 // checkpoint, ~1000 tokens earlier. This hits the question's own line, which
 // is in the buffer before the answer is built. The answer therefore keeps the
 // live block as primed (cutFor) and moves newer lines into its tail, next to
-// the RAG hits (pipeline.js buildContext).
+// the RAG hits (answerPrompt.js).
 //
 // Scheduling, per session:
 // - a change schedules one prime after LLM_PRIME_DELAY_MS;

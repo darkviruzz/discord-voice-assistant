@@ -4,19 +4,17 @@ import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { sttProviderLabel } from './providers/stt.js';
-import { chat, primeChat, recentHistory } from './llm.js';
+import { chat, primeChat } from './llm.js';
 import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
-import { appendLive, renderLiveSplit, liveContextEnabled } from './liveContext.js';
+import { appendLive, liveContextEnabled } from './liveContext.js';
 import { publishEntry, publishAnnotation } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
-import { getCampaignContext } from './campaignContext.js';
-import { ragEnabled } from './rag/index.js';
 import { llmProvider } from './providers/llm.js';
 import { createPrimer, primeEnabledFor } from './contextPrime.js';
-import { lastSessionBlock } from './lastSession.js';
+import { createAnswerPrompt } from './answerPrompt.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { speakerLabel, normalizeText } from './finalize/merge.js';
 import { postprocessUtterance, applyCorrections, matchHallucination } from './sttPostprocess.js';
@@ -466,53 +464,11 @@ function discordPostRepliesEnabled() {
   return (process.env.DISCORD_POST_REPLIES ?? 'false') === 'true';
 }
 
-// The stable front of an answer prompt, as extra `system` blocks, ordered from
-// the least to the most often changing part. The LLM server can then reuse its
-// prompt cache for everything up to the first change (see contextPrime.js):
-//   static CAMPAIGN.md (only when RAG is off) → last session → rolling summary
-//   → live transcript (appended to between folds).
-// The live transcript ends at `cut` (an entry of the buffer, the newest one in
-// the last primed prompt); the lines after it come back as `fresh` for the
-// question's tail. Empty parts are skipped so an unavailable block costs
-// nothing. Only the last-session block when live context is disabled.
-// → { systemBlocks, fresh, last } (last = newest entry in systemBlocks).
-async function stableContext(session, cut = null) {
-  // Recap source for "Was war letztes Mal?" / /recap — independent of the live
-  // context switch and also for text queries outside a voice session.
-  const lastSession = lastSessionBlock();
-  if (!liveContextEnabled()) return { systemBlocks: lastSession ? [lastSession] : [], fresh: '', last: null };
-  const systemBlocks = [];
-  if (!ragEnabled()) {
-    const campaign = await getCampaignContext(null);
-    if (campaign) systemBlocks.push(`Kampagnen-Kontext:\n${campaign}`);
-  }
-  if (lastSession) systemBlocks.push(lastSession);
-  const summary = session?.liveContext?.summary;
-  if (summary && summary.trim()) {
-    systemBlocks.push(`Bisheriger Gesprächsverlauf (Zusammenfassung):\n${summary.trim()}`);
-  }
-  const { primed, fresh, last } = renderLiveSplit(session, cut);
-  if (primed) systemBlocks.push(`Aktuelles Live-Transkript der Runde:\n${primed}`);
-  return { systemBlocks, fresh, last };
-}
+// The answer prompt within LLM_PROMPT_BUDGET_CHARS, for the primer (its front)
+// and for each question (answerPrompt.js).
+const prompts = createAnswerPrompt();
 
-// Prompt context for one question: { systemBlocks, contextBlocks }.
-// systemBlocks = the stable front as last primed. contextBlocks = what is new
-// or depends on the question, which chat() puts into the user message in front
-// of the question, after the cached front and the history:
-//   transcript lines since the last prime (the question's own line among them)
-//   → vault RAG hits (or the CAMPAIGN.md fallback when RAG finds nothing).
-// Async because the lookup embeds the query (an HTTP round-trip).
-async function buildContext(session, query) {
-  const { systemBlocks, fresh } = await stableContext(session, primer.cutFor(session));
-  const contextBlocks = [];
-  if (fresh) contextBlocks.push(`Neueste Beiträge im Live-Transkript (Fortsetzung):\n${fresh}`);
-  if (liveContextEnabled() && ragEnabled()) {
-    const campaign = await getCampaignContext(query);
-    if (campaign) contextBlocks.push(`Kampagnen-Kontext:\n${campaign}`);
-  }
-  return { systemBlocks, contextBlocks };
-}
+const primeOn = () => liveContextEnabled() && primeEnabledFor(llmProvider());
 
 // Keeps the stable front of the next answer prompt in the LLM server's prompt
 // cache while a voice session runs (contextPrime.js). Fed by every change of
@@ -520,11 +476,11 @@ async function buildContext(session, query) {
 // summary.
 const primer = createPrimer({
   buildPrefix: async (session) => {
-    const { systemBlocks, last } = await stableContext(session);
-    return { prefix: { systemBlocks, history: recentHistory(session.conversationHistory) }, cut: last };
+    const { systemBlocks, history, last } = await prompts.front(session);
+    return { prefix: { systemBlocks, history }, cut: last };
   },
   prime: ({ systemBlocks, history }) => primeChat(systemBlocks, history),
-  enabled: () => liveContextEnabled() && primeEnabledFor(llmProvider()),
+  enabled: primeOn,
 });
 
 // Test hook: the primer (idle(), cutFor()).
@@ -629,8 +585,8 @@ async function answerQuestion({
   let response;
   primer.answerStarted(session);
   try {
-    const { systemBlocks, contextBlocks } = await buildContext(session, query);
-    response = await chat(history, query, { systemBlocks, contextBlocks });
+    const prompt = await prompts.answer(session, history, query, { cut: primer.cutFor(session), primed: primeOn() });
+    response = await chat(prompt.history, query, { systemBlocks: prompt.systemBlocks, contextBlocks: prompt.contextBlocks });
   } catch (e) {
     warn('pipeline: llm error:', e.message);
     // A typed question is answered in its channel (see below) — on an LLM

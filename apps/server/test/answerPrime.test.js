@@ -14,12 +14,14 @@ import path from 'node:path';
 import { runTextPipeline, _internal } from '../src/pipeline.js';
 import { ensureSession, sessions } from '../src/state.js';
 import { appendLive } from '../src/liveContext.js';
-import { ANSWER_SCHEMA } from '../src/llm.js';
+import { ANSWER_SCHEMA, promptChars } from '../src/llm.js';
+import { resetLastSessionCache } from '../src/lastSession.js';
 
 const { primer } = _internal;
 const KEYS = ['LLM_PROVIDER', 'OLLAMA_URL', 'OLLAMA_MODEL', 'LLM_TIMEOUT_MS', 'TRANSCRIPT_DIR', 'ARCHIVE_DIR',
   'OBSIDIAN_VAULT_PATH', 'DISCORD_POST_REPLIES', 'LIVE_CONTEXT_ENABLED', 'LLM_PRIME', 'LLM_PRIME_DELAY_MS',
-  'HISTORY_TURNS', 'LLM_JSON_FORMAT'];
+  'HISTORY_TURNS', 'LLM_JSON_FORMAT', 'LLM_PROMPT_BUDGET_CHARS', 'LAST_SESSION_CONTEXT_COUNT',
+  'LAST_SESSION_CONTEXT_MAX_CHARS', 'FINALIZE_TZ'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-prime-'));
 
@@ -96,6 +98,52 @@ test('prime = front of the answer prompt; own line + question in the tail; reply
   } finally {
     // A failed assertion can leave a prime pending. It must not run once
     // after() has restored OLLAMA_URL: it would load a model on a real Ollama.
+    process.env.LLM_PRIME = 'false';
+    await new Promise((r) => setTimeout(r, 20));
+    await primer.idle(session);
+    sessions.delete(sid);
+  }
+});
+
+// LLM_PROMPT_BUDGET_CHARS (answerPrompt.js): the prime already sends the
+// trimmed front, so the answer still resumes from it.
+test('prompt budget: the prime sends the trimmed front, the answer starts with exactly it', async () => {
+  const sid = 4343n;
+  delete process.env.LLM_PRIME; // the first test switched it off on its way out
+  Object.assign(process.env, {
+    LLM_PROMPT_BUDGET_CHARS: '9000', HISTORY_TURNS: '10', FINALIZE_TZ: 'Europe/Berlin',
+    LAST_SESSION_CONTEXT_COUNT: '3', LAST_SESSION_CONTEXT_MAX_CHARS: '6000',
+  });
+  ['01', '08', '15'].forEach((day, i) => {
+    const dir = path.join(process.env.ARCHIVE_DIR, `2026-10-${day}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ sessionStartMs: Date.UTC(2026, 9, Number(day), 18) }));
+    fs.writeFileSync(path.join(dir, 'summary.md'), `Sitzung ${i + 1}: die Gruppe zog weiter nach Norden. `.repeat(60));
+  });
+  resetLastSessionCache();
+  const session = ensureSession(sid);
+  const base = bodies.length;
+  try {
+    for (let i = 0; i < 10; i++) {
+      session.conversationHistory.push({ role: 'user', content: `Frage ${i}?` }, { role: 'assistant', content: `Antwort ${i}: so war es.` });
+    }
+    for (let i = 0; i < 40; i++) appendLive(session, { label: 'Greta', text: `Zeile ${i}: wir gehen weiter durch den Gang.`, startMs: 10 + i });
+    primer.schedule(session);
+    await waitFor(base + 1);
+    await primer.idle(session);
+    const prime = bodies[base];
+    const dates = prime.messages.map((m) => m.content).join('\n').match(/\(\d\d\.10\.2026\)/g);
+    assert.equal(dates[0], '(15.10.2026)', 'the newest summary stays');
+    assert.ok(!dates.includes('(01.10.2026)'), 'the oldest dropped ahead of time');
+    assert.equal(prime.messages.filter((m) => m.role !== 'system').length, 20, 'the history stays whole');
+
+    appendLive(session, { label: 'Greta', text: 'Rabenauge, wohin führt der Gang?', startMs: 100 });
+    await runTextPipeline({ sessionId: String(sid), question: 'wohin führt der Gang?', channelId: 'c1', source: 'slash' });
+    await waitFor(base + 2);
+    const answer = bodies[base + 1];
+    assert.deepEqual(answer.messages.slice(0, -1), prime.messages, 'the answer starts with exactly the primed front');
+    assert.ok(promptChars(answer.messages) <= 9000, `${promptChars(answer.messages)} chars`);
+  } finally {
     process.env.LLM_PRIME = 'false';
     await new Promise((r) => setTimeout(r, 20));
     await primer.idle(session);

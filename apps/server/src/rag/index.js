@@ -36,7 +36,7 @@ import { RagIndexer, DEFAULT_TOP_K, MAX_TOP_K, clampTopK } from './indexer.js';
 import { DEFAULT_MAX_CHUNK_CHARS } from './chunker.js';
 import { parseExcludeList } from './scanner.js';
 
-export { MAX_TOP_K, clampTopK };
+export { DEFAULT_TOP_K, MAX_TOP_K, clampTopK };
 
 const DEFAULT_TIMEOUT_MS = 800;
 // setTimeout() clamps larger delays to 1 ms (TimeoutOverflowWarning), which

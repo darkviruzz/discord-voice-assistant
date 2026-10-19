@@ -10,7 +10,7 @@ export const DEFAULT_SYSTEM = [
   'Du bist Rabenauge, ein Assistent für eine Pen-and-Paper-Runde.',
   'Deine Antworten werden direkt vorgelesen.',
   '',
-  // The blocks pipeline.js stableContext/buildContext send, with their
+  // The blocks answerPrompt.js builds, with their
   // headings: the stable ones as system messages, the per-question ones in
   // the last user message in front of "Frage:" (prompt cache, contextPrime.js).
   'KONTEXT:',
@@ -116,16 +116,32 @@ export function recentHistory(history) {
 
 // The front of every answer prompt: base system prompt, the stable context
 // blocks, the recent history. primeChat() sends exactly this, so the server's
-// prompt cache holds it when the next question arrives.
-function prefixMessages(systemBlocks, history) {
+// prompt cache holds it when the next question arrives. `system` = the base
+// system prompt, read once by a caller that builds many variants.
+export function prefixMessages(systemBlocks, history, system = systemPrompt()) {
   const extra = (Array.isArray(systemBlocks) ? systemBlocks : [])
     .filter((b) => typeof b === 'string' && b.trim())
     .map((b) => ({ role: 'system', content: b }));
-  return [{ role: 'system', content: systemPrompt() }, ...extra, ...recentHistory(history)];
+  return [{ role: 'system', content: system }, ...extra, ...recentHistory(history)];
 }
 
 function blockText(blocks) {
   return (Array.isArray(blocks) ? blocks : []).filter((b) => typeof b === 'string' && b.trim()).join('\n\n');
+}
+
+// All messages of an answer prompt, as chat() sends them.
+export function answerMessages(systemBlocks, history, query, contextBlocks = [], system = systemPrompt()) {
+  const context = blockText(contextBlocks);
+  return [
+    ...prefixMessages(systemBlocks, history, system),
+    { role: 'user', content: context ? `${context}\n\nFrage: ${query}` : query },
+  ];
+}
+
+// The size of a prompt as the budget counts it: the chars of all message
+// contents (promptBudget.js).
+export function promptChars(messages) {
+  return messages.reduce((n, m) => n + String(m.content ?? '').length, 0);
 }
 
 // Answer a query. Returns { text, speakerId, model }.
@@ -139,13 +155,9 @@ function blockText(blocks) {
 // Empty/blank blocks are dropped so an unavailable block costs nothing.
 // Backend: providers/llm.js (LLM_PROVIDER=ollama | openai).
 export async function chat(history, query, { systemBlocks = [], contextBlocks = [] } = {}) {
-  const prefix = prefixMessages(systemBlocks, history);
+  const messages = answerMessages(systemBlocks, history, query, contextBlocks);
   const context = blockText(contextBlocks);
-  const messages = [
-    ...prefix,
-    { role: 'user', content: context ? `${context}\n\nFrage: ${query}` : query },
-  ];
-  const systemChars = prefix.slice(1).filter((m) => m.role === 'system').reduce((n, m) => n + m.content.length, 0);
+  const systemChars = messages.slice(1).filter((m) => m.role === 'system').reduce((n, m) => n + m.content.length, 0);
   if (systemChars || context) {
     debug(`llm: ${systemChars} chars of system blocks, ${context.length} chars of question context`);
   }

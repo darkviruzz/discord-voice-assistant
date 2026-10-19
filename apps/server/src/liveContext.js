@@ -134,14 +134,16 @@ export function renderLiveContext(session) {
 // including `cut`, fresh = the render of those after it, each capped from the
 // back like renderLiveContext(). `cut` null or no longer in the buffer (folded)
 // → everything is primed, fresh ''. last = the newest entry in `primed` (the
-// cut to remember after priming), null for an empty buffer.
-export function renderLiveSplit(session, cut = null) {
+// cut to remember after priming), null for an empty buffer. primedMax/freshMax
+// lower the cap of either part (the prompt budget, answerPrompt.js).
+export function renderLiveSplit(session, cut = null, { primedMax = Infinity, freshMax = Infinity } = {}) {
   const buf = session?.liveContext?.buffer;
   if (!buf || buf.length === 0) return { primed: '', fresh: '', last: null };
   const max = renderMaxChars();
+  const pMax = Math.min(max, primedMax);
   const i = cut ? buf.lastIndexOf(cut) : -1;
-  if (i < 0) return { primed: renderForLlm(buf, max), fresh: '', last: buf[buf.length - 1] };
-  return { primed: renderForLlm(buf.slice(0, i + 1), max), fresh: renderForLlm(buf.slice(i + 1), max), last: cut };
+  if (i < 0) return { primed: renderForLlm(buf, pMax), fresh: '', last: buf[buf.length - 1] };
+  return { primed: renderForLlm(buf.slice(0, i + 1), pMax), fresh: renderForLlm(buf.slice(i + 1), Math.min(max, freshMax)), last: cut };
 }
 
 // Remove the given entries (by identity) from the session buffer.

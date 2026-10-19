@@ -527,8 +527,36 @@ export function writeSummaryToVault(summary, { title, dateLabel }) {
 // re-finalized old one, not the newest).
 export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { excludeArchiveName = null, beforeMs = null } = {}) {
   let best = null;
+  for (const c of summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs })) {
+    if (!best || c.key > best.key) best = c;
+  }
+  if (!best) return null;
+  try {
+    const text = fs.readFileSync(best.file, 'utf8').trim();
+    return text ? { text, archiveName: best.archiveName, sessionStartMs: best.start } : null;
+  } catch { return null; }
+}
+
+// The `count` newest summaries, newest first, by the same order as
+// latestSessionSummary (sessionStartMs, else mtime). Sessions with an empty or
+// unreadable summary.md are skipped, so "the last two" are two with content.
+export function latestSessionSummaries(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { count = 1, excludeArchiveName = null, beforeMs = null } = {}) {
+  const out = [];
+  const sorted = summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs }).sort((a, b) => b.key - a.key);
+  for (const c of sorted) {
+    if (out.length >= count) break;
+    let text = '';
+    try { text = fs.readFileSync(c.file, 'utf8').trim(); } catch { /* vanished */ }
+    if (text) out.push({ text, archiveName: c.archiveName, sessionStartMs: c.start });
+  }
+  return out;
+}
+
+// Archive sessions with a summary.md → [{ file, archiveName, key, start }].
+function summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs }) {
+  const out = [];
   let dirs;
-  try { dirs = fs.readdirSync(archiveRoot, { withFileTypes: true }); } catch { return null; }
+  try { dirs = fs.readdirSync(archiveRoot, { withFileTypes: true }); } catch { return out; }
   for (const d of dirs) {
     if (!d.isDirectory() || d.name === excludeArchiveName) continue;
     const dir = path.join(archiveRoot, d.name);
@@ -539,11 +567,7 @@ export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? '.
     try { start = Number(JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).sessionStartMs); } catch { /* no manifest */ }
     const key = Number.isFinite(start) && start > 0 ? start : st.mtimeMs;
     if (Number.isFinite(beforeMs) && key >= beforeMs) continue;
-    if (!best || key > best.key) best = { file: f, archiveName: d.name, key, start };
+    out.push({ file: f, archiveName: d.name, key, start });
   }
-  if (!best) return null;
-  try {
-    const text = fs.readFileSync(best.file, 'utf8').trim();
-    return text ? { text, archiveName: best.archiveName, sessionStartMs: best.start } : null;
-  } catch { return null; }
+  return out;
 }

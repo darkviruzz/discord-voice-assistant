@@ -955,9 +955,20 @@ export const CATALOG = [
       + 'nacherzählen" markiert, es gibt keine Begrüßung beim /join. Wird pro Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_COUNT',
+    label: 'Letzte Sessions: Anzahl', type: 'number', def: '1', applyMode: 'live',
+    desc: 'Wie viele der zuletzt finalisierten Sessions (1–5) als Kontext mitgehen — neueste '
+      + 'zuerst, jede mit Datum („Letzte Sitzung", „Vorletzte Sitzung"). 2 empfohlen: dann '
+      + 'beantwortet Rabenauge auch „Fasse die letzten beiden Sessions zusammen" aus den '
+      + 'richtigen Sessions (die Vault-Suche kennt kein „neueste zuerst"). Alle teilen sich '
+      + 'LAST_SESSION_CONTEXT_MAX_CHARS. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_MAX_CHARS',
     label: 'Letzte Session: max. Zeichen', type: 'number', def: '2500', applyMode: 'live',
-    desc: 'Obergrenze für den Kontextblock der letzten Session (gekürzt am Satzende).',
+    desc: 'Obergrenze für den Kontextblock der letzten Session(s), gekürzt am Satzende. Bei '
+      + 'mehreren Sessions (LAST_SESSION_CONTEXT_COUNT) gleichmäßig aufgeteilt; was eine kurze '
+      + 'Zusammenfassung nicht braucht, bekommen die längeren.',
   },
 
   // ======================= SERVER: TTS ======================================

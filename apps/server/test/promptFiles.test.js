@@ -193,6 +193,7 @@ test('the built-in persona describes the context blocks pipeline.js sends', () =
   const src = fs.readFileSync(path.join(serverDir, 'src/pipeline.js'), 'utf8')
     + fs.readFileSync(path.join(serverDir, 'src/lastSession.js'), 'utf8');
   for (const heading of ['Kampagnen-Kontext', 'Zusammenfassung der letzten abgeschlossenen Sitzung',
+    'Zusammenfassungen der letzten abgeschlossenen Sitzungen',
     'Bisheriger Gesprächsverlauf (Zusammenfassung)', 'Aktuelles Live-Transkript der Runde',
     'Neueste Beiträge im Live-Transkript (Fortsetzung)']) {
     assert.ok(src.includes(heading), `block "${heading}" no longer sent — update DEFAULT_SYSTEM`);

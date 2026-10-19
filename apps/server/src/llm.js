@@ -15,7 +15,8 @@ export const DEFAULT_SYSTEM = [
   // the last user message in front of "Frage:" (prompt cache, contextPrime.js).
   'KONTEXT:',
   'Vor der Frage bekommst du ggf. Kontextblöcke:',
-  '"Zusammenfassung der letzten abgeschlossenen Sitzung" (nur verwenden, wenn danach gefragt wird),',
+  '"Zusammenfassung der letzten abgeschlossenen Sitzung" bzw. "Zusammenfassungen der letzten abgeschlossenen Sitzungen"',
+  '(neueste zuerst, jede mit Datum; nur verwenden, wenn danach gefragt wird),',
   '"Bisheriger Gesprächsverlauf (Zusammenfassung)" (die laufende Sitzung bis vor kurzem),',
   '"Aktuelles Live-Transkript der Runde" (Zeilen der Form [Sprecher] Text) und, direkt vor der Frage,',
   '"Neueste Beiträge im Live-Transkript (Fortsetzung)" (die jüngsten Zeilen) sowie',

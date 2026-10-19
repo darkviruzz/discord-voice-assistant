@@ -190,7 +190,11 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
 Die jeweils
 letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
 (`LAST_SESSION_CONTEXT_*`) — beantwortet wird das nur auf Nachfrage („Was war
-letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Damit auch ältere
+letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Mit
+`LAST_SESSION_CONTEXT_COUNT=2` (empfohlen) sind es die letzten beiden, neueste
+zuerst und jede mit Datum, im Budget `LAST_SESSION_CONTEXT_MAX_CHARS`. Die
+Vault-Suche kennt kein „neueste zuerst“: bei „Fasse die letzten beiden Sessions
+zusammen“ fand sie im Live-Test Session-Notizen von 2025. Damit auch ältere
 Sessions über die Vault-Suche auffindbar sind, `SESSION_SUMMARY_VAULT_DIR`
 setzen: dann landet jede Zusammenfassung als Notiz im Vault und wird
 automatisch mitindiziert. Im Docker-Stack geht das nicht: dort ist der Vault

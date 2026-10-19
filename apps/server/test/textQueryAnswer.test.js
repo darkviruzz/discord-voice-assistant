@@ -88,6 +88,24 @@ test('/recap: the last finalized session summary reaches the LLM as a system blo
   assert.equal(chatMessages()[0].answer, 'Ihr seid aus den Minen geflohen.');
 });
 
+test('LAST_SESSION_CONTEXT_COUNT=2: "die letzten beiden Sitzungen" get both summaries, newest first', async () => {
+  const add = (name, startMs, text) => {
+    const dir = path.join(process.env.ARCHIVE_DIR, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ sessionStartMs: startMs }));
+    fs.writeFileSync(path.join(dir, 'summary.md'), text);
+  };
+  add('2026-10-08-1', Date.UTC(2026, 9, 8, 18), 'Baron Kelthur verriet die Gruppe.\n');
+  add('2026-10-01-1', Date.UTC(2026, 9, 1, 18), 'Die Gruppe floh aus den Minen von Khundrukar.\n');
+  process.env.LAST_SESSION_CONTEXT_COUNT = '2';
+  try {
+    llmReply = () => ({ json: { message: { content: '{"text":"Erst die Minen, dann der Verrat."}' } } });
+    await runTextPipeline({ question: 'Fasse die letzten beiden Sessions zusammen.', channelId: 'c4', source: 'slash' });
+    const system = llmBodies[0].messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    assert.match(system, /Letzte Sitzung \(08\.10\.2026\):\nBaron Kelthur[\s\S]*Vorletzte Sitzung \(01\.10\.2026\):\nDie Gruppe floh/);
+  } finally { delete process.env.LAST_SESSION_CONTEXT_COUNT; }
+});
+
 // Live test 2026-10-20: the direction in front was read aloud and posted.
 test('the channel gets the answer without stage directions or markdown markers', async () => {
   llmReply = () => ({ json: { message: { content: '{"text":"*(Mit zitternder Stimme und hastiger Atmung)* Oh Gott... **bitte**...","speaker_id":7}' } } });

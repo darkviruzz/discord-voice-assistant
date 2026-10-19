@@ -294,7 +294,8 @@ Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines J
 | `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
 | `RAG_RESCAN_INTERVAL_MS` | `300000` | Kompletter Vault-Abgleich zusätzlich zum Datei-Watcher (`0` = aus). Unveränderte Notizen kosten keine Embeddings. |
 | `LAST_SESSION_CONTEXT_ENABLED` | `true` | Zusammenfassung der letzten finalisierten Session (`summary.md`) als Kontext bei jeder Anfrage — für „Was war letztes Mal?“ bzw. `/recap`; nur auf Nachfrage, keine Begrüßung beim `/join`. |
-| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks. |
+| `LAST_SESSION_CONTEXT_COUNT` | `1` | Wie viele der neuesten Sessions (1–5) mitgehen, neueste zuerst, jede mit Datum („Letzte Sitzung“, „Vorletzte Sitzung“). Empfohlen `2` — für „Fasse die letzten beiden Sessions zusammen“; die Vault-Suche kennt kein „neueste zuerst“. |
+| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks; bei mehreren Sessions fair aufgeteilt (was eine kurze nicht braucht, bekommen die längeren). |
 
 #### TTS (Text-to-Speech)
 

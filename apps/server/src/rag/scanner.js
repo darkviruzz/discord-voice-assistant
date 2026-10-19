@@ -18,6 +18,56 @@ export function isHidden(source) {
   return String(source).split('/').some((part) => part.startsWith('.'));
 }
 
+// RAG_EXCLUDE: vault paths that are never indexed (templates, tooling notes,
+// exports …). A gitignore-like subset, matched case-insensitively against the
+// vault-relative path with forward slashes:
+//   "Templates/"        folder (trailing /) — without another / at any depth
+//   "Claude outputs/"   folder names may contain spaces
+//   "99_Material/Archiv/" a / inside anchors the pattern at the vault root
+//   "CLAUDE.md"         file name at any depth
+//   "*.excalidraw.md"   * = any characters except /, ? = one, ** = any incl. /
+// Entries are separated by comma, semicolon or newline; "#" starts a comment.
+export function parseExcludeList(text) {
+  return String(text ?? '')
+    .split(/[\r\n,;]+/)
+    .map((s) => s.replace(/#.*/, '').trim().replace(/\\/g, '/').replace(/^\.?\//, ''))
+    .filter(Boolean);
+}
+
+function globToRegex(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        i++;
+        if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*';
+      } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return re;
+}
+
+// patterns → (source) => true when the note (or folder) is excluded. A folder
+// pattern also matches the folder path itself, so watcher events for the
+// directory are dropped too.
+export function compileExclude(patterns = []) {
+  const res = [];
+  for (const raw of patterns) {
+    let p = String(raw).trim();
+    if (!p) continue;
+    p = p.replace(/\/+$/, '');
+    if (!p) continue;
+    // A / inside anchors at the vault root; a bare name matches at any depth.
+    // Everything below a matched folder is excluded as well.
+    const head = p.includes('/') ? '^' : '^(?:.*/)?';
+    res.push(new RegExp(`${head}${globToRegex(p)}(?:/.*)?$`, 'i'));
+  }
+  if (!res.length) return () => false;
+  return (source) => res.some((re) => re.test(String(source)));
+}
+
 export function isNoteName(name) {
   return name.toLowerCase().endsWith('.md') && !name.startsWith('.');
 }

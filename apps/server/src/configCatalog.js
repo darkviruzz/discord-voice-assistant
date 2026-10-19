@@ -799,6 +799,16 @@ export const CATALOG = [
       + '0 = aus. Änderung greift bei der nächsten Anfrage.',
   },
   {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_EXCLUDE',
+    label: 'Vom Index ausgeschlossene Pfade', type: 'string', def: '', applyMode: 'live',
+    desc: 'Vault-Pfade, die nie als Kontext dienen (Vorlagen, Tool-Notizen, Exporte). Komma- '
+      + 'oder semikolongetrennt, Groß-/Kleinschreibung egal. "Templates/" = Ordner (ohne '
+      + 'weiteres / in jeder Tiefe), "99_Material/Archiv/" = Ordner ab Vault-Wurzel, '
+      + '"CLAUDE.md" = Dateiname überall, * und ** als Platzhalter. Änderung greift bei der '
+      + 'nächsten Anfrage: ausgeschlossene Notizen fliegen aus dem Index, wieder '
+      + 'aufgenommene werden eingebettet.',
+  },
+  {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_PROVIDER',
     label: 'Embedding-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
     applyMode: 'live',

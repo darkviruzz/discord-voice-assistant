@@ -41,7 +41,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, DEFAULT_MAX_CHUNK_CHARS } from './chunker.js';
-import { listNotes, readNote, noteState, statNote, isHidden, MAX_FILE_BYTES } from './scanner.js';
+import { listNotes, readNote, noteState, statNote, isHidden, compileExclude, MAX_FILE_BYTES } from './scanner.js';
 import { VectorStore, INDEX_FILE, writeFileAtomic, cleanupTempFiles, IndexFormatError, DimensionMismatch } from './store.js';
 import { VaultWatcher } from './watcher.js';
 
@@ -84,6 +84,7 @@ export class RagIndexer {
     signature = () => 'default',
     maxChunkChars = DEFAULT_MAX_CHUNK_CHARS,
     maxFileBytes = MAX_FILE_BYTES,
+    exclude = [],
     watch = true,
     debounceMs = 1000,
     rescanIntervalMs = 300_000,
@@ -100,6 +101,8 @@ export class RagIndexer {
     this.signatureFn = typeof signature === 'function' ? signature : () => signature;
     this.maxChunkChars = maxChunkChars;
     this.maxFileBytes = maxFileBytes;
+    this.exclude = [...exclude];
+    this._excluded = compileExclude(this.exclude); // RAG_EXCLUDE (scanner.js)
     this.watchEnabled = watch;
     this.debounceMs = debounceMs;
     this.rescanIntervalMs = rescanIntervalMs;
@@ -243,7 +246,7 @@ export class RagIndexer {
     this._watcher = new VaultWatcher(this.vaultPath, {
       debounceMs: this.debounceMs,
       logger: this.logger,
-      ignore: (rel) => !!this._ignorePrefix && (rel + '/').startsWith(this._ignorePrefix),
+      ignore: (rel) => (!!this._ignorePrefix && (rel + '/').startsWith(this._ignorePrefix)) || this._excluded(rel),
       onNote: async (source) => {
         const n = await this.syncNote(source);
         this.logger.debug(`rag: watch: synced ${source} (${n} chunks)`);
@@ -561,7 +564,7 @@ export class RagIndexer {
   }
 
   _ignored(source) {
-    return !!this._ignorePrefix && source.startsWith(this._ignorePrefix);
+    return (!!this._ignorePrefix && source.startsWith(this._ignorePrefix)) || this._excluded(source);
   }
 
   _checkSignature() {

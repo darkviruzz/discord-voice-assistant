@@ -89,6 +89,7 @@ Alle im Web-Panel (Gruppe „Server · RAG (Vault-Suche)") und in
 | `RAG_MAX_CHUNK_CHARS` | `2000` | max. Zeichen pro Abschnitt |
 | `RAG_INDEX_DIR` | `./data/rag` | Index-Verzeichnis (Docker: `/data/rag`) |
 | `RAG_RESCAN_INTERVAL_MS` | `300000` | periodischer Abgleich, `0` = aus |
+| `RAG_EXCLUDE` | leer | nie indexierte Pfade, z. B. `Templates/, wiki-comments/, CLAUDE.md, *.excalidraw.md` (`Ordner/` = in jeder Tiefe, `a/b/` = ab Vault-Wurzel, `*`/`**` Platzhalter) |
 | `EMBED_PROVIDER` | `ollama` | `ollama` \| `openai` |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding-Modell |
 | `EMBED_BASE_URL` / `EMBED_API_KEY` | leer | nur `openai` (URL inkl. `/v1`) |

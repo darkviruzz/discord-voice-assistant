@@ -235,7 +235,8 @@ export const CATALOG = [
     desc: 'Erzeugt beim Finalize per LLM eine kurze Zusammenfassung der Session '
       + '(summary.md im Archiv). Daraus beantwortet Rabenauge auf Nachfrage „Was war '
       + 'letztes Mal?" — nie als Begrüßung. Lange Sessions werden abschnittsweise '
-      + 'verdichtet. Ein Fehler hier lässt den Finalize unberührt.',
+      + 'verdichtet; die Namen aus STT_VOCABULARY / STT_VOCABULARY_FILE gehen als '
+      + 'korrekte Schreibweisen mit. Ein Fehler hier lässt den Finalize unberührt.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_MAX_CHARS',
@@ -245,20 +246,24 @@ export const CATALOG = [
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_CHUNK_CHARS',
-    label: 'Abschnittsgröße für lange Sessions (Zeichen)', type: 'number', def: '12000',
+    label: 'Abschnittsgröße für lange Sessions (Zeichen)', type: 'number', def: '18000',
     applyMode: 'next-finalize',
-    desc: 'Transkripte über dieser Länge werden in Abschnitte geteilt, einzeln verdichtet '
-      + 'und dann zusammengeführt. Kleiner = mehr, aber kürzere LLM-Aufrufe (für Modelle '
-      + 'mit kleinem Kontextfenster).',
+    desc: 'Transkripte (Spielerzeilen ohne Zeitstempel und Markup) über dieser Länge '
+      + 'werden in Abschnitte geteilt, einzeln verdichtet und dann zusammengeführt. '
+      + '18000 Zeichen ≈ 5,6k Token (gemma4, gemessen) — passt samt Prompt und Antwort in '
+      + 'ein 8k-Kontextfenster (num_ctx). Größer = weniger, längere LLM-Aufrufe (nur mit '
+      + 'größerem Kontextfenster), kleiner = für Modelle mit kleinem Kontextfenster.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_TIMEOUT_MS',
-    label: 'Zeitbudget der Session-Zusammenfassung (ms)', type: 'number', def: '600000',
+    label: 'Zeitbudget der Session-Zusammenfassung (ms)', type: 'number', def: '1800000',
     applyMode: 'next-finalize',
     desc: 'Obergrenze für die gesamte Zusammenfassung (alle Abschnitte + Zusammenführung). '
-      + 'Sie läuft innerhalb des Finalize, auf dessen Ergebnis der Bot wartet (Bot: '
-      + 'FINALIZE_MAX_MS, Standard 3 h) — ist das Budget aufgebraucht, wird ohne '
-      + 'Zusammenfassung finalisiert, statt das fertige Transkript weiter zurückzuhalten.',
+      + 'Sie läuft innerhalb des Finalize, auf dessen Ergebnis der Bot wartet (er wartet, '
+      + 'solange Fortschritt kommt — jeder LLM-Aufruf meldet sich; Obergrenze FINALIZE_MAX_MS). '
+      + 'Eine 3-h-Session braucht mit gemma4:12b auf einer RX 6800 XT ~5 min. Wird das Budget '
+      + 'knapp, werden die bis dahin verdichteten Abschnitte zusammengeführt und die '
+      + 'Zusammenfassung endet mit einem Hinweis, dass sie unvollständig ist.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_VAULT_DIR',
@@ -423,8 +428,9 @@ export const CATALOG = [
       + 'Priorität: höchstens 250 Zeichen gehen in den Prompt (Whisper liest nur ~224 '
       + 'Prompt-Token), der Rest wird mit Warnung im Log weggelassen. Lange Listen erhöhen '
       + 'das Risiko, dass Whisper in Stille Namen halluziniert — Wirkung mit npm run '
-      + 'bench:stt messen. Steht vor den Namen aus STT_VOCABULARY_FILE. Leer = aus. '
-      + 'Wird pro STT-Anfrage gelesen.',
+      + 'bench:stt messen. Steht vor den Namen aus STT_VOCABULARY_FILE. Die Session-'
+      + 'Zusammenfassung beim Finalize bekommt die Liste (bis 1500 Zeichen) als korrekte '
+      + 'Schreibweisen. Leer = aus. Wird pro STT-Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · STT', key: 'STT_VOCABULARY_FILE',

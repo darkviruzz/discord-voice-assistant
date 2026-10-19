@@ -134,7 +134,37 @@ pytest-Suite des früheren Python-Dienstes portiert.
 
 ## Vergangene Sessions
 
-Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). Die jeweils
+Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie:
+
+- **Eingabe:** nur die Zeilen der Spieler, ohne Rabenauges Antworten. Pro Zeile
+  bleibt nur `Spieler (Figur): Text`. Zeitstempel, `**`-Markup und
+  `_[unterbricht]_`/`_[weiter]_` fallen weg. Sie kosteten rund ein Drittel der
+  Token, weil Ziffern einzeln tokenisiert werden.
+- **Abschnitte:** Die Zeilen werden in Abschnitte von
+  `SESSION_SUMMARY_CHUNK_CHARS` geteilt, Standard 18000 Zeichen ≈ 5,6k Token.
+  Jeder Abschnitt wird zu einer Notiz verdichtet. Die Notizen werden zu einem
+  Text von höchstens `SESSION_SUMMARY_MAX_CHARS` zusammengeführt. Passen sie
+  nicht in einen Aufruf, werden sie vorher gruppenweise zusammengefasst. So
+  bleibt jeder Aufruf im Kontextfenster.
+- **Schreibweisen:** Jeder Aufruf bekommt die Namen aus
+  `STT_VOCABULARY`/`_FILE` als korrekte Schreibweisen.
+- **Gemessen** am 2026-10-19 (3-h-Session, 245 KB, gemma4:12b auf der
+  RX 6800 XT, Ollama-Kontext 8192): vorher 21 + 1 Aufrufe in 9,6 min, die
+  Zusammenführung mit 7,5k Token fast am Limit. Jetzt 10 + 1 Aufrufe in
+  5,2 min. Die Abschnitte haben höchstens 6,0k Token, die Zusammenführung
+  3,7k. „Gaaglath“, „Wyern“, „Ylva Benschalam“ und „Spungnitu“ kommen jetzt
+  richtig geschrieben heraus.
+- **Zeitbudget:** `SESSION_SUMMARY_TIMEOUT_MS`, Standard 30 min. Jeder Aufruf
+  meldet Fortschritt an den Bot. Wird das Budget knapp, hört das Verdichten
+  rechtzeitig auf, damit noch Zeit für die Zusammenführung bleibt.
+- **Unvollständig:** Entsteht die Zusammenfassung dann aus den bis dahin
+  fertigen Notizen, endet sie mit einem Hinweis, z. B. „(Unvollständig —
+  Zeitbudget aufgebraucht: 7 von 10 Abschnitten berücksichtigt, reicht bis etwa
+  21:47 Uhr.)“. Bleibt keine Zeit mehr für die Zusammenführung, werden die
+  Notizen gekürzt aneinandergereiht. Nur wenn gar kein Abschnitt verdichtet
+  wurde, gibt es keine Zusammenfassung.
+
+Die jeweils
 letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
 (`LAST_SESSION_CONTEXT_*`) — beantwortet wird das nur auf Nachfrage („Was war
 letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Damit auch ältere

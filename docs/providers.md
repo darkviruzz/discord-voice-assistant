@@ -80,6 +80,10 @@ Gaglath Matho, Rhogar Tonitruvales, Uhtred Ragnason, Greyhawk. <fixierter Text d
   Vorschlag (stdout, oder `--out <datei>`) — prüfen, kürzen, dann als
   `STT_VOCABULARY_FILE` ablegen. Ungeprüfte Vault-Inhalte landen nie
   automatisch im Prompt.
+- **Session-Zusammenfassung:** Die Finalize-Zusammenfassung bekommt dieselbe
+  Liste (ohne das 250-Zeichen-Limit, bis 1500 Zeichen) als „korrekte
+  Schreibweisen“ in jeden LLM-Aufruf. Falsch erkannte Varianten im Transkript
+  korrigiert das Modell dort stillschweigend.
 - **Was gehört hinein:** Namen, die Whisper falsch schreibt — Spielercharaktere,
   häufige NSCs, Orte. Gängige Wörter („Die Gans“, „Gregor“) kosten nur Budget.
 - **Risiko:** Ein Prompt kann Whisper in Stille oder bei Rauschen dazu bringen,

@@ -63,6 +63,8 @@ test('formatProgress renders server phases in German', () => {
   assert.equal(formatProgress({ phase: 'started', utterances: 12 }), '⏳ Server transkribiert 12 Äußerungen …');
   assert.match(formatProgress({ phase: 'joined' }), /läuft bereits/);
   assert.match(formatProgress({ phase: 'audio' }), /Audio-Archiv/);
+  assert.equal(formatProgress({ phase: 'summary' }), '⏳ Zusammenfassung der Session wird erstellt …');
+  assert.equal(formatProgress({ phase: 'summary', done: 3, total: 11 }), '⏳ Zusammenfassung der Session wird erstellt (LLM-Schritt 4/11) …');
   assert.equal(formatProgress({ phase: 'weird' }), '⏳ weird …');
 });
 

@@ -3,12 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { transcriptBody, chunkLines, capText, summarizeSession, writeSummaryToVault, latestSessionSummary } from '../src/finalize/summary.js';
+import {
+  transcriptBody, compactTranscript, chunkRecords, chunkLines, capText, partialNote,
+  summarizeSession, writeSummaryToVault, latestSessionSummary,
+} from '../src/finalize/summary.js';
+import { _resetVocabularyCache } from '../src/sttVocabulary.js';
 
-const KEYS = ['SESSION_SUMMARY_ENABLED', 'SESSION_SUMMARY_CHUNK_CHARS', 'SESSION_SUMMARY_MAX_CHARS', 'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL'];
+const KEYS = ['SESSION_SUMMARY_ENABLED', 'SESSION_SUMMARY_CHUNK_CHARS', 'SESSION_SUMMARY_MAX_CHARS', 'SESSION_SUMMARY_TIMEOUT_MS',
+  'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL', 'STT_VOCABULARY', 'STT_VOCABULARY_FILE'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
-after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
-beforeEach(() => { for (const k of KEYS) delete process.env[k]; });
+after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } _resetVocabularyCache(); });
+beforeEach(() => { for (const k of KEYS) delete process.env[k]; _resetVocabularyCache(); });
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sess-sum-'));
 const line = (i) => `\`20:${String(i % 60).padStart(2, '0')}\` **Anna (Mira):** Wir gehen nach Graufurt und reden mit Baron Kelthur über den Vertrag Nummer ${i}.`;
@@ -55,22 +60,98 @@ test('chunkLines respects the budget at line boundaries; capText cuts at a sente
   assert.equal(capText('Eins zwei drei. Vier fünf sechs sieben acht.', 30), 'Eins zwei drei.');
 });
 
-test('short transcript → single final call; long → map-reduce with progress', async () => {
+test('compactTranscript drops timestamps and markup, joins a speaker\'s consecutive lines', () => {
+  const body = [
+    '[19:44:16] **Benny (Gaglath):** _[unterbricht]_ Ein Mini-Drache,',
+    '[19:44:17] **Benny (Gaglath):** _[weiter]_ ein **Wyvern** ist gekommen.',
+    '[19:44:21] **Fabi (Rhogar):** _(getippt)_ Dann...',
+    '`20:05` **Anna (Mira):** Alte Zeitangabe.',
+    'freie Zeile ohne Sprecher',
+    '[19:45:00] **Fabi (Rhogar):** _[weiter]_',
+  ].join('\n');
+  assert.deepEqual(compactTranscript(body), [
+    { ts: '19:44', line: 'Benny (Gaglath): Ein Mini-Drache, ein Wyvern ist gekommen.' },
+    { ts: '19:44', line: 'Fabi (Rhogar): Dann...' },
+    { ts: '20:05', line: 'Anna (Mira): Alte Zeitangabe.' },
+    { ts: null, line: 'freie Zeile ohne Sprecher' },
+  ]);
+  // A monologue still breaks into lines (chunks are cut between lines).
+  const mono = Array.from({ length: 40 }, (_, i) => `[20:00:${String(i).padStart(2, '0')}] **SL:** Ein langer Satz der Spielleitung, Nummer ${i}.`).join('\n');
+  const lines = compactTranscript(mono);
+  assert.ok(lines.length > 1);
+  assert.ok(lines.every((l) => l.line.length <= 800 && l.line.startsWith('SL: ')));
+});
+
+test('chunkRecords cuts between lines and labels each chunk with its clock range', () => {
+  const rec = [{ ts: '20:00', line: 'a'.repeat(6) }, { ts: null, line: 'b'.repeat(6) }, { ts: '20:30', line: 'c'.repeat(6) }];
+  assert.deepEqual(chunkRecords(rec, 13), [
+    { text: 'aaaaaa\nbbbbbb', from: '20:00', to: '20:00' },
+    { text: 'cccccc', from: '20:30', to: '20:30' },
+  ]);
+  assert.deepEqual(chunkRecords([{ ts: '21:00', line: 'x'.repeat(25) }], 10).map((c) => c.text.length), [10, 10, 5]);
+});
+
+test('short transcript → single final call; long → map-reduce, one progress tick per call', async () => {
   const calls = [];
   const fake = async ({ messages }) => { calls.push(messages[1].content); return { content: `Zusammenfassung ${calls.length}` }; };
   assert.equal(await summarizeSession(md(5), { completeFn: fake }), 'Zusammenfassung 1');
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /^Transkript:/);
+  assert.match(calls[0], /^Transkript:\nAnna \(Mira\): Wir gehen/);
 
   calls.length = 0;
   process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
   const progress = [];
-  const out = await summarizeSession(md(80), { completeFn: fake, onProgress: (p) => progress.push(p.done) });
+  const out = await summarizeSession(md(80), { completeFn: fake, onProgress: (p) => progress.push(p) });
   const parts = calls.length - 1;
   assert.ok(parts >= 3, `expected several partial calls, got ${parts}`);
   assert.equal(out, `Zusammenfassung ${calls.length}`);
-  assert.match(calls.at(-1), /^Notizen:\nTeil 1: Zusammenfassung 1/);
-  assert.deepEqual(progress, Array.from({ length: parts }, (_, i) => i));
+  assert.match(calls[0], /^Ausschnitt 1 von \d+ \(20:00–20:\d\d Uhr\):\nAnna \(Mira\): /);
+  assert.ok(calls.slice(0, -1).every((c) => !c.includes('**') && !c.includes('`20:')), 'the LLM gets compacted lines');
+  assert.match(calls.at(-1), /^Notizen:\nTeil 1 \(20:00–20:\d\d Uhr\): Zusammenfassung 1/);
+  assert.deepEqual(progress.map((p) => [p.phase, p.done, p.total]),
+    calls.map((_, i) => ['summary', i, calls.length]), 'a tick before every call, the merge included');
+});
+
+test('the STT vocabulary is the spelling reference in every prompt', async () => {
+  const systems = [];
+  const fake = async ({ messages }) => { systems.push(messages[0].content); return { content: 'Notiz.' }; };
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  await summarizeSession(md(40), { completeFn: fake });
+  assert.ok(systems.length >= 3);
+  assert.ok(systems.every((s) => !s.includes('Korrekte Schreibweisen')), 'no vocabulary → no hint');
+
+  systems.length = 0;
+  // Longer than the 250 chars Whisper gets: the LLM gets the whole list.
+  const filler = Array.from({ length: 30 }, (_, i) => `Ortsname${i}`).join(', ');
+  process.env.STT_VOCABULARY = `Gaglath, Spugnoir, Ylva Binsenhalm, ${filler}, Wyvern`;
+  _resetVocabularyCache();
+  await summarizeSession(md(40), { completeFn: fake });
+  assert.ok(systems.length >= 3);
+  for (const s of systems) {
+    assert.match(s, /Korrekte Schreibweisen von Namen und Begriffen der Kampagne: Gaglath, Spugnoir, Ylva Binsenhalm, Ortsname0, .*, Wyvern\./);
+    assert.match(s, /falsch erkannte Varianten stillschweigend korrigieren/);
+  }
+  assert.ok(systems.some((s) => s.startsWith('Du protokollierst')), 'part prompt');
+  assert.ok(systems.at(-1).startsWith('Du schreibst die Zusammenfassung'), 'final prompt');
+});
+
+test('notes that do not fit one merge call are merged in batches first', async () => {
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  const calls = [];
+  const fake = async ({ messages }) => {
+    calls.push({ system: messages[0].content, user: messages[1].content });
+    // Every note far longer than asked → the notes overflow one merge call.
+    return { content: `${'Die Gruppe verhandelt mit Baron Kelthur. '.repeat(30)}Ende.` };
+  };
+  const out = await summarizeSession(md(80), { completeFn: fake });
+  const batch = calls.filter((c) => c.system.includes('zu einem Teil der Sitzung'));
+  assert.ok(batch.length >= 1, 'batch merges ran');
+  assert.match(batch[0].user, /^Notizen:\nTeil 1 \(/);
+  const final = calls.at(-1);
+  assert.match(final.system, /^Du schreibst die Zusammenfassung/);
+  assert.match(final.user, /^Notizen:\nTeile 1–\d+ \(20:00–/);
+  assert.ok(final.user.length <= 2500 + 40, `final input within 1.25 × chunk (${final.user.length})`);
+  assert.ok(out && !out.includes('Unvollständig'));
 });
 
 test('disabled, too short, or LLM failure → null (finalize unaffected)', async () => {
@@ -123,16 +204,74 @@ test('latestSessionSummary orders by session start, not by file time', () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('total time budget: per-call timeout shrinks, exhausted budget → null (finalize goes on)', async () => {
+test('budget running out keeps the notes: merged into a summary marked incomplete', async () => {
   process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
-  process.env.SESSION_SUMMARY_TIMEOUT_MS = '20000';
+  process.env.SESSION_SUMMARY_TIMEOUT_MS = '40000';
   let t = 0;
-  const timeouts = [];
-  const slow = async ({ timeoutMs }) => { timeouts.push(timeoutMs); t += 8000; return { content: 'Notiz' }; };
+  const calls = [];
+  const slow = async ({ timeoutMs, messages }) => {
+    calls.push({ timeoutMs, system: messages[0].content });
+    t += 8000;
+    return { content: messages[0].content.startsWith('Du schreibst') ? 'Die Gruppe erreichte Graufurt.' : 'Notiz zu Graufurt.' };
+  };
   const out = await summarizeSession(md(80), { completeFn: slow, now: () => t });
-  assert.equal(out, null, 'budget runs out before the merge call');
-  assert.equal(timeouts[0], 20000);
-  assert.equal(timeouts[1], 12000);
-  assert.equal(timeouts[2], 4000);
-  assert.equal(timeouts.length, 3);
+  // 10 s (a quarter of the budget, ≥ 2 calls) are held back for the merge.
+  assert.deepEqual(calls.map((c) => c.timeoutMs), [30000, 22000, 14000, 16000]);
+  assert.match(calls.at(-1).system, /^Du schreibst die Zusammenfassung/, 'the merge still ran');
+  assert.match(out, /^Die Gruppe erreichte Graufurt\.\n\n\(Unvollständig — Zeitbudget aufgebraucht: 3 von \d+ Abschnitten berücksichtigt, reicht bis etwa 20:\d\d Uhr\.\)$/);
+});
+
+test('no time left for the merge: the notes themselves, condensed and marked', async () => {
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  process.env.SESSION_SUMMARY_TIMEOUT_MS = '40000';
+  process.env.SESSION_SUMMARY_MAX_CHARS = '600';
+  let t = 0;
+  let n = 0;
+  const slow = async ({ messages }) => {
+    if (messages[0].content.startsWith('Du schreibst')) { t += 60_000; throw new Error('llm: timeout after 16000 ms'); }
+    t += 8000;
+    n += 1;
+    // gemma4 answered one part with Markdown bullets despite "Prosa".
+    if (n === 2) return { content: '**Ereignisse**\n*   **Kampf:** Rhogar trifft die Wyvern.\n*   Gaglath flieht.' };
+    return { content: `Notiz ${n}: Die Gruppe verhandelt in Graufurt. ${'Weitere Einzelheiten folgen hier. '.repeat(10)}` };
+  };
+  const out = await summarizeSession(md(80), { completeFn: slow, now: () => t });
+  assert.ok(out.length <= 600, `capped (${out.length})`);
+  assert.match(out, /^20:00–20:\d\d Uhr: Notiz 1: Die Gruppe verhandelt in Graufurt\./);
+  assert.match(out, /\n\n20:\d\d–20:\d\d Uhr: Ereignisse Kampf: Rhogar trifft die Wyvern\. Gaglath flieht\.\n\n/, 'every note keeps its share, Markdown flattened');
+  assert.match(out, /\n\n20:\d\d–20:\d\d Uhr: Notiz 3: /);
+  assert.match(out, /\(Unvollständig — Zeitbudget aufgebraucht: 3 von \d+ Abschnitten berücksichtigt, reicht bis etwa 20:\d\d Uhr; die Notizen wurden nicht mehr zusammengeführt\.\)$/);
+});
+
+test('a failing part is skipped (marked), two in a row end the map, none at all → null', async () => {
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  let i = 0;
+  const flaky = async ({ messages }) => {
+    i += 1;
+    if (i === 2) throw new Error('HTTP 500');
+    return { content: messages[0].content.startsWith('Du schreibst') ? 'Zusammenfassung.' : `Notiz ${i}.` };
+  };
+  const out = await summarizeSession(md(80), { completeFn: flaky });
+  assert.match(out, /^Zusammenfassung\.\n\n\(Unvollständig — LLM-Fehler: (\d+) von \d+ Abschnitten berücksichtigt\.\)$/);
+
+  i = 0;
+  const calls = [];
+  const dies = async ({ messages }) => {
+    calls.push(messages[0].content);
+    i += 1;
+    if (i >= 2) throw new Error('connect ECONNREFUSED');
+    return { content: 'Notiz zu Graufurt.' };
+  };
+  const out2 = await summarizeSession(md(80), { completeFn: dies });
+  assert.equal(calls.length, 4, 'part 1 ok, parts 2+3 fail → stop, the merge is still tried');
+  assert.match(out2, /^20:00–20:\d\d Uhr: Notiz zu Graufurt\.\n\n\(Unvollständig — LLM-Fehler: 1 von \d+ Abschnitten berücksichtigt, reicht bis etwa 20:\d\d Uhr; die Notizen wurden nicht mehr zusammengeführt\.\)$/);
+
+  assert.equal(await summarizeSession(md(80), { completeFn: async () => { throw new Error('down'); } }), null);
+});
+
+test('partialNote wording', () => {
+  assert.equal(partialNote({ covered: 7, total: 10, until: '21:47', timeUp: true }),
+    '(Unvollständig — Zeitbudget aufgebraucht: 7 von 10 Abschnitten berücksichtigt, reicht bis etwa 21:47 Uhr.)');
+  assert.equal(partialNote({ covered: 10, total: 10, timeUp: true, unmerged: true }),
+    '(Unvollständig — Zeitbudget aufgebraucht: alle 10 Abschnitte verdichtet; die Notizen wurden nicht mehr zusammengeführt.)');
 });

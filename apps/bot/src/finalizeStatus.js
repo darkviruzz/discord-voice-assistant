@@ -150,5 +150,9 @@ export function formatProgress(msg = {}) {
   if (phase === 'started') {
     return utterances ? `⏳ Server transkribiert ${utterances} Äußerungen …` : '⏳ Server transkribiert …';
   }
+  // One tick per LLM call (sections, then the merge).
+  if (phase === 'summary' && Number(total) > 0) {
+    return `⏳ Zusammenfassung der Session wird erstellt (LLM-Schritt ${Number(done) + 1}/${total}) …`;
+  }
   return PHASE_TEXT[phase] || `⏳ ${phase ?? 'läuft'} …`;
 }

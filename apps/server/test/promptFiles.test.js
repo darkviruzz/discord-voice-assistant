@@ -221,7 +221,7 @@ test('built-in summary prompts: in-game only, NPC roles kept, in-game date and p
   }
   assert.match(PART_SYSTEM, /Datum oder eine Tageszeit der Spielwelt/);
   assert.match(PART_SYSTEM, /"X ist dran" heißt nur, dass X an der Reihe ist/);
-  assert.match(FINAL_SYSTEM, /Letzte Zeile[^\n]*"Ort: … · Ingame-Datum: …"/);
+  assert.match(FINAL_SYSTEM, /Letzte Zeile[^\n]*"Ort: <Ort> · Ingame-Datum: <Datum>", ohne genanntes Datum nur "Ort: <Ort>"/);
   assert.match(FINAL_SYSTEM, /reale Datum der Sitzung ist kein Ingame-Datum/);
   assert.match(FINAL_SYSTEM, /bei kurzen Sitzungen direkt das Transkript/, 'the single-chunk path sends the transcript');
 });

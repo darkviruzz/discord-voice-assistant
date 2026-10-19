@@ -9,6 +9,7 @@ import {
 } from '../src/finalize/summary.js';
 import { _resetVocabularyCache } from '../src/sttVocabulary.js';
 import { _resetPromptCache } from '../src/promptFiles.js';
+import { tidyClosingLine } from '../src/finalize/summary.js';
 
 const KEYS = ['SESSION_SUMMARY_ENABLED', 'SESSION_SUMMARY_CHUNK_CHARS', 'SESSION_SUMMARY_MAX_CHARS', 'SESSION_SUMMARY_TIMEOUT_MS',
   'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL', 'STT_VOCABULARY', 'STT_VOCABULARY_FILE',
@@ -234,6 +235,23 @@ test('summary prompt notes missing or empty → the built-in prompts, one warnin
   assert.equal(promptWarns.length, 2, promptWarns.join('\n'));
   assert.match(promptWarns.join('\n'), /SESSION_SUMMARY_PART_PROMPT_FILE .*fehlt\.md not readable/);
   assert.match(promptWarns.join('\n'), /SESSION_SUMMARY_FINAL_PROMPT_FILE .*leer\.md is empty/);
+});
+
+// Round 3 on gemma4:12b (2026-10-19): no in-game date was mentioned and the
+// reply ended "Ort: Crossford · Ingame-Datum:".
+test('tidyClosingLine drops empty fields of the closing line, and the line when nothing is left', async () => {
+  const body = 'Die Gruppe zieht sich zurück.';
+  assert.equal(tidyClosingLine(`${body}\n\nOrt: Crossford · Ingame-Datum:`), `${body}\n\nOrt: Crossford`);
+  assert.equal(tidyClosingLine(`${body}\nOrt: Crossford · Ingame-Datum: unbekannt.`), `${body}\nOrt: Crossford`);
+  assert.equal(tidyClosingLine(`${body}\nOrt: <Ort> · Ingame-Datum: 4. Readying`), `${body}\nIngame-Datum: 4. Readying`);
+  assert.equal(tidyClosingLine(`${body}\n\nOrt: … · Ingame-Datum: …`), body, 'nothing left → no line');
+  assert.equal(tidyClosingLine(`${body}\nIngame-Datum:`), body);
+  const full = `${body}\n\nOrt: Crossford, am Nyr Dyv · Ingame-Datum: 4. Readying 576`;
+  assert.equal(tidyClosingLine(full), full, 'filled fields stay as written');
+  assert.equal(tidyClosingLine('Ort: Graufurt ist weit. Mehr nicht.'), 'Ort: Graufurt ist weit. Mehr nicht.', 'a one-line text is no closing line');
+
+  const out = await summarizeSession(md(5), { completeFn: async () => ({ content: `${body}\n\nOrt: Crossford · Ingame-Datum:` }) });
+  assert.equal(out, `${body}\n\nOrt: Crossford`);
 });
 
 test('a long final reply loses text, not its closing place/date line', async () => {

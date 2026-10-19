@@ -92,7 +92,7 @@ export const FINAL_SYSTEM = [
   ROLE_RULE,
   NAME_RULE,
   'Keine Aufzählungszeichen, keine Überschriften, keine Vorrede.',
-  'Letzte Zeile, nur mit dem, was genannt wurde: "Ort: … · Ingame-Datum: …" — eine fehlende Angabe weglassen, nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.',
+  'Letzte Zeile: wo die Gruppe am Ende ist und das Datum der Spielwelt, soweit genannt — "Ort: <Ort> · Ingame-Datum: <Datum>", ohne genanntes Datum nur "Ort: <Ort>". Nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.',
 ].join('\n');
 
 // The STT vocabulary as a spelling reference. Whisper only reads ~224 prompt
@@ -239,10 +239,25 @@ export function capText(text, limit) {
   return (sp > 0 ? head.slice(0, sp) : head).trimEnd();
 }
 
-// capText for the finished summary: its closing "Ort: … · Ingame-Datum: …"
-// line (FINAL_SYSTEM) is kept and the text before it is shortened — a plain
-// cut keeps the front and would drop exactly that line.
-const CLOSING_LINE_RE = /\n[ \t]*((?:Ort|Ingame-Datum)[ \t]*:[^\n]{1,200}?)[ \t]*$/i;
+// The closing "Ort: … · Ingame-Datum: …" line FINAL_SYSTEM asks for.
+const CLOSING_LINE_RE = /\n[ \t]*((?:Ort|Ingame-Datum)[ \t]*:[^\n]{0,200}?)[ \t]*$/i;
+// A field of that line without a value: "Ingame-Datum:", "…", "<Datum>", "unbekannt".
+const EMPTY_FIELD_RE = /^[^:]+:\s*(?:…|\.{3}|[-–—]|<[^>]*>|unbekannt|nicht genannt|keine Angabe)?\s*\.?$/i;
+
+// The closing line without empty fields, dropped when none is left. gemma4:12b
+// wrote "Ort: Crossford · Ingame-Datum:" when no date had been mentioned
+// (round 3, 2026-10-19).
+export function tidyClosingLine(text) {
+  const t = String(text || '').trim();
+  const m = t.match(CLOSING_LINE_RE);
+  if (!m) return t;
+  const line = m[1].split(/\s+[·|]\s+|\s*·\s*/).map((f) => f.trim()).filter((f) => f && !EMPTY_FIELD_RE.test(f)).join(' · ');
+  return line ? `${t.slice(0, m.index + 1)}${line}` : t.slice(0, m.index).trimEnd();
+}
+
+// capText for the finished summary: its closing line is kept and the text
+// before it is shortened — a plain cut keeps the front and would drop exactly
+// that line.
 
 export function capSummary(text, limit) {
   const t = String(text || '').trim();
@@ -393,7 +408,7 @@ export async function summarizeSession(transcriptMd, {
   try {
     if (chunks.length === 1) {
       const content = await ask(finalSystem, `Transkript:\n${chunks[0].text}\n\nHöchstens ${maxChars} Zeichen.`);
-      return capSummary(content, maxChars) || null;
+      return capSummary(tidyClosingLine(content), maxChars) || null;
     }
 
     // Map: one note per part, until time runs short or the LLM looks down.
@@ -466,7 +481,7 @@ export async function summarizeSession(transcriptMd, {
       timeUp, failed, unmerged: !text,
     }) : '';
     const room = maxChars - (marker ? marker.length + 2 : 0);
-    const body = text ? capSummary(text, room) : condenseNotes(level, room);
+    const body = text ? capSummary(tidyClosingLine(text), room) : condenseNotes(level, room);
     const secs = Math.round((now() - started) / 1000);
     if (marker) warn(`session-summary: ${calls} LLM calls in ${secs} s — incomplete: ${marker} (budget SESSION_SUMMARY_TIMEOUT_MS=${budgetMs})`);
     else log(`session-summary: ${calls} LLM calls in ${secs} s for ${chunks.length} parts`);

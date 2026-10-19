@@ -68,8 +68,9 @@ steht im Kommentarblock, was der Server selbst anhängt:
   (`LLM_JSON_FORMAT` erzwingt es bei Ollama).
 
 Die Session-Zusammenfassung endet mit einer Zeile `Ort: … · Ingame-Datum: …`,
-wenn das im Spiel genannt wurde. Beim Kürzen bleibt eine letzte Zeile, die mit
-`Ort:` oder `Ingame-Datum:` beginnt, erhalten.
+wenn das im Spiel genannt wurde. Leere Angaben darin (`Ingame-Datum:` ohne Wert)
+entfernt der Server; beim Kürzen bleibt eine letzte Zeile, die mit `Ort:` oder
+`Ingame-Datum:` beginnt, erhalten.
 
 Zwischen-Zusammenführungen (nur bei sehr langen Sessions, wenn die Notizen
 nicht in einen Aufruf passen) nutzen immer den eingebauten Text.

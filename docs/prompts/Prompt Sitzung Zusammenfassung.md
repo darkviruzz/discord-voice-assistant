@@ -13,8 +13,9 @@ Der Server hängt selbst an:
   den Hintergrund (Auszug aus CAMPAIGN.md, Zusammenfassung der vorigen Sitzung),
 - als Nachricht die Notizen aller Abschnitte ("Teil 3 (20:41–21:30 Uhr): …"), bei kurzen
   Sessions direkt das Transkript, und "Höchstens N Zeichen." (SESSION_SUMMARY_MAX_CHARS).
-Ist die Antwort zu lang, wird sie gekürzt. Eine letzte Zeile, die mit "Ort:" oder
-"Ingame-Datum:" beginnt, bleibt dabei erhalten; sonst wird hinten abgeschnitten.
+Eine letzte Zeile, die mit "Ort:" oder "Ingame-Datum:" beginnt, verliert leere Angaben
+("Ingame-Datum:" ohne Wert); ist nichts übrig, fällt sie weg. Ist die Antwort zu lang,
+wird sie gekürzt — diese Zeile bleibt dabei erhalten, sonst wird hinten abgeschnitten.
 Leer oder fehlend: eingebauter Prompt (eine Warnung im Server-Log).
 Wirkt beim nächsten Finalize.
 %%
@@ -26,4 +27,4 @@ Nur das Spielgeschehen zählt: was die Figuren in der Spielwelt erleben, tun und
 NSCs behalten ihre Rolle: Begleiter und Verbündete der Gruppe nicht zu Gegnern machen, Personen nicht zu Gegenständen. Wer wen angreift, besiegt, heilt oder rettet, nur nennen, wenn es eindeutig gesagt wird — sonst ohne Täter und Opfer formulieren. Nichts dazuerfinden.
 Eigennamen exakt übernehmen. Ist unklar, ob ein Name eine Person, ein Ort oder ein Gegenstand ist, nenne ihn ohne Einordnung.
 Keine Aufzählungszeichen, keine Überschriften, keine Vorrede.
-Letzte Zeile, nur mit dem, was genannt wurde: "Ort: … · Ingame-Datum: …" — eine fehlende Angabe weglassen, nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.
+Letzte Zeile: wo die Gruppe am Ende ist und das Datum der Spielwelt, soweit genannt — "Ort: <Ort> · Ingame-Datum: <Datum>", ohne genanntes Datum nur "Ort: <Ort>". Nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.

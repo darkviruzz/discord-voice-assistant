@@ -237,6 +237,21 @@ test('summary: SUMMARY_PROVIDER=ollama on another host keeps think:false; empty 
   assert.equal(llmEndpoint('summary').provider, 'openai');
 });
 
+// OLLAMA_URL is panel-editable: a SUMMARY_API_KEY sent there could be
+// redirected to any host from the settings panel.
+test('summary: SUMMARY_API_KEY never goes to the panel-editable OLLAMA_URL', async () => {
+  process.env.OLLAMA_URL = `${BASE}/ollama`;
+  process.env.SUMMARY_API_KEY = 'sk-sum';
+  await complete({ messages: USER, role: 'summary' });
+  assert.equal(seen[0].url, '/ollama/api/chat');
+  assert.equal(seen[0].auth, null);
+  assert.equal(summaryConfig().apiKey, false);
+  process.env.SUMMARY_BASE_URL = `${BASE}/gpu2`; // env-only → the key may go there
+  await complete({ messages: USER, role: 'summary' });
+  assert.equal(seen[1].url, '/gpu2/api/chat');
+  assert.equal(seen[1].auth, 'Bearer sk-sum');
+});
+
 test('finalize session summary calls go to the summary endpoint', async () => {
   const roles = [];
   const fake = async ({ role, model }) => { roles.push([role, model]); return { content: 'Zusammenfassung' }; };

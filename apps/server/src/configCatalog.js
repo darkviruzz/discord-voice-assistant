@@ -39,6 +39,12 @@ export const SECRET_KEY_PATTERNS = [
   /API_?KEY/i, /PRIVATE_?KEY/i, /CREDENTIAL/i,
 ];
 
+// Adressen, an die der Server ein Secret schickt (STT_/LLM_/EMBED_/TTS_/
+// SUMMARY_/ELEVENLABS_BASE_URL), sind ebenfalls nur per .env änderbar
+// (editable: false): sonst könnte, wer das Panel bedienen darf, die URL auf
+// einen eigenen Server umbiegen und den Key abgreifen. Persistierte Overrides
+// solcher Keys ignoriert der Server beim Boot (configStore.applyServerOverrides).
+// Gleiche Regel wie beim Bot (SERVER_BASE_URL/CONTROL_WS_URL ← CONTROL_BEARER).
 export function isSecretKey(key) {
   const k = String(key || '');
   return SECRET_KEY_PATTERNS.some((re) => re.test(k));
@@ -47,6 +53,11 @@ export function isSecretKey(key) {
 // Effektiver Secret-Status eines Katalog-Eintrags (Flag ODER Blacklist).
 export function isSecretEntry(entry) {
   return !!(entry && (entry.secret || isSecretKey(entry.key)));
+}
+
+// Nur per .env setzbar: Secrets und editable:false-Einträge.
+export function isEnvOnlyEntry(entry) {
+  return !!(entry && (isSecretEntry(entry) || entry.editable === false));
 }
 
 // Wie/wann eine gespeicherte Änderung tatsächlich wirksam wird. Der Wert wird
@@ -281,6 +292,7 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · STT', key: 'STT_BASE_URL',
     label: 'OpenAI-kompatible STT-URL', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt STT_API_KEY an diese Adresse.',
     desc: 'Basis-URL inkl. /v1 (z. B. http://localhost:8000/v1) — angehängt wird '
       + '/audio/transcriptions. Nur bei STT_PROVIDER=openai; leer = Fehler bei jeder '
       + 'STT-Anfrage. Wird pro STT-Anfrage gelesen.',
@@ -454,6 +466,7 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_BASE_URL',
     label: 'OpenAI-kompatible Basis-URL', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt LLM_API_KEY an diese Adresse.',
     desc: 'Nur bei LLM_PROVIDER=openai: Basis-URL inklusive /v1, z. B. '
       + 'http://localhost:8000/v1 (vLLM) — den genauen Pfad nennt die Doku des jeweiligen '
       + 'Servers. Angefragt wird <URL>/chat/completions.',
@@ -636,8 +649,9 @@ export const CATALOG = [
     secret: true, editable: false,
     desc: 'Optionaler Bearer-Token für den Zusammenfassungs-Server. Leer = LLM_API_KEY, aber '
       + 'nur, wenn die Zusammenfassung an denselben Server wie die Antworten geht — an eine '
-      + 'andere SUMMARY_BASE_URL wird LLM_API_KEY nie geschickt. Secret — hier nur Status '
-      + 'sichtbar; Änderung über .env.',
+      + 'andere SUMMARY_BASE_URL wird LLM_API_KEY nie geschickt. Ein Key geht nur an '
+      + 'SUMMARY_BASE_URL bzw. LLM_BASE_URL (beide nur per .env änderbar), nie an die im '
+      + 'Panel änderbare OLLAMA_URL. Secret — hier nur Status sichtbar; Änderung über .env.',
   },
   {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'SUMMARY_MAX_CHARS',
@@ -734,6 +748,7 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_BASE_URL',
     label: 'Embedding-Server-URL (openai)', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt EMBED_API_KEY an diese Adresse.',
     desc: 'Basis-URL inkl. /v1 für EMBED_PROVIDER=openai, z. B. http://localhost:8000/v1. '
       + 'Bei EMBED_PROVIDER=ollama ungenutzt (dann gilt OLLAMA_URL). Wird pro Anfrage gelesen.',
   },
@@ -819,6 +834,7 @@ export const CATALOG = [
   {
     scope: 'server', group: 'Server · TTS', key: 'TTS_BASE_URL',
     label: 'OpenAI-kompatible TTS-URL', type: 'string', def: '', applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt TTS_API_KEY an diese Adresse.',
     desc: 'Basis-URL des OpenAI-kompatiblen TTS-Servers inklusive /v1 (bei '
       + 'TTS_PROVIDER=openai), z. B. http://localhost:8000/v1 oder https://api.openai.com/v1. '
       + 'Angefragt wird <URL>/audio/speech. Pflicht bei openai. Wird pro TTS-Anfrage gelesen.',
@@ -890,6 +906,7 @@ export const CATALOG = [
     scope: 'server', group: 'Server · TTS', key: 'ELEVENLABS_BASE_URL',
     label: 'ElevenLabs-API-URL', type: 'string', def: 'https://api.elevenlabs.io',
     applyMode: 'live',
+    editable: false, note: 'Nur per .env änderbar: der Server schickt ELEVENLABS_API_KEY an diese Adresse.',
     desc: 'Basis-URL der ElevenLabs-API ohne /v1 (bei TTS_PROVIDER=elevenlabs). Nur ändern für '
       + 'einen regionalen Endpunkt oder einen Proxy. Wird pro TTS-Anfrage gelesen.',
   },

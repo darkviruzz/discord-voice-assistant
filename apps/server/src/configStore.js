@@ -20,7 +20,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { catalogEntry, isSecretEntry, isSecretKey } from './configCatalog.js';
+import { catalogEntry, isSecretEntry, isSecretKey, isEnvOnlyEntry } from './configCatalog.js';
 
 // Kein Import von logger.js: dieses Modul läuft im Boot-Pfad, BEVOR logger.js
 // (und dessen DEBUG-Konstante) importiert wird. Ein eigener, abhängigkeitsfreier
@@ -62,11 +62,21 @@ function writeFile(obj) {
 }
 
 // Beim Boot aufrufen (aus bootConfig.js), nachdem dotenv geladen hat.
+// Overrides von Keys, die nur per .env setzbar sind (Secrets, editable:false —
+// z. B. eine URL, an die ein API-Key geht), werden ignoriert: das Panel kann
+// sie nicht schreiben, ein Eintrag stammt also aus einer Version, in der der
+// Key noch editierbar war, oder ist von Hand eingetragen. Wie beim Bot
+// (applyOverridesAtBoot prüft BOT_KEYS).
 export function applyServerOverrides() {
   if (!_baseline) _baseline = { ...process.env };
   const { server } = readFile();
   let n = 0;
   for (const [k, v] of Object.entries(server)) {
+    if (isSecretKey(k) || isEnvOnlyEntry(catalogEntry('server', k))) {
+      console.warn(`[configStore] persistierter Override für ${k} ignoriert — nur per .env änderbar `
+        + `(${overridesFile()}; im Panel zurücksetzen entfernt den Eintrag)`);
+      continue;
+    }
     process.env[k] = String(v);
     n++;
   }

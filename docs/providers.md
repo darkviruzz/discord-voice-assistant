@@ -17,7 +17,14 @@ vLLM / vLLM-Omni, AMD Lemonade, llama.cpp-Server, LM Studio, Speaches,
 Ollamas eigenes `/v1`, oder ein Cloud-Anbieter. Die Basis-URL enthält immer den
 Versionspfad (`…/v1`); der Server hängt `/audio/transcriptions`,
 `/audio/speech`, `/chat/completions` bzw. `/embeddings` an. API-Keys sind
-optional (lokale Server brauchen meist keinen) und nur per `.env` setzbar.
+optional (lokale Server brauchen meist keinen) und nur per `.env` setzbar —
+ebenso die Basis-URLs, an die ein Key geht (`STT_BASE_URL`, `LLM_BASE_URL`,
+`EMBED_BASE_URL`, `TTS_BASE_URL`, `SUMMARY_BASE_URL`, `ELEVENLABS_BASE_URL`):
+im Settings-Panel ließe sich sonst die Adresse auf einen fremden Server
+umbiegen und der Key abgreifen. Das Panel zeigt sie nur an; ein früher dort
+gespeicherter Wert wird beim Start ignoriert (Warnung im Log, „Zurücksetzen"
+entfernt ihn). Die Adressen ohne Key (`WHISPER_URL`, `OLLAMA_URL`, `TTS_URL`)
+bleiben im Panel änderbar.
 
 Alle Schalter werden pro Anfrage gelesen: ein Wechsel im Settings-Panel
 greift ab der nächsten Anfrage.
@@ -158,7 +165,9 @@ anderen — etwa damit eine 3-h-Session auf einem größeren Modell innerhalb vo
 | `SUMMARY_API_KEY` | `LLM_API_KEY`, aber nur, wenn es derselbe Server ist |
 
 `SUMMARY_BASE_URL` und `SUMMARY_API_KEY` sind nur über `.env` änderbar, nicht
-im Panel: der Server schickt den Schlüssel an diese Adresse.
+im Panel: der Server schickt den Schlüssel an diese Adresse. Ohne
+`SUMMARY_BASE_URL` geht ein Key nur an `LLM_BASE_URL` (bei `openai`), nie an
+die im Panel änderbare `OLLAMA_URL`.
 `LLM_REASONING_EFFORT` / `LLM_CHAT_TEMPLATE_KWARGS` gelten nur für den
 Antwort-Server; `LLM_THINK` gilt für jeden Ollama-Server.
 

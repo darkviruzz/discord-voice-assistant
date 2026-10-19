@@ -77,12 +77,16 @@ export function llmEndpoint(role = 'answer') {
   }
   const raw = env('SUMMARY_PROVIDER');
   const provider = raw ? providerName(raw) : mainProvider;
-  const base = baseUrl(env('SUMMARY_BASE_URL')) || providerBase(provider);
+  const ownBase = baseUrl(env('SUMMARY_BASE_URL'));
+  const base = ownBase || providerBase(provider);
   const main = provider === mainProvider && base === providerBase(mainProvider);
+  // A key only goes to an address that is env-only itself (SUMMARY_BASE_URL,
+  // LLM_BASE_URL) — never to OLLAMA_URL, which the settings panel can change.
+  const keyed = !!ownBase || provider === 'openai';
   return {
     provider,
     base,
-    apiKey: env('SUMMARY_API_KEY') || (main && provider === 'openai' ? env('LLM_API_KEY') : ''),
+    apiKey: !keyed ? '' : env('SUMMARY_API_KEY') || (main && provider === 'openai' ? env('LLM_API_KEY') : ''),
     model: env('SUMMARY_MODEL') || providerDefaultModel(provider),
     main,
   };

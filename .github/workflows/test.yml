@@ -1,0 +1,49 @@
+name: test
+
+# Unit tests for the Node workspaces (apps/server, apps/bot) — including the
+# in-process vault RAG (apps/server/src/rag/) — and the PowerShell launcher
+# config. No GPU, Ollama or Discord needed: the RAG suites inject a
+# deterministic embedder or talk to a fake Ollama /api/embed, with a tmp vault.
+
+# push only on main: PR branches are covered by pull_request (otherwise every
+# push to a PR branch ran the whole suite twice).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+  # Windows-native launcher config (scripts/lib/VaLocalConfig.ps1): the
+  # dependency-free self-test runs under pwsh 7 (preinstalled on the runner);
+  # it is written to stay Windows PowerShell 5.1 compatible.
+  powershell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: VaLocalConfig self-test
+        shell: pwsh
+        run: ./scripts/tests/VaLocalConfig.Tests.ps1

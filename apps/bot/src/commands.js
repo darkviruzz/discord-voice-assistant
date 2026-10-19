@@ -72,6 +72,18 @@ const commands = [
     ],
   },
   {
+    name: 'recap',
+    description: 'Rabenauge fasst zusammen, was in der letzten Sitzung passiert ist',
+    options: [
+      {
+        name: 'tts',
+        description: 'Zusammenfassung zusätzlich im Voice-Channel vorlesen',
+        type: 5,
+        required: false,
+      },
+    ],
+  },
+  {
     name: 'server',
     description: 'Server-Verbindung verwalten',
     options: [

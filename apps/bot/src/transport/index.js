@@ -1,5 +1,6 @@
 import { TransportState, State } from './state.js';
 import { ControlClient } from './control.js';
+import { LinkKeeper } from './linkKeeper.js';
 import { UplinkClient } from './uplink.js';
 import { DownlinkClient } from './downlink.js';
 import { log, warn, debug } from '../logger.js';
@@ -179,24 +180,33 @@ export function start({ botId, isSessionActive } = {}) {
     }
   });
 
+  // Idle-release policy for the on-demand link (grace timer + holds). The
+  // default hasWork is the same "actively in voice" signal index.js passes to
+  // scheduleIdleRelease(); it is what the keeper re-checks when the last hold
+  // (e.g. a finalize) is released.
+  const keeper = new LinkKeeper({ release: () => disconnect(), hasWork: () => _isSessionActive() });
+
   // NOTE: we do NOT auto-connect here. The control link is opened lazily via
-  // connect()/ensureConnected() (on /join or an on-demand /ask) and closed via
-  // disconnect() (on /leave) so an idle bot keeps no server link — no endless
-  // reconnect attempts and no periodic app-rtt pings while out of voice. The
-  // watchdog above is a no-op until _isSessionActive() is true (i.e. someone
-  // is actually in voice), so it stays dormant during this idle period too.
-  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, idleReleaseTimer: null, watchdogTimer };
+  // connect()/ensureConnected() (on /join, an on-demand /ask or a finalize) and
+  // closed via disconnect() (idle release after /leave) so an idle bot keeps no
+  // server link — no endless reconnect attempts and no periodic app-rtt pings
+  // while out of voice. The watchdog above is a no-op until _isSessionActive()
+  // is true (i.e. someone is actually in voice), so it stays dormant during
+  // this idle period too.
+  _instance = { fsm, control, uplink, downlink, baseUrl, currentSessionId: null, keeper, watchdogTimer };
   return _instance;
 }
 
-// Open the control link (idempotent — control.start() resets backoff and is a
-// no-op while already connecting/connected).
+// Open the control link (idempotent — control.start() never opens a 2nd
+// socket while one is connecting/registering/ready). From DISCONNECTED it
+// starts a fresh connect; from BACKOFF it retries right away instead of
+// sitting out the remaining backoff (up to 30 s) — an explicit request for the
+// link (e.g. /join, or finalize right after SERVER_START_CMD brought the server
+// back) should not lose to the timer of an earlier failed attempt.
 export function connect() {
   if (!_instance) return;
   cancelIdleRelease();
-  // Only kick off a fresh connect from a clean stop; if we're already
-  // connecting/backing-off/ready, control is handling it (avoid a 2nd socket).
-  if (_instance.fsm.is(State.DISCONNECTED)) _instance.control.start();
+  if (_instance.fsm.is(State.DISCONNECTED) || _instance.fsm.is(State.BACKOFF)) _instance.control.start();
 }
 
 // Close the control link and stop reconnecting (uplink/downlink close via the
@@ -216,7 +226,8 @@ export function serverVersion() {
 }
 
 // Connect (if needed) and resolve once the control link is READY, or reject on
-// timeout. Used by /join and on-demand by /ask when no session is active.
+// timeout. Used by /join, on-demand by /ask when no session is active, and by
+// finalize (which may run long after the session's link was released).
 export function ensureConnected({ timeoutMs = 12000 } = {}) {
   if (!_instance) return Promise.reject(new Error('Transport nicht initialisiert (kein SERVER_BASE_URL)'));
   if (_instance.fsm.is(State.READY)) return Promise.resolve();
@@ -232,25 +243,33 @@ export function ensureConnected({ timeoutMs = 12000 } = {}) {
   });
 }
 
-// Disconnect after a grace period IF no session is keeping the link alive.
+// Disconnect after a grace period IF nothing is keeping the link alive.
 // `hasWork()` is supplied by the caller (index.js knows about active sessions)
 // and re-checked when the timer fires, so a /join during the grace window keeps
-// the connection. Calling connect()/disconnect() cancels a pending release.
+// the connection; an active holdLink() (finalize) keeps it too. Calling
+// connect()/disconnect() cancels a pending release.
 export function scheduleIdleRelease({ delayMs = 60000, hasWork = () => false } = {}) {
   if (!_instance) return;
-  cancelIdleRelease();
-  _instance.idleReleaseTimer = setTimeout(() => {
-    _instance.idleReleaseTimer = null;
-    if (!hasWork()) disconnect();
-  }, delayMs);
-  if (typeof _instance.idleReleaseTimer.unref === 'function') _instance.idleReleaseTimer.unref();
+  _instance.keeper.scheduleRelease({ delayMs, hasWork });
 }
 
 export function cancelIdleRelease() {
-  if (_instance?.idleReleaseTimer) {
-    clearTimeout(_instance.idleReleaseTimer);
-    _instance.idleReleaseTimer = null;
-  }
+  _instance?.keeper.cancelRelease();
+}
+
+// Keep the control link up for a long-running operation that needs it even
+// though no voice session is active (finalize after /leave, idle
+// auto-finalize). While held, the idle release never disconnects; releasing
+// the last hold re-applies the idle policy (grace timer, unless a session is
+// active). Does NOT open the link — pair with ensureConnected(). Returns an
+// idempotent release function (call it in a finally).
+export function holdLink(reason = 'hold') {
+  if (!_instance) return () => {};
+  return _instance.keeper.hold(reason);
+}
+
+export function isLinkHeld() {
+  return !!_instance && _instance.keeper.isHeld();
 }
 
 export function sessionStart(info) {
@@ -267,6 +286,18 @@ export function sessionEnd(sessionId) {
   _instance.currentSessionId = null;
   try { _instance.control.sessionEnd(sessionId); } catch (e) { warn('transport.sessionEnd:', e.message); }
   _instance.downlink.close();
+}
+
+// The session is over for good (finalized): stop carrying it on the link —
+// but only if it IS the link's current session (finalizing an older session
+// by id must not end a live one). Before, a finalized session stayed current:
+// every later reconnect re-sent its session_start (the server revived it and
+// logged a 2nd session_meta into its JSONL) and typed questions afterwards —
+// typically /recap — were logged into the finalized session. → ended?
+export function endSessionIfCurrent(sessionId) {
+  if (!_instance || sessionId == null || _instance.currentSessionId !== String(sessionId)) return false;
+  sessionEnd(String(sessionId));
+  return true;
 }
 
 export function sendUplinkFrame({ sessionId, userId, tsMs, opus }) {
@@ -333,9 +364,15 @@ export function finalizeSession(payload, opts) {
   return _instance.control.finalizeSession(payload, opts);
 }
 
+export { finalizeWaitLimits } from './control.js';
+
+// Subscribe to server finalize_progress messages. Returns an unsubscribe
+// function (every finalize subscribes for its own duration).
 export function onFinalizeProgress(cb) {
-  if (!_instance) return;
-  _instance.control.on('finalizeProgress', cb);
+  if (!_instance) return () => {};
+  const control = _instance.control;
+  control.on('finalizeProgress', cb);
+  return () => control.off('finalizeProgress', cb);
 }
 
 export function getSpeakerMap(guildId) {
@@ -373,6 +410,7 @@ export function speakingEnd(userId) {
 export function stop() {
   if (!_instance) return;
   try { clearInterval(_instance.watchdogTimer); } catch {}
+  try { _instance.keeper.cancelRelease(); } catch {}
   try { _instance.control.stop(); } catch {}
   try { _instance.uplink.close(); } catch {}
   try { _instance.downlink.close(); } catch {}

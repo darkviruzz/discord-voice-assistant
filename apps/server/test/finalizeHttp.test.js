@@ -285,3 +285,52 @@ test('archive file traversal attempts are refused (400) with no access outside t
   // Nothing leaked outside the archive root during the attempts.
   assert.equal(existsSync(join(archiveRoot, 'passwd')), false);
 });
+
+// ---- upload robustness ------------------------------------------------------
+
+test('a retried upload replaces the file (truncate, never append)', async () => {
+  const name = 'retry.wav';
+  const put = (buf) => fetch(url(`/finalize/upload/${SID}/${name}`), {
+    method: 'PUT', headers: { ...auth(), 'Content-Type': 'application/octet-stream' }, body: buf,
+  });
+  assert.equal((await put(Buffer.alloc(5000, 1))).status, 200);
+  const second = Buffer.from('short second attempt');
+  assert.equal((await put(second)).status, 200);
+  assert.equal(Buffer.compare(readFileSync(join(uploadRoot, SID, name)), second), 0);
+});
+
+test('an upload aborted mid-body leaves no partial file behind', async () => {
+  const name = 'aborted.wav';
+  const dest = join(uploadRoot, SID, name);
+  const req = http.request({
+    host: '127.0.0.1', port, method: 'PUT', path: `/finalize/upload/${SID}/${name}`,
+    headers: { ...auth(), 'Content-Type': 'application/octet-stream', 'Content-Length': '100000' },
+  });
+  req.on('error', () => {}); // we tear it down ourselves
+  req.write(Buffer.alloc(1000, 7));
+  const waitFor = async (cond, what) => {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(cond(), what);
+  };
+  await waitFor(() => existsSync(dest), 'partial file created while streaming');
+  req.destroy(); // client disconnects before Content-Length bytes arrived
+  await waitFor(() => !existsSync(dest), 'partial file removed after the aborted stream');
+});
+
+test('filename longer than 255 chars → 400', async () => {
+  const { status } = await putRaw({ path: `/finalize/upload/${SID}/${'a'.repeat(256)}.wav`, headers: auth(), body: Buffer.from('x') });
+  assert.equal(status, 400);
+});
+
+test('archive file with a repeated ?path= (array) → 400', async () => {
+  const res = await fetch(url(`/finalize/archive/${ARCHIVE_NAME}/file?path=transcript.md&path=manifest.json`), { headers: auth() });
+  assert.equal(res.status, 400);
+});
+
+test('archive file refuses a subdirectory that is not audio/ and a directory target', async () => {
+  for (const p of ['other/transcript.md', 'audio']) {
+    const res = await fetch(url(`/finalize/archive/${ARCHIVE_NAME}/file?path=${encodeURIComponent(p)}`), { headers: auth() });
+    assert.ok([400, 404].includes(res.status), `path=${p} → ${res.status}`);
+    assert.notEqual(res.status, 200);
+  }
+});

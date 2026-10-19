@@ -1,4 +1,6 @@
 import { transcribe } from './stt.js';
+import { sttProviderLabel } from './providers/stt.js';
+import { applyCorrections } from './sttPostprocess.js';
 import { debug, warn } from './logger.js';
 import opus from '@discordjs/opus';
 
@@ -34,6 +36,10 @@ export function pcmToWav(pcm, sampleRate = 48000, channels = 1, bitDepth = 16) {
 // pieces like " Ab"+"brechen") or glues punctuation ("Witz"+"."). Merging
 // tokens into display words gives LocalAgreement stable units — token
 // boundaries jitter between runs, word text does not.
+//
+// Word-level providers (OpenAI-compatible servers returning whole words
+// without leading spaces) are normalised to the same convention in
+// providers/stt.js (normalizeWordList) — every token arriving here follows it.
 
 export function normWord(text) {
   return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -113,7 +119,8 @@ function numberEnv(name, fallback, min = 0) {
 }
 
 // ── Streaming transcriber (LocalAgreement-2) ─────────────────────────────────
-// True streaming STT against the batch whisper.cpp server: every tick re-
+// True streaming STT against a batch STT server (whisper.cpp or any
+// OpenAI-compatible one, see providers/stt.js): every tick re-
 // transcribes the speaker's active window (start of utterance → now, minus
 // already-locked audio). Words that two consecutive hypotheses agree on are
 // COMMITTED (shown live, never retracted); once committed audio spans
@@ -151,10 +158,15 @@ export function createSttStream({
   };
 
   const windowStartSec = () => st.windowStartSample / SAMPLE_RATE;
+  // The whole utterance so far (locked audio included), not just the window:
+  // decides whether the vocabulary goes into the prompt (STT_VOCABULARY_MIN_MS).
+  const utteranceMs = (pcm48k) => (pcm48k.length / 2 / SAMPLE_RATE) * 1000;
 
+  // Locked text as context, with the correction map applied, so a near-miss
+  // ("Rhoga") is not fed back to Whisper as the spelling to continue.
   function promptText() {
     if ((process.env.STT_STREAM_PROMPT ?? 'true') === 'false') return undefined;
-    const locked = st.lockedGroups.join(' ').trim();
+    const locked = applyCorrections(st.lockedGroups.join(' ').trim());
     return locked ? locked.slice(-200) : undefined;
   }
 
@@ -223,7 +235,9 @@ export function createSttStream({
       if (typeof m === 'number') max = max === null ? m : Math.max(max, m);
     }
     return {
-      provider: 'whisper.cpp',
+      // Stamped by providers/stt.js on each result; injected test
+      // transcribers return none → the current setting.
+      provider: [...parts.map((p) => p.meta), st.lastMeta].find((m) => m?.provider)?.provider ?? sttProviderLabel(),
       mode: 'stream',
       ticks: st.ticks,
       noSpeechProbAvg: weight > 0 ? weighted / weight : null,
@@ -284,7 +298,9 @@ export function createSttStream({
       try {
         st.lastTickSamples = totalSamples;
         const window = pcm48k.subarray(st.windowStartSample * 2);
-        const { meta, words: tokens, text } = await transcribeFn(pcmToWav(window), { prompt: promptText() });
+        const { meta, words: tokens, text } = await transcribeFn(pcmToWav(window), {
+          prompt: promptText(), audioMs: utteranceMs(pcm48k),
+        });
         if (st.detached) return null;
         st.ticks++;
         st.lastMeta = meta;
@@ -395,7 +411,9 @@ export function createSttStream({
       let anyTailTimes = false;
       if (windowSec >= 0.25) {
         const window = pcm48k.subarray(st.windowStartSample * 2);
-        const { text, meta, words: tokens } = await transcribeFn(pcmToWav(window), { prompt: promptText() });
+        const { text, meta, words: tokens } = await transcribeFn(pcmToWav(window), {
+          prompt: promptText(), audioMs: utteranceMs(pcm48k),
+        });
         tailMeta = meta;
         if (Array.isArray(tokens) && tokens.length > 0) {
           let merged = mergeTokensToWords(tokens).filter((w) => !isBracketArtifact(w.text));

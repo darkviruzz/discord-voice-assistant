@@ -3,7 +3,10 @@ import path from 'path';
 import crypto from 'crypto';
 import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
-import { warn, log } from '../logger.js';
+import { summarizeSession, writeSummaryToVault } from './summary.js';
+import { resetLastSessionCache } from '../lastSession.js';
+import { postprocessUtterance } from '../sttPostprocess.js';
+import { warn, log, debug } from '../logger.js';
 
 // Default re-STT is lazy-loaded so importing the orchestrator (e.g. in tests
 // with an injected transcribeFn) does not pull in the whole server pipeline
@@ -27,6 +30,14 @@ export function verifyUploads(manifest, uploadDir) {
   const missing = [];
   const mismatched = [];
   for (const u of manifest.utterances || []) {
+    // The manifest comes from the bot: `file` must be a plain basename inside
+    // uploadDir. Anything else ('../x', 'a/b', '..') would read — and archive,
+    // where the bot can pull it — a file outside the upload dir.
+    if (typeof u.file !== 'string' || u.file === '.' || u.file === '..'
+        || path.basename(u.file) !== u.file || u.file.includes('\\')) {
+      mismatched.push(u.file);
+      continue;
+    }
     const file = path.join(uploadDir, u.file);
     if (!fs.existsSync(file)) { missing.push(u.file); continue; }
     if (u.sha256) {
@@ -44,8 +55,14 @@ export function verifyUploads(manifest, uploadDir) {
 export async function buildFinalizeModel({
   sessionId, manifest, events = [], uploadDir,
   transcribeFn = null, speakerMap = {}, verified = null, assistantName = null,
+  onProgress = null,
 }) {
   const transcribe = transcribeFn || defaultTranscribe;
+  // Progress is reporting only — a throwing callback must never fail a finalize.
+  const report = (p) => { try { onProgress?.(p); } catch { /* ignore */ } };
+  const todo = (manifest.utterances || []).filter((u) => !verified || verified.has(u.file));
+  let doneCount = 0;
+  report({ phase: 'stt', done: 0, total: todo.length });
   const asstName = assistantName || manifest.wakeWord || manifest.assistantName || undefined;
   const sessionStartMs = Number(manifest.sessionStartMs ?? sessionId);
 
@@ -59,8 +76,20 @@ export async function buildFinalizeModel({
       ({ text, words } = await transcribe(abs));
     } catch (e) {
       warn('finalize: STT failed for', u.file, '-', e.message);
+      report({ phase: 'stt', done: ++doneCount, total: todo.length });
       continue;
     }
+    report({ phase: 'stt', done: ++doneCount, total: todo.length });
+    // Same post-processing as the live pipeline: drop a pure Whisper filler,
+    // apply the correction map to the text AND the words (an interrupted
+    // utterance is rendered from its words).
+    const post = postprocessUtterance({ segments: [text], words });
+    if (post.dropped) {
+      debug(`finalize: ${u.file} dropped as Whisper filler ("${post.dropped}"): ${JSON.stringify(text)}`);
+      continue;
+    }
+    text = post.segments.join(' ');
+    words = post.words;
     if (!text || isBracketOnly(text)) continue;
     const startMs = sessionStartMs + (Number(u.startMs) || 0);
     userSpans.push({
@@ -99,7 +128,9 @@ export async function buildFinalizeModel({
 function archiveDirName(manifest, sessionStartMs, sessionId, timeZone) {
   // Prefer the human-readable bot session id; sanitize for the filesystem.
   const name = typeof manifest.sessionName === 'string' ? manifest.sessionName.replace(/[^A-Za-z0-9._-]/g, '') : '';
-  if (name) return name;
+  // '.'/'..' survive the charset filter but would resolve to the archive root
+  // itself or its parent — fall back to the date-based name instead.
+  if (name && name !== '.' && name !== '..') return name;
   const date = new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date(sessionStartMs)); // YYYY-MM-DD
@@ -114,8 +145,9 @@ export async function finalizeSession({
   transcribeFn = null, speakerMap = {},
   archiveRoot = process.env.ARCHIVE_DIR ?? './archive',
   transcriptRoot = process.env.TRANSCRIPT_DIR ?? './transcripts',
-  jsonlPath = null, opts = {}, cleanupUploadDir = true,
+  jsonlPath = null, opts = {}, cleanupUploadDir = true, onProgress = null,
 }) {
+  const report = (p) => { try { onProgress?.(p); } catch { /* reporting only */ } };
   const timeZone = opts.timeZone || process.env.FINALIZE_TZ || 'Europe/Berlin';
   const { verified, missing, mismatched } = verifyUploads(manifest, uploadDir);
   if (missing.length || mismatched.length) {
@@ -129,8 +161,9 @@ export async function finalizeSession({
 
   const model = await buildFinalizeModel({
     sessionId, manifest, events, uploadDir, transcribeFn,
-    speakerMap: mergedSpeakerMap, verified, assistantName: wakeWord,
+    speakerMap: mergedSpeakerMap, verified, assistantName: wakeWord, onProgress,
   });
+  report({ phase: 'merge' });
 
   const md = mergeTranscript(model, {
     timeZone,
@@ -166,7 +199,22 @@ export async function finalizeSession({
   fs.writeFileSync(path.join(archiveDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(archiveDir, 'speaker-map.json'), JSON.stringify(mergedSpeakerMap, null, 2));
 
+  // Session summary (LLM, best-effort — null on any failure). Written before the
+  // checksum pass below so it is part of the archive the bot pulls back.
+  report({ phase: 'summary' });
+  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report, assistantName: wakeWord });
+  if (summary) {
+    fs.writeFileSync(path.join(archiveDir, 'summary.md'), summary + '\n');
+    fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');
+    const dateLabel = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(model.sessionStartMs));
+    writeSummaryToVault(summary, { title: `${dateLabel} Session-Zusammenfassung (${dirName})`, dateLabel });
+    // The recap context ("Was war letztes Mal?", /recap) caches its archive
+    // lookup for 30 s — a /recap right after this finalize must see it.
+    resetLastSessionCache();
+  }
+
   // Audio archive (OGG/Opus). Best-effort: a failure must not lose the transcript.
+  report({ phase: 'audio' });
   let audio = { files: [], ok: false, error: null };
   try {
     audio = await buildAudioArchive({ manifest, uploadDir, archiveDir, verified, opts });
@@ -208,5 +256,6 @@ export async function finalizeSession({
     missing,
     mismatched,
     audio,
+    summary,
   };
 }

@@ -1,8 +1,8 @@
 # TODO & Ideen
 
-Backlog/Brainstorm. Priorisierter Plan: `~/.claude/plans/schau-in-die-todo-shimmying-phoenix.md`. Mental Model und Operating Modes: siehe [`README.md`](README.md).
+Backlog/Brainstorm. Aktueller Plan und Live-Test-Checkliste: [`docs/plans/next.md`](docs/plans/next.md) (erledigte Pläne: `docs/plans/archive/`, Betriebswissen: [`docs/ops-notes.md`](docs/ops-notes.md)). Mental Model und Operating Modes: siehe [`README.md`](README.md).
 
-> **Versionierung**: Bot + Server teilen `MAJOR.PHASE.PATCH` (z. B. `1.1.0` = nach Phase 1). Bump am Ende jeder Phase. Details im Plan-File.
+> **Versionierung**: Bot + Server teilen `MAJOR.PHASE.PATCH` (z. B. `1.1.0` = nach Phase 1). Bump am Ende jeder Phase.
 
 ---
 
@@ -134,23 +134,33 @@ Kern der App: vom rohen Audio + JSONL-Log zum lesbaren Markdown-Transkript.
 
 Voraussetzung: Phase-2-Session-Log enriched (Phase 3 unabhängig parallel).
 
-- [ ] **`feature/rag-service`** — neuer Python-Dienst `apps/rag/` (FastAPI + ChromaDB + Ollama-Embeddings).
-  - Vault-Scanner: parst `.md` + Frontmatter, chunked nach `##`-Sections
+- [x] **`feature/rag-service`** — neuer Python-Dienst `apps/rag/` (FastAPI + ChromaDB + Ollama-Embeddings).
+  - Vault-Scanner: parst `.md` + Frontmatter, chunked nach `##`-Sections (`apps/rag/server.py`)
   - Embeddings via Ollama (`nomic-embed-text`) — kein zusätzlicher Service nötig
-  - Filewatcher für Re-Index
+  - Filewatcher (`watchdog`) für debounced Re-Index einzelner Notes
   - Endpunkte: `POST /query`, `POST /index`, `GET /health`
-  - Voraussetzungen: `ollama pull nomic-embed-text`, `VAULT_PATH`, `CHROMA_DIR`
+  - Env: `VAULT_PATH`, `CHROMA_DIR`, `OLLAMA_URL`, `EMBED_MODEL`, `RAG_PORT`; Start/Stop via `scripts/Start-VoiceAssistant.ps1`
+  - Voraussetzungen: `ollama pull nomic-embed-text`, eigenes venv in `apps/rag/`
+  - **Score-Threshold-Filter** (2.1.0): `RAG_SCORE_THRESHOLD` (max. Cosine-Distanz, 0=identisch..2=entgegengesetzt) filtert `/query`-Treffer serverseitig (`server.py`, `_apply_threshold`), pro Request via `score_threshold` überschreibbar; `ragClient.js` liest den Env-Wert frisch pro Call und hängt ihn nur an, wenn gesetzt
+  - **Docker-Deploy** (2.1.0): `apps/rag/Dockerfile` (non-root, setpriv-Privilegien-Drop wie der Server-Container), `rag`-Service im Cloud-Compose-Stack (`deploy/docker-compose.yml`, Vault-Volume ro, eigenes `rag-chroma`-Volume, Healthcheck), `RAG_EMBED_MODEL`-Pull in `deploy/scripts/start.sh`, alle `RAG_*`-Vars in `deploy/.env.example`
 
-- [ ] **`feature/obsidian-session-start`** — Briefing beim `/join`.
-  - Server bekommt `session_start`-Event → RAG-Query mit letztem Session-Summary als Suchkontext
-  - Top-K Chunks → LLM erzeugt Briefing („Wo wir letztes Mal aufgehört haben …")
-  - Als `role: system`-Message am Anfang der `conversationHistory`
-  - Optional: Discord-Text-Nachricht mit dem Briefing
+- [x] **`feature/obsidian-per-query`** — Vault-Kontext bei jedem Wake-Word-Call.
+  - `apps/server/src/ragClient.js`: `queryRag(query, topK)` über native `fetch`, fail-soft mit Timeout (`RAG_TIMEOUT_MS`, Default 800ms)
+  - `getCampaignContext(query)` ist jetzt async: bei gesetztem `RAG_URL` semantische Suche, sonst/bei Fehler Fallback auf `CAMPAIGN.md`
+  - `buildSystemBlocks()` awaitet den Lookup; Top-K Chunks als `role: system`-Präambel (nicht in History persistiert)
+  - `RAG_SCORE_THRESHOLD` (2.1.0) filtert schwache Treffer bereits im RAG-Service weg, bevor sie hier ankommen (s. `feature/rag-service`)
 
-- [ ] **`feature/obsidian-per-query`** — Vault-Kontext bei jedem Wake-Word-Call.
-  - Async RAG-Query parallel zu STT/LLM
-  - Score-Threshold konfigurierbar
-  - Top-3 Chunks als `role: system`-Präambel (nicht in History persistiert)
+- [x] **`feature/obsidian-session-start`** — Briefing beim `/join`.
+  - Vault-Chunks als `role: system`-Message am Anfang der `conversationHistory`
+  - Ersetzt (Okt. 2026): kein automatisches /join-Briefing mehr — Finalize schreibt `summary.md`, die letzte Zusammenfassung ist Kontext für Anfragen, `/recap` auf Nachfrage
+  - Durchgängig best-effort: No-op wenn RAG aus, kein Summary vorhanden oder ein Call fehlschlägt
+  - Alle RAG-Env-Vars seit 2.1.0 im Settings-Katalog (`configCatalog.js` + `config_state` in `control.js`) — sichtbar/konfigurierbar im Web-Panel
+
+- [x] **`feat/rag-in-node`** — RAG in den Node-Server verlegt; Python-Dienst, `va-rag`-Image und pytest-CI-Job entfernt.
+  - `apps/server/src/rag/`: Frontmatter (`yaml`, rein JS), `##`-Chunking, Vault-Scan, Float32-Brute-Force-Cosinus, atomar persistierter Index (`RAG_INDEX_DIR`, Compose: `/data/rag` auf `server-data`), inkrementeller Single-Flight-Sync, `fs.watch`-Watcher + periodischer Abgleich
+  - Embeddings über `providers/embed.js` (Ollama oder OpenAI-kompatibel); `ragClient.js` entfällt, `RAG_URL` ebenso; neu: `RAG_ENABLED`, `RAG_MAX_CHUNK_CHARS`, `RAG_RESCAN_INTERVAL_MS`, `EMBED_*`
+  - Die pytest-Suite ist nach `node:test` portiert (`apps/server/test/rag*.test.js`); Doku: [`docs/rag.md`](docs/rag.md)
+  - Die Einträge oben beschreiben den historischen Python-Stand (`apps/rag/`, ChromaDB, `RAG_URL`)
 
 - [ ] **`feature/obsidian-write-notes`** *(später)* — automatische Session-Notes.
   - Format und Vault-Pfad noch offen

@@ -1,9 +1,12 @@
 import { log, debug } from './logger.js';
 import { warmUp } from './llm.js';
+import { warmRag, ragEnabled } from './rag/index.js';
 
 // Keep-warm lifecycle: while the bot is in a voice channel we want the Ollama
 // model resident in VRAM so the first wake-word query after a quiet stretch
-// isn't stalled by a cold model load (several seconds).
+// isn't stalled by a cold model load (several seconds). The same goes for the
+// RAG embedding model (when RAG is on): a cold one cannot load within the
+// query's RAG_TIMEOUT_MS, and that query falls back to CAMPAIGN.md.
 //
 // start() is called on a voice_state 'joined'/'occupied' transition, stop() on
 // 'left'/'alone'. start() fires an immediate warm-up and then re-pings on an
@@ -24,13 +27,15 @@ function intervalMs() {
 
 export function startKeepWarm() {
   if (timer) return; // already running
-  log('keep-warm: bot joined voice → warming up LLM');
+  log(`keep-warm: bot joined voice → warming up LLM${ragEnabled() ? ' + RAG embeddings' : ''}`);
   warmUp();
+  warmRag('keep-warm');
   const ms = intervalMs();
   if (ms > 0) {
     timer = setInterval(() => {
       debug('keep-warm: periodic ping');
       warmUp();
+      warmRag('keep-warm');
     }, ms);
     if (typeof timer.unref === 'function') timer.unref();
   }

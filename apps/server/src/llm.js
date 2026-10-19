@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { log, debug, warn } from './logger.js';
+import { complete, warmUp } from './providers/llm.js';
 
 // Speaker IDs for de_DE-thorsten_emotional-medium.onnx
 // 0=Fröhlich 1=Wütend 2=Angewidert 3=Betrunken
@@ -35,7 +36,7 @@ const LOADED_SYSTEM = (() => {
   return process.env.SYSTEM_PROMPT ?? DEFAULT_SYSTEM;
 })();
 
-// Parse Ollama's raw output. Returns { text, speakerId, model }.
+// Parse the model's raw output. Returns { text, speakerId, model }.
 // Handles: plain JSON, JSON inside markdown fences, plain text fallback.
 function parseResponse(raw) {
   const stripped = raw.trim()
@@ -56,47 +57,16 @@ function parseResponse(raw) {
   return { text: raw.trim(), speakerId: 4, model: 'emotional' };
 }
 
-// How long Ollama keeps the model resident in VRAM after a request. Set on
-// every chat call (and the warm-up) so the model isn't unloaded between
-// queries during an active session. Default 30m; "-1" keeps it loaded forever.
-function keepAlive() {
-  return process.env.OLLAMA_KEEP_ALIVE ?? '30m';
-}
+// Preload the model (Ollama keep-alive; no-op for OpenAI-style providers).
+export { warmUp };
 
-// Preload / keep the configured model resident in VRAM. Ollama loads the model
-// on an empty-messages /api/chat request, and `keep_alive` resets its idle
-// unload timer. Best-effort: never throws — keep-warm is an optimization, not a
-// correctness requirement. Returns true on success.
-export async function warmUp() {
-  const base  = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
-  const model  = process.env.OLLAMA_MODEL ?? 'llama3';
-  try {
-    const res = await fetch(`${base}/api/chat`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ model, messages: [], keep_alive: keepAlive(), stream: false }),
-    });
-    if (!res.ok) {
-      warn(`llm: warm-up HTTP ${res.status}`);
-      return false;
-    }
-    await res.json().catch(() => null);
-    debug(`llm: warm-up ok (model=${model}, keep_alive=${keepAlive()})`);
-    return true;
-  } catch (e) {
-    warn(`llm: warm-up failed: ${e.message}`);
-    return false;
-  }
-}
-
-// Send a query to Ollama. Returns { text, speakerId, model }.
+// Answer a query. Returns { text, speakerId, model }.
 // `history` is an array of { role, content } objects (mutable — caller manages it).
 // `systemBlocks` are extra `system` messages (campaign context, rolling summary,
 // live transcript) appended after the base system prompt — empty/blank entries
-// are dropped so an unavailable block costs nothing.
+// are dropped so an unavailable block costs nothing. Backend: providers/llm.js
+// (LLM_PROVIDER=ollama | openai).
 export async function chat(history, query, { systemBlocks = [] } = {}) {
-  const base     = (process.env.OLLAMA_URL ?? 'http://localhost:11434').replace(/\/+$/, '');
-  const model    = process.env.OLLAMA_MODEL ?? 'llama3';
   const system   = LOADED_SYSTEM;
   const maxTurns = Number(process.env.HISTORY_TURNS ?? 6);
 
@@ -114,24 +84,9 @@ export async function chat(history, query, { systemBlocks = [] } = {}) {
     debug(`llm: ${extraBlocks.length} extra system block(s), ${extraBlocks.reduce((n, b) => n + b.content.length, 0)} chars`);
   }
 
-  let res;
-  try {
-    res = await fetch(`${base}/api/chat`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ model, messages, keep_alive: keepAlive(), stream: false }),
-    });
-  } catch (e) {
-    throw new Error(`llm: connection failed: ${e.message}`);
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`llm: HTTP ${res.status}: ${body.slice(0, 200)}`);
-  }
-
-  const data   = await res.json();
-  const raw    = (data.message?.content ?? '').trim();
-  const result = parseResponse(raw);
+  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS) || 120_000;
+  const { content } = await complete({ messages, timeoutMs });
+  const result = parseResponse(content);
   log('llm: response=', JSON.stringify(result));
   return result;
 }

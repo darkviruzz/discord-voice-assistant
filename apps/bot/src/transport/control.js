@@ -8,25 +8,53 @@ import { applyConfigUpdate, reportableConfig } from '../configOverrides.js';
 
 const PROTO_VERSION = 1;
 
-const BACKOFF_BASE_MS = 2000;
-const BACKOFF_CAP_MS = 30000;
-const HB_INTERVAL_MS = 15000;
-const SERVER_QUIET_TIMEOUT_MS = 30000;
-const APP_PING_INTERVAL_MS = 30000;
-const HANDSHAKE_TIMEOUT_MS = 10000;
+// Link timings. Overridable per instance (constructor `timing`) so tests can run
+// the reconnect/handshake paths in milliseconds; production uses these.
+const DEFAULT_TIMING = Object.freeze({
+  backoffBaseMs:        2000,
+  backoffCapMs:         30000,
+  hbIntervalMs:         15000,
+  serverQuietTimeoutMs: 30000,
+  appPingIntervalMs:    30000,
+  handshakeTimeoutMs:   10000,
+  connectTimeoutMs:     8000,
+});
 
 function jitter(ms) { return Math.round(ms * (0.8 + Math.random() * 0.4)); }
-function backoff(attempt) {
-  return jitter(Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * Math.pow(2, attempt)));
+
+function intEnv(key, def, min) {
+  const n = Number(process.env[key]);
+  return Number.isFinite(n) && n > 0 ? Math.max(min, Math.round(n)) : def;
+}
+
+function fmtDuration(ms) {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
+}
+
+// How long the bot waits for a server finalize. An inactivity timeout, not a
+// fixed deadline: every finalize_progress for the session pushes the idle
+// deadline out, so only a server that has gone silent on it fails the wait
+// (the server sends a keepalive progress at least once a minute while a run
+// lasts, also through phases without ticks of their own). The old fixed 30 min
+// was too short for a 3 h session (re-STT ~25-30 min + LLM summary): the bot
+// gave up and left the session open while the server finished the transcript.
+// The overall cap only guards against a run that keeps ticking forever.
+// Read per finalize (panel: applyMode live).
+export function finalizeWaitLimits() {
+  return {
+    idleMs: intEnv('FINALIZE_IDLE_TIMEOUT_MS', 600_000, 120_000),
+    maxMs: intEnv('FINALIZE_MAX_MS', 10_800_000, 600_000),
+  };
 }
 
 export class ControlClient extends EventEmitter {
-  constructor({ baseUrl, bearer, botId, fsm }) {
+  constructor({ baseUrl, bearer, botId, fsm, timing = {} }) {
     super();
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.bearer = bearer || null;
     this.botId = botId || randomUUID();
     this.fsm = fsm;
+    this.timing = { ...DEFAULT_TIMING, ...timing };
 
     this.ws = null;
     this.attempt = 0;
@@ -50,30 +78,123 @@ export class ControlClient extends EventEmitter {
     this.reconnectTimer = null;
 
     this.pendingSession = null;
-    // cmdId → { resolve, reject, timer } for in-flight request/response calls.
+    // cmdId → { type, resolve, reject, timer, idleTimer, idleTimeoutMs,
+    // sessionId, resumable, msg, needsResend } for in-flight request/response calls.
     this.pending = new Map();
   }
 
+  _backoff(attempt) {
+    const { backoffBaseMs, backoffCapMs } = this.timing;
+    return jitter(Math.min(backoffCapMs, backoffBaseMs * Math.pow(2, attempt)));
+  }
+
   // Generic request/response over the control socket, matched by cmdId.
-  _request(type, payload = {}, { timeoutMs = 15_000 } = {}) {
+  //
+  // A reply can only arrive on the socket the request went out on, so when that
+  // socket closes a plain request is rejected right away (waiting for its
+  // timeout would just hang the caller — minutes for a finalize).
+  //
+  // `resumable` requests instead survive a dropped link: they stay pending and
+  // are RE-SENT with the SAME cmdId as soon as the link is registered again.
+  // The server de-duplicates per session (a re-sent finalize_session joins the
+  // run already in progress, or gets its cached result) and answers the cmdId
+  // it was given, so the original promise resolves. A resumable request may
+  // also be issued while the link is still (re)connecting — it then goes out on
+  // registration. Only a link that is stopped or gave up rejects it. The overall
+  // timeout keeps running across reconnects.
+  //
+  // `idleTimeoutMs` adds an inactivity timeout on top: the request also fails
+  // when no finalize_progress for it arrived for that long (each one restarts
+  // the timer, see _notePendingProgress). It runs across reconnects too — a
+  // re-sent finalize is answered with a 'joined' progress right away.
+  _request(type, payload = {}, { timeoutMs = 15_000, idleTimeoutMs = 0, resumable = false } = {}) {
     const cmdId = randomUUID();
-    if (!this._sendIfReady({ type, cmdId, ...payload })) {
+    const msg = { type, cmdId, ...payload };
+    const sent = this._sendIfReady(msg);
+    if (!sent && !(resumable && this._willReconnect())) {
       return Promise.reject(new Error('Server nicht verbunden'));
     }
+    if (!sent) log(`control: ${type} queued until the link is registered (cmdId ${cmdId})`);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(cmdId);
-        reject(new Error(`${type}: Timeout`));
+      const p = {
+        type, resolve, reject, timer: null, idleTimer: null, idleTimeoutMs,
+        sessionId: payload.sessionId != null ? String(payload.sessionId) : null,
+        resumable, msg: resumable ? msg : null, needsResend: !sent,
+      };
+      p.timer = setTimeout(() => {
+        this._rejectPending(cmdId, new Error(idleTimeoutMs > 0
+          ? `${type}: Timeout (Obergrenze ${fmtDuration(timeoutMs)} erreicht)`
+          : `${type}: Timeout`));
       }, timeoutMs);
-      timer.unref?.();
-      this.pending.set(cmdId, { resolve, reject, timer });
+      p.timer.unref?.();
+      this.pending.set(cmdId, p);
+      if (idleTimeoutMs > 0) this._armIdleTimer(cmdId, p);
     });
+  }
+
+  // (Re)start a request's inactivity timer.
+  _armIdleTimer(cmdId, p) {
+    clearTimeout(p.idleTimer);
+    p.idleTimer = setTimeout(() => {
+      this._rejectPending(cmdId, new Error(`${p.type}: Timeout (${fmtDuration(p.idleTimeoutMs)} ohne Fortschritt vom Server)`));
+    }, p.idleTimeoutMs);
+    p.idleTimer.unref?.();
+  }
+
+  // A finalize_progress is a sign of life of that finalize → restart the idle
+  // timer of every request waiting on it. Matched by cmdId OR sessionId: the
+  // server sends progress to all bots keyed by session, and a request that
+  // joined a run started by an earlier request sees that run's cmdId.
+  _notePendingProgress(msg) {
+    const sessionId = msg.sessionId != null ? String(msg.sessionId) : null;
+    for (const [cmdId, p] of this.pending) {
+      if (!(p.idleTimeoutMs > 0)) continue;
+      if (cmdId === msg.cmdId || (sessionId !== null && p.sessionId === sessionId)) this._armIdleTimer(cmdId, p);
+    }
+  }
+
+  // True while the link is up or on its way back (connecting, handshaking,
+  // waiting out a backoff — or READY with a socket that is just closing, whose
+  // close event then schedules the reconnect). DISCONNECTED means stopped,
+  // never started or gave up — nothing will come back on its own.
+  _willReconnect() {
+    return !this.stopped && !this.giveUp && !this.fsm.is(State.DISCONNECTED);
+  }
+
+  // The socket closed but the client reconnects: plain requests can no longer be
+  // answered → reject; resumable ones wait for the re-send on registration.
+  _suspendPending(reason) {
+    for (const [cmdId, p] of this.pending) {
+      if (p.resumable) {
+        p.needsResend = true;
+        log(`control: ${p.type} (cmdId ${cmdId}) kept pending across reconnect`);
+        continue;
+      }
+      this._rejectPending(cmdId, new Error(`Server-Verbindung unterbrochen (${p.type}${reason ? `: ${reason}` : ''})`));
+    }
+  }
+
+  // Re-send resumable requests after a reconnect, with their original cmdId.
+  _resendPending() {
+    for (const [cmdId, p] of this.pending) {
+      if (!p.resumable || !p.needsResend) continue;
+      if (this._send(p.msg)) {
+        p.needsResend = false;
+        log(`control: re-sent ${p.type} (cmdId ${cmdId}) after reconnect`);
+      }
+    }
+  }
+
+  // The link is gone for good (stop() / PROTO_MISMATCH) → nothing can be answered.
+  _failAllPending(err) {
+    for (const cmdId of [...this.pending.keys()]) this._rejectPending(cmdId, err);
   }
 
   _resolvePending(cmdId, value) {
     const p = this.pending.get(cmdId);
     if (!p) return false;
     clearTimeout(p.timer);
+    clearTimeout(p.idleTimer);
     this.pending.delete(cmdId);
     p.resolve(value);
     return true;
@@ -83,14 +204,23 @@ export class ControlClient extends EventEmitter {
     const p = this.pending.get(cmdId);
     if (!p) return false;
     clearTimeout(p.timer);
+    clearTimeout(p.idleTimer);
     this.pending.delete(cmdId);
     p.reject(err);
     return true;
   }
 
+  // Explicit (re)start — a fresh attempt: resets the backoff and a previous
+  // PROTO_MISMATCH give-up (e.g. hit once during a rolling server update; before
+  // this reset the bot could never reconnect again until a process restart, not
+  // even via /join). Idempotent: no 2nd socket while one is connecting/
+  // registering/ready; while waiting out a backoff it reconnects immediately.
   start() {
     this.stopped = false;
-    this.attempt = 0; // fresh start (e.g. new session) → reset backoff
+    this.giveUp = false;
+    this.attempt = 0;
+    if (this.ws) return;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this._connect();
   }
 
@@ -99,10 +229,16 @@ export class ControlClient extends EventEmitter {
     this._clearTimers();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.ws) {
-      try { this.ws.close(1000, 'bye'); } catch {}
+      // Detach first: the close event of this socket arrives later and is then
+      // ignored (see the stale-socket guard in _connect), so it can neither
+      // schedule a reconnect nor touch a socket opened by a later start().
+      const ws = this.ws;
       this.ws = null;
+      try { ws.close(1000, 'bye'); } catch {}
     }
     this.fsm.set(State.DISCONNECTED);
+    // Nothing reconnects after an explicit stop → no reply can arrive any more.
+    this._failAllPending(new Error('Server-Verbindung beendet'));
   }
 
   ack(cmdId, ok = true, error, extra = {}) {
@@ -169,9 +305,18 @@ export class ControlClient extends EventEmitter {
   }
 
   // Request server-side finalize. Resolves with the server's finalize_result.
-  // Re-STT of long sessions can take minutes → long timeout.
-  finalizeSession(payload = {}, { timeoutMs = 30 * 60_000 } = {}) {
-    return this._request('finalize_session', payload, { timeoutMs });
+  // Re-STT of long sessions can take half an hour and more → waits as long as
+  // finalize_progress keeps coming (see finalizeWaitLimits). Resumable: a link
+  // drop mid-finalize re-sends the request with the same cmdId after the
+  // reconnect; the server joins it to the run in progress (or answers from its
+  // short-lived result cache) instead of starting over.
+  finalizeSession(payload = {}, { timeoutMs, idleTimeoutMs } = {}) {
+    const limits = finalizeWaitLimits();
+    return this._request('finalize_session', payload, {
+      timeoutMs: timeoutMs ?? limits.maxMs,
+      idleTimeoutMs: idleTimeoutMs ?? limits.idleMs,
+      resumable: true,
+    });
   }
 
   // Speaker-map read/write (server-persisted, per guild).
@@ -219,20 +364,22 @@ export class ControlClient extends EventEmitter {
         debug('control: connect timeout, terminating');
         ws.terminate();
       }
-    }, 8000);
+    }, this.timing.connectTimeoutMs);
     ws.once('open',  () => clearTimeout(connectTimeout));
     ws.once('close', () => clearTimeout(connectTimeout));
 
     ws.on('open', () => {
+      if (this.ws !== ws) return; // superseded (stop() while connecting)
       debug('control: socket open, awaiting hello');
       this.fsm.set(State.REGISTERING);
       this.handshakeTimer = setTimeout(() => {
         warn('control: handshake timeout');
         try { ws.close(4000, 'HANDSHAKE_TIMEOUT'); } catch {}
-      }, HANDSHAKE_TIMEOUT_MS);
+      }, this.timing.handshakeTimeoutMs);
     });
 
     ws.on('message', (data) => {
+      if (this.ws !== ws) return; // late frame on a socket stop() already dropped
       this.lastServerMsgAt = Date.now();
       let msg;
       try { msg = JSON.parse(data.toString()); }
@@ -244,17 +391,24 @@ export class ControlClient extends EventEmitter {
 
     ws.on('close', (code, reason) => {
       const r = reason && reason.toString();
+      // A socket stop() already detached (or one replaced by a newer start())
+      // must not clear the current socket's timers, fail its requests or
+      // schedule a reconnect behind the caller's back.
+      if (this.ws !== ws) { debug('control: stale socket closed', code, r || ''); return; }
       log('control: closed', code, r || '');
       this._clearTimers();
       this.ws = null;
 
       if (code === 4002) {
-        warn('control: PROTO_MISMATCH — refusing to reconnect');
+        // Until the next explicit start() (/join, finalize, /ask) — see start().
+        warn('control: PROTO_MISMATCH — not reconnecting until the next explicit start');
         this.giveUp = true;
         this.fsm.set(State.DISCONNECTED);
+        this._failAllPending(new Error('Server-Protokoll inkompatibel (PROTO_MISMATCH)'));
         return;
       }
       if (code === 4001) warn('control: AUTH_FAILED');
+      this._suspendPending(r || `close ${code}`);
       this._scheduleReconnect();
     });
 
@@ -299,6 +453,7 @@ export class ControlClient extends EventEmitter {
           debug('control: re-emitting session_start after reconnect');
           this._send({ type: 'session_start', cmdId: randomUUID(), ...this.pendingSession });
         }
+        this._resendPending();
         return;
       }
       case 'pong': {
@@ -329,6 +484,7 @@ export class ControlClient extends EventEmitter {
         return;
       }
       case 'finalize_progress': {
+        this._notePendingProgress(msg);
         this.emit('finalizeProgress', msg);
         return;
       }
@@ -379,25 +535,26 @@ export class ControlClient extends EventEmitter {
   _startHeartbeats() {
     this._clearTimers();
 
+    const { hbIntervalMs, appPingIntervalMs, serverQuietTimeoutMs } = this.timing;
     this.hbTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       try { this.ws.ping(); } catch (e) { debug('control: ping err', e.message); }
-    }, HB_INTERVAL_MS);
+    }, hbIntervalMs);
     this.hbTimer.unref?.();
 
     this.appPingTimer = setInterval(() => {
       this._send({ type: 'ping', t: Date.now() });
-    }, APP_PING_INTERVAL_MS);
+    }, appPingIntervalMs);
     this.appPingTimer.unref?.();
 
     this.quietTimer = setInterval(() => {
       if (!this.ws) return;
       const since = Date.now() - this.lastServerMsgAt;
-      if (since > SERVER_QUIET_TIMEOUT_MS) {
+      if (since > serverQuietTimeoutMs) {
         warn(`control: server quiet for ${since}ms, terminating`);
         try { this.ws.terminate(); } catch {}
       }
-    }, HB_INTERVAL_MS);
+    }, hbIntervalMs);
     this.quietTimer.unref?.();
   }
 
@@ -414,7 +571,7 @@ export class ControlClient extends EventEmitter {
       return;
     }
     this.fsm.set(State.BACKOFF);
-    const delay = backoff(this.attempt);
+    const delay = this._backoff(this.attempt);
     this.attempt++;
     debug(`control: reconnect in ${delay}ms (attempt ${this.attempt})`);
     this.reconnectTimer = setTimeout(() => {

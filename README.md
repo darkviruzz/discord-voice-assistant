@@ -83,7 +83,7 @@ Aufruf im Browser: `http://<server>:7440/transcript/`
 * **Wort-für-Wort-Live-Rendering**: Beim Streaming-STT blenden neue Wörter von unscharf nach scharf ein; noch unbestätigte Hypothesen-Wörter sind gedimmt + kursiv und werden beim Bestätigen „fest" (Server-`stableWords`). Korrigiert die Erkennung ein Wort im unbestätigten Schwanz nachträglich, remountet es mit Blur-in; zurückgezogene Wörter verschwimmen hinaus. Ein blinkendes Caret zeigt die laufende Äußerung an.
 * **Unterbrecher-Blasen**: Wer einem laufenden Monolog (oder Rabenauges Antwort) dazwischenredet, erscheint als eigene Blase **neben** der unterbrochenen — vertikal verankert an der Wortzeile, an der die Unterbrechung passierte (`floatInto` vom Server: Wort-Zeitstempel bzw. TTS-Wiedergabeposition). Nichts wird geteilt oder verworfen — alle Äußerungen bleiben vollständig protokolliert (JSONL/Finalize unverändert). Wortgenaue **Wake-Word-** (Teal-Glow) und **Stop-Markierung** (rot) direkt im Text.
 * **Debug-Modus** (`?debug=1` oder Button): Millisekunden-Zeitstempel, Roh-Chunks mit Split-Tags (natural/forced/stream), STT-Diagnostik-Fußzeile pro Blase (`no_speech_prob`, Dauer, Anker), einklappbarer **Session-Header** aus `session_meta` (Channel, Start, Wake-Word, Stop-Phrases, LLM-/STT-/TTS-Modelle, Versionen, Clock-Offset). Alles aus dem JSONL → funktioniert live und für vergangene Sessions.
-* **Settings-Panel (⚙)**: Laufzeit-Konfiguration von Server UND Bot direkt aus der UI. Das Panel ist **vollständig dynamisch**: es rendert ausschließlich den Katalog aus `apps/server/src/configCatalog.js` (Label, Doku, Typ/Widget, Wirkungs-Badge, Persistenz-Status). **Neue Einstellungen entstehen ausschließlich durch einen Katalog-Eintrag** — Beschreibung in den Code, Panel zieht nach (bot-scope-Keys zusätzlich in die `BOT_KEYS`-Whitelist in `apps/bot/src/configOverrides.js`). Änderungen wirken dauerhaft (Override-Layer `config.overrides.json`) oder nur temporär; Bot-Werte werden über den Control-Kanal gepusht und lokal im Bot persistiert. Der Bot meldet nach jedem Connect/Update seine **Ist-Konfiguration** (`config_state`) zurück — das Panel zeigt echte Bot-Werte und markiert Drift zum gespeicherten Wunsch (⏳). **Secrets** (Namens-Blacklist: `TOKEN`/`SECRET`/`BEARER`/`PASS(WORD)`/`API_KEY`/`CREDENTIAL` …) verlassen nie einen Prozess: API liefert nur „gesetzt?", Schreiben ist gesperrt, der Bot-Report enthält sie nur als Boolean.
+* **Settings-Panel (⚙)**: Laufzeit-Konfiguration von Server UND Bot direkt aus der UI. Das Panel ist **vollständig dynamisch**: es rendert ausschließlich den Katalog aus `apps/server/src/configCatalog.js` (Label, Doku, Typ/Widget, Wirkungs-Badge, Persistenz-Status). **Neue Einstellungen entstehen ausschließlich durch einen Katalog-Eintrag** — Beschreibung in den Code, Panel zieht nach (bot-scope-Keys zusätzlich in die `BOT_KEYS`-Whitelist in `apps/bot/src/configOverrides.js`). Änderungen wirken dauerhaft (Override-Layer `config.overrides.json`) oder nur temporär; Bot-Werte werden über den Control-Kanal gepusht und lokal im Bot persistiert. Der Bot meldet nach jedem Connect/Update seine **Ist-Konfiguration** (`config_state`) zurück — das Panel zeigt echte Bot-Werte und markiert Drift zum gespeicherten Wunsch (⏳). **Secrets** (Namens-Blacklist: `TOKEN`/`SECRET`/`BEARER`/`PASS(WORD)`/`API_KEY`/`CREDENTIAL` …) verlassen nie einen Prozess: API liefert nur „gesetzt?", Schreiben ist gesperrt, der Bot-Report enthält sie nur als Boolean. Ebenso nur per `.env` änderbar sind die Adressen, an die ein Secret geht (`STT_`/`LLM_`/`EMBED_`/`TTS_`/`SUMMARY_`/`ELEVENLABS_BASE_URL`, beim Bot `SERVER_BASE_URL`/`CONTROL_WS_URL`) — sonst ließe sich ein Key über das Panel auf einen fremden Server umleiten. Persistierte Overrides solcher Keys ignorieren Server und Bot beim Start.
 
 Endpunkte (alle unter `/transcript`, hinter der Basic-Auth):
 
@@ -195,6 +195,8 @@ SUMMARY_MAX_CHARS=2000
 # OBSIDIAN_VAULT_PATH=/pfad/zum/vault
 CAMPAIGN_CONTEXT_FILE=CAMPAIGN.md
 CAMPAIGN_CONTEXT_MAX_CHARS=6000
+RAG_ENABLED=true
+EMBED_MODEL=nomic-embed-text
 
 TTS_PROVIDER=piper
 TTS_URL=http://localhost:5000
@@ -238,6 +240,7 @@ Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster 
 | `STT_STREAM_MIN_WINDOW_MS` | `1000` | Mindest-Audio, bevor der Streamer das erste Mal transkribiert (sehr kurze Fenster liefern unbrauchbare Hypothesen). |
 | `STT_STREAM_TRIM_SECONDS` | `15` | Ab so vielen Sekunden bestätigten Audios wird das Fenster an der letzten Satzgrenze fixiert. |
 | `STT_STREAM_PROMPT` | `true` | Fixierten Text als Whisper-Decoder-Prompt mitgeben (konsistente Erkennung über die Fenstergrenze). |
+| `STT_VOCABULARY` / `STT_VOCABULARY_FILE` | leer | Eigennamen der Kampagne (kommagetrennt bzw. als Datei im Vault), die jeder Transkription — live wie Finalize — als Prompt vorangestellt werden, damit Namen richtig geschrieben erkannt werden. Kandidaten: `npm run vocab:stt`. Details und Risiken: [`docs/providers.md`](docs/providers.md#namen-vokabular-stt_vocabulary-stt_vocabulary_file). |
 
 > **GPU-Portabilität (AMD heute, NVIDIA/Cloud später):** Der Server spricht nur die whisper.cpp-HTTP-API (`WHISPER_URL`). whisper.cpp gibt es mit identischer API als **Vulkan**-Build (AMD, aktuelles Setup) und als **CUDA/cuBLAS**-Build (NVIDIA, z. B. Cloud-Instanz mit H100) — beim Umzug wechselt nur das Binary bzw. die URL, am Server-Code ändert sich nichts. Gemessen auf der RX 6800 XT (Vulkan, medium-q5_0, warm): 10 s Audio ≈ 0,6 s, 30 s ≈ 1,8 s (16–24× Echtzeit) — genug Headroom für den 1-s-Tick.
 
@@ -245,10 +248,12 @@ Der Live-Pfad transkribiert **ohne Chunk-Grenzen**: Das wachsende Audio-Fenster 
 
 #### LLM
 
+Anbieter-Wahl (`LLM_PROVIDER=ollama|openai`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_MS`) und die übrigen Provider (STT, TTS, Embeddings): [`docs/providers.md`](docs/providers.md).
+
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434` | URL des Ollama-Servers. |
-| `OLLAMA_MODEL` | `llama3` | Zu verwendendes Ollama-Modell. Muss zuvor mit `ollama pull <modell>` geladen worden sein (z. B. `llama3.2`). |
+| `OLLAMA_MODEL` | `llama3.2` | Zu verwendendes Ollama-Modell. Muss zuvor mit `ollama pull <modell>` geladen worden sein. |
 | `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. Relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`). Hat Vorrang vor `SYSTEM_PROMPT`. |
 | `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
 | `HISTORY_TURNS` | `6` | Anzahl der Gesprächs-Runden (User+Assistant je = 1 Turn), die als Kontext an Ollama übergeben werden. Höhere Werte = besserer Kontext, aber mehr Token-Verbrauch. |
@@ -266,17 +271,35 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `LIVE_FOLD_CHARS` | `3000` | Wie viele Zeichen pro Faltung (vom ältesten Ende) in die Zusammenfassung wandern. |
 | `LIVE_RENDER_MAX_CHARS` | `6000` | Obergrenze der Zeichen, die das Live-Transkript im Prompt belegt (neueste Zeilen bevorzugt). |
 | `LIVE_FOLD_MIN_INTERVAL_MS` | `0` | Mindestabstand zwischen zwei Faltungen (Drosselung). `0` = keine Drosselung. |
-| `SUMMARY_MODEL` | *(= `OLLAMA_MODEL`)* | Optionales separates Ollama-Modell für die Zusammenfassung. Leer = dasselbe Modell wie für Antworten. |
+| `SUMMARY_MODEL` | *(= Antwort-Modell)* | Optionales separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize. Leer = dasselbe Modell wie für Antworten (`OLLAMA_MODEL` bzw. `LLM_MODEL`). |
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
-| `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults. Nötig, wenn `CAMPAIGN_CONTEXT_FILE` ein relativer Pfad ist. |
-| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Feature deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
-| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). |
+| `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der Vault-Suche (RAG) und Basis für ein relatives `CAMPAIGN_CONTEXT_FILE`. |
+| `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn RAG aus ist, der Index noch nicht steht oder die Vault-Suche nichts liefert). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
+| `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für die RAG-Treffer pro Anfrage. |
+
+#### RAG (semantische Vault-Suche, Phase 4)
+
+Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines JavaScript — kein eigener Dienst, kein Python) und liefert pro Wake-Word-Query die relevantesten Abschnitte statt des statischen `CAMPAIGN.md`. Embeddings kommen von Ollama (`nomic-embed-text`) oder einem OpenAI-kompatiblen Server; der Vektor-Index liegt in `RAG_INDEX_DIR`, übersteht Neustarts und wird per Datei-Watcher aktuell gehalten. Solange der Index nicht steht oder Embeddings fehlschlagen, degradiert der Server lautlos auf die Datei. Details: [`docs/rag.md`](docs/rag.md).
+
+| Variable | Standard | Beschreibung |
+|---|---|---|
+| `RAG_ENABLED` | `true` | Vault-Suche an/aus — wirksam nur mit gesetztem `OBSIDIAN_VAULT_PATH`. `false` = nur `CAMPAIGN.md`. |
+| `EMBED_PROVIDER` | `ollama` | `ollama` (`/api/embed` auf `OLLAMA_URL`) oder `openai` (OpenAI-kompatibles `/embeddings` auf `EMBED_BASE_URL` inkl. `/v1`, optional `EMBED_API_KEY`). |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding-Modell (bei Ollama vorher `ollama pull nomic-embed-text`). Wechsel → Index wird verworfen und neu aufgebaut. |
+| `EMBED_KEEP_ALIVE` | `30m` | Wie lange Ollama das Embedding-Modell geladen hält (sonst reißt die erste Abfrage nach einer Pause das Timeout). |
+| `RAG_TIMEOUT_MS` | `800` | Zeitbudget pro RAG-Abfrage (Embedding der Frage + Suche); danach Fallback auf die Datei — die Wake-Word-Pipeline wartet höchstens so lange. |
+| `RAG_SCORE_THRESHOLD` | — | Maximale Cosine-Distanz (1 − Cosinus-Ähnlichkeit, 0–2, kleiner = ähnlicher) eines Treffers. Leer = kein Filter. Startwert ~0.5 (nomic-embed-text: gute Treffer meist ~0.2–0.45; `DEBUG=1` loggt die Distanzen). Treffer werden wie `CAMPAIGN.md` auf `CAMPAIGN_CONTEXT_MAX_CHARS` gekappt. |
+| `RAG_MAX_CHUNK_CHARS` | `2000` | Max. Zeichen pro Vault-Abschnitt (Notizen werden an `##` geteilt, lange Abschnitte zusätzlich). Änderung → jede Notiz wird einmal neu eingebettet. |
+| `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
+| `RAG_RESCAN_INTERVAL_MS` | `300000` | Kompletter Vault-Abgleich zusätzlich zum Datei-Watcher (`0` = aus). Unveränderte Notizen kosten keine Embeddings. |
+| `LAST_SESSION_CONTEXT_ENABLED` | `true` | Zusammenfassung der letzten finalisierten Session (`summary.md`) als Kontext bei jeder Anfrage — für „Was war letztes Mal?“ bzw. `/recap`; nur auf Nachfrage, keine Begrüßung beim `/join`. |
+| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks. |
 
 #### TTS (Text-to-Speech)
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
-| `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `elevenlabs` für die ElevenLabs-Cloud-API. |
+| `TTS_PROVIDER` | `piper` | TTS-Backend: `piper` für lokalen Piper/KokoroTTS-Server, `openai` für einen OpenAI-kompatiblen `/audio/speech`-Server, `elevenlabs` für die ElevenLabs-Cloud-API (Details: [`docs/providers.md`](docs/providers.md)). |
 | `TTS_URL` | `http://localhost:5000` | URL des lokalen TTS-Servers (nur bei `TTS_PROVIDER=piper`). Erwartet `POST /tts/synthesize` mit JSON `{text, model, speaker_id, length_scale, noise_scale, noise_w_scale}` → chunked `audio/pcm-s16le`. |
 | `ELEVENLABS_API_KEY` | — | API-Key für ElevenLabs (nur bei `TTS_PROVIDER=elevenlabs`). |
 | `ELEVENLABS_VOICE_ID` | `EXAVITQu4vr4xnSDxMaL` | Voice-ID für ElevenLabs. Standard ist eine englische Männerstimme; für Deutsch eine passende Stimme aus dem ElevenLabs-Katalog wählen. |
@@ -396,23 +419,31 @@ WantedBy=multi-user.target
 ### Server (Windows)
 
 ```powershell
-# im Repo-Root
-npm install
-cp apps/server/.env.example apps/server/.env
-# .env ausfüllen (CONTROL_BEARER, Pfade, Wake-Word)
+# im Repo-Root: geführte Einrichtung — erkennt vorhandene Installationen,
+# fragt fehlende Pfade ab (Whisper, Piper, Stimmen, Ollama-Modelle inkl.
+# Embedding-Modell, Obsidian-Vault), prüft sie und schreibt %USERPROFILE%\.config\va\deploy.env
+# sowie die passenden Werte in apps\server\.env (jeweils mit Sicherung).
+.\scripts\Setup-VoiceAssistant.ps1
 
-# Alle Dienste starten (Whisper + Piper minimiert, Server im Vordergrund)
+# Nur prüfen, nichts ändern (Doktor-Modus, Exit 1 bei Fehlern):
+.\scripts\Setup-VoiceAssistant.ps1 -Check
+
+# Alle Dienste starten (Whisper + Piper minimiert, Server inkl. Vault-Suche im Vordergrund)
 .\scripts\Start-VoiceAssistant.ps1
 
 # Alternativ: 3 Split-Panes in Windows Terminal (Debugging)
 .\scripts\Start-VoiceAssistant.ps1 -Mode all
 
-# Alternativ: Hintergrundprozesse ohne Fenster (Autostart)
+# Alternativ: Hintergrundprozesse ohne Fenster (Autostart, so startet der Bot per SSH)
 .\scripts\Start-VoiceAssistant.ps1 -Mode silent
 ```
 
-**Pfade anpassen:** Die Variablen `$WhisperDir`, `$PiperDir` etc. am Anfang von
-[`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) auf dein System anpassen.
+**Pfade:** stehen nicht mehr im Startskript, sondern in
+`%USERPROFILE%\.config\va\deploy.env` (Keys `VA_WHISPER_DIR`, `VA_WHISPER_MODEL`,
+`VA_PIPER_PYTHON`, `PIPER_VOICES_DIR`, `VA_VAULT_PATH`, …; Defaults und Layering in
+[`scripts/lib/VaLocalConfig.ps1`](scripts/lib/VaLocalConfig.ps1)). Ein falscher Pfad
+bricht den Start sofort mit konkreter Meldung ab, statt still in einen Timeout zu laufen.
+`.\deploy\va.ps1 env` zeigt jeden Wert mit seiner Herkunft.
 
 ### System-Prompt als Datei einrichten
 
@@ -473,6 +504,7 @@ Siehe `docs/phase-3-manual-tests.md` für die vollständige manuelle Test-Checkl
 * Wake-Word sprechen: *„Rabenauge, wer ist Baron Kelthur?"* → Bot antwortet per Sprache im Voice-Channel.
 * Textfrage ohne Vorlesen: `/ask frage:Wer ist Baron Kelthur?` oder `@Botname Wer ist Baron Kelthur?`.
 * Textfrage mit Voice-Ausgabe: `/ask frage:Wer ist Baron Kelthur? tts:true`. Der Textpfad nutzt dieselbe LLM-/History-Pipeline wie Wake-Word-Anfragen, überspringt aber STT/Wake-Word-Erkennung.
+* Rückblick: `/recap` (optional `tts:true`) — Rabenauge fasst die zuletzt finalisierte Session zusammen (aus deren `summary.md`). Getippte Fragen werden immer im Kanal beantwortet, unabhängig von `DISCORD_POST_REPLIES`.
 
 Nach Änderungen an Slash-Commands muss der Bot neu registriert werden:
 
@@ -500,7 +532,7 @@ Setup-Anleitung für die drei lokalen AI-Services.
 | Ollama | 11434 | Text → Antwort (LLM) | llama3.2 |
 | Piper | 5000 | Text → Sprache (TTS) | Piper + FastAPI |
 
-Alle drei Services müssen laufen bevor der Discord-Server gestartet wird.
+Whisper, Ollama und Piper müssen laufen bevor der Discord-Server gestartet wird. Die Vault-Suche (RAG) ist kein eigener Dienst: sie läuft im Discord-Server und braucht nur das Embedding-Modell in Ollama (`ollama pull nomic-embed-text`); ohne es degradiert der Server auf `CAMPAIGN.md`.
 
 ---
 
@@ -632,6 +664,9 @@ ollama pull llama3.2
 
 # Optional: Größeres Modell für bessere Antwortqualität (nutzt mehr VRAM)
 # ollama pull llama3.1:8b
+
+# Embedding-Modell für die Vault-Suche (RAG im Server, ~270 MB)
+ollama pull nomic-embed-text
 ```
 
 **3. Installierte Modelle prüfen**
@@ -743,7 +778,8 @@ Die Python-Dependencies sind in [`services/piper/requirements.txt`](services/pip
 
 **3. Umgebungsvariablen**
 
-Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch:
+Das Startskript [`scripts/Start-VoiceAssistant.ps1`](scripts/Start-VoiceAssistant.ps1) setzt diese automatisch
+(Werte aus `%USERPROFILE%\.config\va\deploy.env`, eingerichtet per `Setup-VoiceAssistant.ps1`):
 
 | Variable | Wert | Beschreibung |
 |----------|------|--------------|
@@ -973,7 +1009,7 @@ Scope-Klärung abgeschlossen (Mai 2026, siehe „Hauptzweck" und „Operating Mo
 1. **Phase 1 — Quick Wins** *(in Arbeit)*: Version-Anzeige im Bot-Status, Whisper `temperature=0.2` + `no_speech_prob`-Diagnostik.
 2. **Phase 2 — Core Workflows** *(implementiert, Praxistest ausstehend)*: `/ask`-Text-Command, Server-Auto-Start via SSH bei `/join`, angereicherter Session-Log mit Schema-v1-Struktur.
 3. **Phase 3 — Finalize-Pipeline**: `/finalize`-Command, chronologisch korrektes Transkript-Merge mit Monolog-Splitting (Whisper-Token-Timestamps + Per-User-Spuren), OGG/Opus-Audio-Archiv, optional LLM-Summary.
-4. **Phase 4 — RAG + Obsidian**: Python-RAG-Service (FastAPI + ChromaDB + Ollama-Embeddings), Vault-Briefing bei `/join`, Vault-Kontext pro Wake-Word-Query.
+4. **Phase 4 — RAG + Obsidian**: Vault-Suche im Node-Server (reines JS, Ollama-/OpenAI-kompatible Embeddings, persistenter Vektor-Index — ursprünglich als Python-Dienst mit FastAPI + ChromaDB gebaut), Vault-Kontext pro Anfrage; „Was war letztes Mal?“ bzw. `/recap` aus der Session-Zusammenfassung des letzten Finalize (auf Nachfrage — das frühere Vault-Briefing bei `/join` ist entfallen).
 5. **Phase 5 — Web-UI**: Browser-View für das laufende Transkript mit Auto-Reload (Debugging + Spieler-Begleit-Display).
 
 Die Stränge **Finalize (Phase 3)** und **RAG/Obsidian (Phase 4)** sind voneinander unabhängig und können parallel entwickelt werden.

@@ -11,6 +11,7 @@ Das JSON-Format muss bleiben: der Server liest "text", "speaker_id" und "model" 
 Antwort. Ohne JSON wird die Antwort als Klartext mit neutraler Stimme vorgelesen.
 Die Kontextblöcke hängt der Server selbst an. Ihre Überschriften stehen im Abschnitt
 KONTEXT; wer sie umbenennt, ändert nur diesen Text, nicht die Blöcke.
+Markdown-Zeichen und Regieanweisungen wie *(flüstert)* entfernt der Server vor dem Vorlesen.
 Leer oder fehlend: SYSTEM_PROMPT bzw. der eingebaute Prompt (eine Warnung im Server-Log).
 Wirkt bei der nächsten Antwort.
 %%

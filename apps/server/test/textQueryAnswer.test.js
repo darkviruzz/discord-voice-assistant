@@ -87,3 +87,10 @@ test('/recap: the last finalized session summary reaches the LLM as a system blo
   assert.match(system, /Minen von Khundrukar/);
   assert.equal(chatMessages()[0].answer, 'Ihr seid aus den Minen geflohen.');
 });
+
+// Live test 2026-10-20: the direction in front was read aloud and posted.
+test('the channel gets the answer without stage directions or markdown markers', async () => {
+  llmReply = () => ({ json: { message: { content: '{"text":"*(Mit zitternder Stimme und hastiger Atmung)* Oh Gott... **bitte**...","speaker_id":7}' } } });
+  await runTextPipeline({ question: 'Spiele den verängstigten Gefangenen.', channelId: 'c5', source: 'slash' });
+  assert.equal(chatMessages()[0].answer, 'Oh Gott... bitte...');
+});

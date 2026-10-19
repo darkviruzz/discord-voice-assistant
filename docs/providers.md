@@ -258,6 +258,28 @@ ist: `LLM_REASONING_EFFORT` (OpenAI-Standard, z. B. vLLM mit gpt-oss, Ollama
 `/v1`) bzw. `LLM_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}` (vLLM,
 llama.cpp-Server, SGLang mit Qwen3 & Co.).
 
+### Antworttext vor der Sprachausgabe
+
+Im Rollenspiel schreibt `gemma4:12b` trotz Persona-Regel Regieanweisungen,
+z. B. `*(Mit zitternder Stimme und hastiger Atmung)* Oh Gott... bitte...`
+(Live-Test 2026-10-20). Piper las sie mit vor. Deshalb bereinigt der Server
+den Text jeder Antwort (`apps/server/src/answerText.js`), bevor er vorgelesen,
+in den Kanal gepostet und im Transkript und Verlauf gespeichert wird:
+
+- `**fett**`, `*kursiv*`, `_kursiv_` im Satz: die Zeichen fallen weg, die
+  Wörter bleiben.
+- `*(…)*`, `*[…]*` und `(*…*)` fallen immer weg.
+- `*seufzt*`, `(flüstert)` oder `[lacht]` als eigener Abschnitt fallen weg:
+  am Anfang, zwischen zwei Sätzen oder am Ende.
+- Klammern im Satz bleiben, z. B. „Baron Kelthur (Herr von Rabenstein)
+  herrscht …“. Ebenso ein ganzer Satz in Klammern oder eine Klammer mit mehr
+  als 15 Wörtern.
+
+Stimme und Stimmung kommen weiter aus `speaker_id` und `model`. Eine Antwort,
+die nur aus einer Regieanweisung besteht, behält ihre Wörter ohne die Zeichen.
+Das Server-Log zeigt den Originaltext (`llm: removed markdown/stage directions
+from …`).
+
 ### Eigener Server für die Zusammenfassungen
 
 Die rollende und die Session-Zusammenfassung laufen standardmäßig über

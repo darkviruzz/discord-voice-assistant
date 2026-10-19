@@ -57,6 +57,14 @@ test('a plain-text reply is spoken as-is with the neutral voice', async () => {
   assert.deepEqual(await chat([], 'q'), { text: 'Ich weiß es leider nicht.', speakerId: 4, model: 'emotional' });
 });
 
+// Live test 2026-10-20: Piper read "*(Mit zitternder Stimme …)*" aloud.
+test('stage directions and markdown markers are removed from the answer text', async () => {
+  reply.content = '{"text":"*(Mit zitternder Stimme und hastiger Atmung)* Oh Gott... bitte...","speaker_id":7,"model":"emotional"}';
+  assert.deepEqual(await chat([], 'q'), { text: 'Oh Gott... bitte...', speakerId: 7, model: 'emotional' });
+  reply.content = '*seufzt* Das ist **sehr** ärgerlich.';
+  assert.equal((await chat([], 'q')).text, 'Das ist sehr ärgerlich.', 'plain-text fallback too');
+});
+
 test('request: base system prompt, non-blank system blocks in order, trimmed history, then the query', async () => {
   process.env.OLLAMA_MODEL = 'qwen2.5';
   process.env.HISTORY_TURNS = '1';

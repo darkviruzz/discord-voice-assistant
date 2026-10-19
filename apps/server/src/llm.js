@@ -1,6 +1,7 @@
 import { log, debug } from './logger.js';
 import { complete, warmUp, llmProvider } from './providers/llm.js';
 import { promptText } from './promptFiles.js';
+import { cleanAnswerText } from './answerText.js';
 
 // Speaker IDs for de_DE-thorsten_emotional-medium.onnx
 // 0=Fröhlich 1=Wütend 2=Angewidert 3=Betrunken
@@ -49,6 +50,8 @@ export function systemPrompt() {
 
 // Parse the model's raw output. Returns { text, speakerId, model }.
 // Handles: plain JSON, JSON inside markdown fences, plain text fallback.
+// `text` is cleaned for speaking (answerText.js: no markdown markers, no stage
+// directions); TTS, the Discord copy, transcript and history all get that.
 function parseResponse(raw) {
   const stripped = raw.trim()
     .replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/,  '');
@@ -56,7 +59,7 @@ function parseResponse(raw) {
     const obj = JSON.parse(stripped);
     if (typeof obj.text === 'string' && obj.text.trim()) {
       return {
-        text:      obj.text.trim(),
+        text:      spokenText(obj.text),
         speakerId: Number.isInteger(obj.speaker_id)
           ? Math.max(0, Math.min(7, obj.speaker_id)) : 4,
         model:     obj.model === 'high' ? 'high' : 'emotional',
@@ -65,7 +68,13 @@ function parseResponse(raw) {
   } catch {}
   // Plain-text fallback — neutral emotional voice.
   debug('llm: response was not JSON, using plain text fallback');
-  return { text: raw.trim(), speakerId: 4, model: 'emotional' };
+  return { text: spokenText(raw), speakerId: 4, model: 'emotional' };
+}
+
+function spokenText(raw) {
+  const text = cleanAnswerText(raw);
+  if (text !== raw.trim()) log('llm: removed markdown/stage directions from', JSON.stringify(raw.trim()));
+  return text;
 }
 
 // Preload the model (Ollama keep-alive; no-op for OpenAI-style providers).

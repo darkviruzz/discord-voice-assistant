@@ -196,7 +196,107 @@ Servers unklar, `TTS_RESPONSE_FORMAT=wav` setzen. Komprimierte Antworten
 | `LLM_THINK` | nur `ollama`: Feld `think` jeder Anfrage. `false` (Default) = direkt antworten, `true` = denken, `low`/`medium`/`high` = Stufe (gpt-oss), `auto` = weglassen |
 | `LLM_REASONING_EFFORT` | nur `openai`, nur wenn gesetzt: `reasoning_effort` (z. B. `none`, `minimal`, `low`) |
 | `LLM_CHAT_TEMPLATE_KWARGS` | nur `openai`, nur wenn gesetzt: JSON-Objekt als `chat_template_kwargs`, z. B. `{"enable_thinking":false}` |
+| `LLM_JSON_FORMAT` | Antworten als JSON `{text, speaker_id, model}` erzwingen: `auto` (Default) = Schema bei `ollama`, nichts bei `openai`; `schema`, `json`, `off` |
+| `LLM_PRIME`, `LLM_PRIME_DELAY_MS` | Antwort-Prompt vorwärmen (siehe unten): `auto` (Default) = an bei `ollama`; Wartezeit nach einer Änderung, Default 2500 ms |
+| `LLM_PROMPT_BUDGET_CHARS` | Obergrenze des ganzen Antwort-Prompts in Zeichen, Default 22000, `0` = aus (siehe [Prompt-Budget](#prompt-budget)) |
 | `SUMMARY_PROVIDER`, `SUMMARY_BASE_URL`, `SUMMARY_API_KEY` | optional eigener Server für beide Zusammenfassungen (siehe unten) |
+
+### Antwortzeit: Prompt-Reihenfolge und Vorwärmen
+
+Gemessen am 2026-10-19 (gemma4:12b, Ollama 0.40.6 auf Vulkan, RX 6800 XT):
+- Das Erzeugen ist schnell, etwa 34 Tokens/s.
+- Das Einlesen des Prompts ist langsam, etwa 330 Tokens/s.
+- Ein voller Antwort-Prompt mit rund 5k Tokens braucht deshalb etwa 15 s, bevor
+  das erste Wort kommt.
+
+Ollamas llama.cpp-Server hat einen Prompt-Cache. Bei gemma4 kann er wegen der
+Sliding-Window-Attention aber nur an Sicherungspunkten kurz vor dem Ende eines
+Prompts weitermachen. Die frühere Reihenfolge hat ihn nie getroffen: Die
+RAG-Treffer standen an zweiter Stelle, und es wurden jedes Mal alle Tokens neu
+eingelesen.
+
+Der Antwort-Prompt ist darum so aufgebaut:
+1. System-Prompt.
+2. Fester Teil: `CAMPAIGN.md` (nur ohne RAG), letzte Session, rollende
+   Zusammenfassung, Live-Transkript.
+3. Verlauf.
+4. Eine Nachricht mit den neuesten Transkriptzeilen, den RAG-Treffern und der
+   Frage.
+
+Während einer Sprach-Session schickt der Server die Teile 1–3 nach jeder
+Änderung vorab mit einem erzeugten Token (`LLM_PRIME`). Eine Frage verarbeitet
+dann nur noch Teil 4.
+
+| Messung | Ergebnis |
+|---|---|
+| Frage mit vorgewärmtem Prompt | 1,6k von 5,6k Tokens eingelesen, 8,6 s gesamt (vorher ~18 s) |
+| Vorwärmen nach einer Antwort | ~4 s im Hintergrund |
+| Vorwärmen nach neuen Zeilen | ~1 s im Hintergrund |
+
+Der größte Rest sind die RAG-Treffer (`CAMPAIGN_CONTEXT_MAX_CHARS`, 6000
+Zeichen ≈ 1,5k Tokens). Ein kleineres Budget macht jede Antwort schneller.
+
+Flash Attention (`OLLAMA_FLASH_ATTENTION=1` als Benutzer-Umgebungsvariable,
+danach Ollama neu starten) läuft mit gemma4 auf Vulkan. Das Einlesen wurde damit
+nicht messbar schneller (336 statt ~334 Tokens/s), schadet aber auch nicht.
+
+### Prompt-Budget
+
+Ollama läuft mit 8192 Tokens Kontext (`OLLAMA_CONTEXT_LENGTH=8192`, der Server
+schickt kein `num_ctx`), und deutscher Text braucht mit gemma4 etwa 3,2 Zeichen
+pro Token. Spät in einer langen Session kam der Antwort-Prompt auf rund 29k
+Zeichen (≈ 9,1k Tokens): Persona ~3,1k, drei Session-Zusammenfassungen ~5,8k,
+rollende Zusammenfassung 2k, Live-Transkript 6k, zehn Verlaufsrunden, drei
+RAG-Treffer 6k. Das ist mehr als der ganze Kontext, bevor die Antwort beginnt.
+
+`LLM_PROMPT_BUDGET_CHARS` (Default 22000 ≈ 6,9k Tokens, `0` = aus) begrenzt
+die Zeichen aller Nachrichten zusammen. Der Rest des Kontexts bleibt für die
+Chat-Vorlage und die Antwort. Gekürzt wird so, dass der vorgewärmte Anfang
+möglichst lange gültig bleibt (`apps/server/src/answerPrompt.js`):
+
+1. **Vorab, beim Vorwärmen:** Der Anfang (System-Prompt bis Verlauf) wird gegen
+   das Budget abzüglich einer Reserve gekürzt. Die Reserve ist
+   `CAMPAIGN_CONTEXT_MAX_CHARS` für die RAG-Treffer plus 1000 Zeichen für die
+   neuesten Zeilen und die Frage. Reihenfolge:
+   1. die ältesten Session-Zusammenfassungen (die neueste bleibt);
+   2. die ältesten Verlaufsrunden (2 bleiben);
+   3. ein Teil der RAG-Reserve (bis auf den Anteil eines Treffers);
+   4. die ältesten Zeilen des Live-Transkripts.
+
+   Wächst der Session-Kontext, fallen alte Sessions also schon beim Vorwärmen
+   im Hintergrund weg und nicht erst, wenn eine Frage wartet. Spät in der
+   Session sind weit zurückliegende Sessions ohnehin weniger wichtig.
+   Vorwärmen und Antwort rechnen den Anfang aus denselben Daten und kommen
+   deshalb auf denselben Anfang.
+2. **Bei der Frage:** Erst gehen die schwächsten RAG-Treffer (einer bleibt).
+   Das betrifft nur den hinteren Teil, der vorgewärmte Anfang bleibt gültig.
+   Nur wenn der hintere Teil größer als die Reserve ist, wird weiter vorne
+   gekürzt (Reihenfolge wie oben), zuletzt bei den neuesten Zeilen.
+3. **Hysterese:** Eine weggelassene Session-Zusammenfassung kommt in derselben
+   Sprach-Session nicht zurück. So springt der vorgewärmte Anfang nicht hin
+   und her.
+
+Ohne Vorwärmen (`LLM_PRIME` aus, getippte Frage ohne Sprach-Session) gibt es
+keinen Cache zu schonen. Dann wird der echte Prompt in einem Durchgang gekürzt,
+in der Reihenfolge aus Schritt 1.
+
+Ändert sich, was gekürzt wird, schreibt der Server eine INFO-Zeile. Solange
+alles gleich bleibt, schreibt er nichts:
+
+```
+prompt budget: 23.4k > 22k chars — dropped session 14.09.2026, history 10→6 → 21.7k
+```
+
+Steht dort `≤` und „front kept short for the prime“, passte der echte Prompt
+zwar, aber die Reserve für die größten RAG-Treffer oder die Hysterese hält den
+Anfang kurz.
+
+Empfehlung für 8192 Tokens Kontext: `LLM_PROMPT_BUDGET_CHARS=22000` mit
+`LAST_SESSION_CONTEXT_COUNT=3`, `LAST_SESSION_CONTEXT_MAX_CHARS=6000` und
+`HISTORY_TURNS=10`. Zu Beginn der Session gehen alle drei Sessions mit. Spät
+bleibt die neueste, und der Verlauf wird kürzer. Ein kleineres
+`CAMPAIGN_CONTEXT_MAX_CHARS` (z. B. 4500) verkleinert die Reserve: Ältere
+Sessions bleiben dann länger drin, und jede Antwort wird schneller.
 
 ### Denkphase (Reasoning-Modelle)
 
@@ -216,6 +316,28 @@ Server lehnt unbekannte Felder ab. Deshalb wird dort nur gesendet, was gesetzt
 ist: `LLM_REASONING_EFFORT` (OpenAI-Standard, z. B. vLLM mit gpt-oss, Ollama
 `/v1`) bzw. `LLM_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}` (vLLM,
 llama.cpp-Server, SGLang mit Qwen3 & Co.).
+
+### Antworttext vor der Sprachausgabe
+
+Im Rollenspiel schreibt `gemma4:12b` trotz Persona-Regel Regieanweisungen,
+z. B. `*(Mit zitternder Stimme und hastiger Atmung)* Oh Gott... bitte...`
+(Live-Test 2026-10-20). Piper las sie mit vor. Deshalb bereinigt der Server
+den Text jeder Antwort (`apps/server/src/answerText.js`), bevor er vorgelesen,
+in den Kanal gepostet und im Transkript und Verlauf gespeichert wird:
+
+- `**fett**`, `*kursiv*`, `_kursiv_` im Satz: die Zeichen fallen weg, die
+  Wörter bleiben.
+- `*(…)*`, `*[…]*` und `(*…*)` fallen immer weg.
+- `*seufzt*`, `(flüstert)` oder `[lacht]` als eigener Abschnitt fallen weg:
+  am Anfang, zwischen zwei Sätzen oder am Ende.
+- Klammern im Satz bleiben, z. B. „Baron Kelthur (Herr von Rabenstein)
+  herrscht …“. Ebenso ein ganzer Satz in Klammern oder eine Klammer mit mehr
+  als 15 Wörtern.
+
+Stimme und Stimmung kommen weiter aus `speaker_id` und `model`. Eine Antwort,
+die nur aus einer Regieanweisung besteht, behält ihre Wörter ohne die Zeichen.
+Das Server-Log zeigt den Originaltext (`llm: removed markdown/stage directions
+from …`).
 
 ### Eigener Server für die Zusammenfassungen
 

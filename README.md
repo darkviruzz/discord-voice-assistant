@@ -254,9 +254,10 @@ Anbieter-Wahl (`LLM_PROVIDER=ollama|openai`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_A
 |---|---|---|
 | `OLLAMA_URL` | `http://localhost:11434` | URL des Ollama-Servers. |
 | `OLLAMA_MODEL` | `llama3.2` | Zu verwendendes Ollama-Modell. Muss zuvor mit `ollama pull <modell>` geladen worden sein. |
-| `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. Relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`). Hat Vorrang vor `SYSTEM_PROMPT`. |
-| `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
+| `SYSTEM_PROMPT_FILE` | — | Pfad zu einer UTF-8-Textdatei mit dem System-Prompt, z. B. `./prompt.txt`. **Empfohlen** — kein Escaping nötig, da Dateiinhalt direkt gelesen wird. `./…` = relativ zum Arbeitsverzeichnis beim Serverstart (`apps/server/`), sonst relativ zu `OBSIDIAN_VAULT_PATH` (eine Vault-Notiz geht, siehe [`docs/prompts/`](docs/prompts/README.md)). Wird pro Anfrage gelesen. Hat Vorrang vor `SYSTEM_PROMPT`. |
+| `SYSTEM_PROMPT` | *(eingebaut)* | System-Prompt als Inline-String in der `.env`. Fallback wenn `SYSTEM_PROMPT_FILE` nicht gesetzt oder nicht lesbar. Bei komplexen Prompts mit Anführungszeichen oder JSON-Syntax schwer zu escapen — `SYSTEM_PROMPT_FILE` bevorzugen. |
 | `HISTORY_TURNS` | `6` | Anzahl der Gesprächs-Runden (User+Assistant je = 1 Turn), die als Kontext an Ollama übergeben werden. Höhere Werte = besserer Kontext, aber mehr Token-Verbrauch. |
+| `LLM_PROMPT_BUDGET_CHARS` | `22000` | Obergrenze des ganzen Antwort-Prompts in Zeichen (`0` = aus), damit er ins Kontextfenster passt (Deutsch ≈ 3,2 Zeichen/Token; 22000 ≈ 6,9k Tokens bei 8192 Tokens Kontext). Darüber fallen zuerst die ältesten Session-Zusammenfassungen weg, dann alte Verlaufsrunden, dann schwache RAG-Treffer, zuletzt alte Live-Transkript-Zeilen — Details: [`docs/providers.md`](docs/providers.md#prompt-budget). |
 | `OLLAMA_KEEP_ALIVE` | `30m` | Wie lange Ollama das Modell nach einer Anfrage im VRAM hält. Wird bei jeder Chat-Anfrage und beim Keep-Warm gesetzt, damit das Modell zwischen Wake-Word-Queries nicht entladen wird. `-1` = dauerhaft geladen, `0` = sofort entladen. |
 | `OLLAMA_KEEP_WARM_INTERVAL_MS` | `240000` | Intervall (ms) für periodische Keep-Warm-Pings, solange der Bot im Voice-Channel ist. Hält das Modell auch in langen Gesprächspausen warm. `0` oder negativ deaktiviert die periodischen Pings (das `keep_alive` jeder echten Query wirkt weiterhin). |
 
@@ -273,6 +274,7 @@ Das Live-Transkript der laufenden Runde (alle Sprecher, nicht nur Wake-Word-Anfr
 | `LIVE_FOLD_MIN_INTERVAL_MS` | `0` | Mindestabstand zwischen zwei Faltungen (Drosselung). `0` = keine Drosselung. |
 | `SUMMARY_MODEL` | *(= Antwort-Modell)* | Optionales separates Modell für die rollende Zusammenfassung und die Session-Zusammenfassung beim Finalize. Leer = dasselbe Modell wie für Antworten (`OLLAMA_MODEL` bzw. `LLM_MODEL`). |
 | `SUMMARY_MAX_CHARS` | `2000` | Maximale Länge der rollenden Zusammenfassung. |
+| `LIVE_SUMMARY_PROMPT_FILE` | — | Eigener Prompt für die rollende Zusammenfassung, z. B. eine Vault-Notiz. Leer = eingebaut. Ebenso für das Finalize: `SESSION_SUMMARY_PART_PROMPT_FILE`, `SESSION_SUMMARY_FINAL_PROMPT_FILE`. Vorlagen und Pfadregeln: [`docs/prompts/`](docs/prompts/README.md). |
 | `OBSIDIAN_VAULT_PATH` | — | Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der Vault-Suche (RAG) und Basis für ein relatives `CAMPAIGN_CONTEXT_FILE`. |
 | `CAMPAIGN_CONTEXT_FILE` | `CAMPAIGN.md` | Datei mit dem statischen Kampagnen-Kontext (Variante A — Fallback, wenn RAG aus ist, der Index noch nicht steht oder die Vault-Suche nichts liefert). Absoluter Pfad oder relativ zu `OBSIDIAN_VAULT_PATH`. Relativ ohne gesetztes Vault → Datei-Fallback deaktiviert. Wird mit mtime-Check gecacht, Edits greifen ohne Neustart. |
 | `CAMPAIGN_CONTEXT_MAX_CHARS` | `6000` | Obergrenze der Zeichen des Kampagnen-Kontexts (vom Anfang der Datei, die wichtigste Information zuerst). Gilt auch für die RAG-Treffer pro Anfrage. |
@@ -293,7 +295,8 @@ Der Server indexiert den Obsidian-Vault selbst (`apps/server/src/rag/`, reines J
 | `RAG_INDEX_DIR` | `./data/rag` | Speicherort des Index (`index.bin`); im Docker-Stack `/data/rag` auf dem `server-data`-Volume. Löschen ist gefahrlos (Neuaufbau). |
 | `RAG_RESCAN_INTERVAL_MS` | `300000` | Kompletter Vault-Abgleich zusätzlich zum Datei-Watcher (`0` = aus). Unveränderte Notizen kosten keine Embeddings. |
 | `LAST_SESSION_CONTEXT_ENABLED` | `true` | Zusammenfassung der letzten finalisierten Session (`summary.md`) als Kontext bei jeder Anfrage — für „Was war letztes Mal?“ bzw. `/recap`; nur auf Nachfrage, keine Begrüßung beim `/join`. |
-| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks. |
+| `LAST_SESSION_CONTEXT_COUNT` | `1` | Wie viele der neuesten Sessions (1–5) mitgehen, neueste zuerst, jede mit Datum („Letzte Sitzung“, „Vorletzte Sitzung“). Empfohlen `2` — für „Fasse die letzten beiden Sessions zusammen“; die Vault-Suche kennt kein „neueste zuerst“. |
+| `LAST_SESSION_CONTEXT_MAX_CHARS` | `2500` | Obergrenze dieses Kontextblocks; bei mehreren Sessions fair aufgeteilt (was eine kurze nicht braucht, bekommen die längeren). |
 
 #### TTS (Text-to-Speech)
 
@@ -472,6 +475,12 @@ SYSTEM_PROMPT_FILE=./prompt.txt
 ```
 
 `prompt.txt` enthält kampagnenspezifische Inhalte und sollte ins `.gitignore`.
+
+Der Prompt kann auch eine Notiz im Obsidian-Vault sein (Pfad ohne `./` = relativ
+zu `OBSIDIAN_VAULT_PATH`; Frontmatter und `%%Kommentare%%` werden entfernt). Die
+Datei wird pro Anfrage gelesen, Änderungen greifen bei der nächsten Antwort.
+Vorlagen für alle vier Prompts (Persona, Session- und Live-Zusammenfassung):
+[`docs/prompts/`](docs/prompts/README.md).
 
 ## Nutzung (ohne Server)
 

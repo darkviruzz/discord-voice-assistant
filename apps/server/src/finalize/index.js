@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
-import { summarizeSession, writeSummaryToVault } from './summary.js';
+import { summarizeSession, writeSummaryToVault, latestSessionSummary } from './summary.js';
 import { resetLastSessionCache } from '../lastSession.js';
 import { postprocessUtterance } from '../sttPostprocess.js';
 import { warn, log, debug } from '../logger.js';
@@ -202,7 +202,12 @@ export async function finalizeSession({
   // Session summary (LLM, best-effort — null on any failure). Written before the
   // checksum pass below so it is part of the archive the bot pulls back.
   report({ phase: 'summary' });
-  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report, assistantName: wakeWord });
+  // Background for the summary: what happened in the session before this one
+  // (not this one's own old summary on a re-finalize, not a later session's).
+  const previousSummary = latestSessionSummary(archiveRoot, {
+    excludeArchiveName: dirName, beforeMs: model.sessionStartMs,
+  })?.text ?? '';
+  const summary = await (opts.summarizeFn ?? summarizeSession)(md, { onProgress: report, assistantName: wakeWord, previousSummary });
   if (summary) {
     fs.writeFileSync(path.join(archiveDir, 'summary.md'), summary + '\n');
     fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');

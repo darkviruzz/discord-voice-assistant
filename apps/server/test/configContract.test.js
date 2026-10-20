@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CATALOG, isSecretEntry } from '../src/configCatalog.js';
-import { lastSessionContextEnabled, lastSessionContextMaxChars } from '../src/lastSession.js';
+import { lastSessionContextEnabled, lastSessionContextMaxChars, lastSessionContextCount } from '../src/lastSession.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverDir = path.resolve(here, '..');
@@ -46,7 +46,7 @@ const KNOWN_DIVERGENT_FALLBACKS = {
   DATA_DIR: 'catalog entry is the bot\'s DATA_DIR (/opt/...); both processes fall back to ./data',
 };
 
-const READ_RE = /process\.env\.([A-Z][A-Z0-9_]+)|process\.env\[\s*'([A-Z][A-Z0-9_]+)'\s*\]|\b(?:env|envStr|envPositiveInt|intEnv|numberEnv|envList)\(\s*'([A-Z][A-Z0-9_]+)'/g;
+const READ_RE = /process\.env\.([A-Z][A-Z0-9_]+)|process\.env\[\s*'([A-Z][A-Z0-9_]+)'\s*\]|\b(?:env|envStr|envPositiveInt|intEnv|numberEnv|envList|promptText)\(\s*'([A-Z][A-Z0-9_]+)'/g;
 const FALLBACK_RES = [
   /process\.env\.([A-Z][A-Z0-9_]+)\s*(?:\?\?|\|\|)\s*(?:'([^']*)'|(-?[\d_.]+))/g,
   /Number\(process\.env\.([A-Z][A-Z0-9_]+)\)\s*\|\|\s*(-?[\d_.]+)()/g,
@@ -111,16 +111,16 @@ test('code fallbacks == catalog defaults (literal fallbacks in server and bot co
 });
 
 test('last-session context defaults == catalog (not a literal fallback the scan sees)', () => {
-  const saved = { e: process.env.LAST_SESSION_CONTEXT_ENABLED, m: process.env.LAST_SESSION_CONTEXT_MAX_CHARS };
-  delete process.env.LAST_SESSION_CONTEXT_ENABLED;
-  delete process.env.LAST_SESSION_CONTEXT_MAX_CHARS;
+  const keys = ['LAST_SESSION_CONTEXT_ENABLED', 'LAST_SESSION_CONTEXT_MAX_CHARS', 'LAST_SESSION_CONTEXT_COUNT'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
   try {
     const def = (k) => CATALOG.find((e) => e.scope === 'server' && e.key === k).def;
     assert.equal(String(lastSessionContextEnabled()), def('LAST_SESSION_CONTEXT_ENABLED'));
     assert.equal(String(lastSessionContextMaxChars()), def('LAST_SESSION_CONTEXT_MAX_CHARS'));
+    assert.equal(String(lastSessionContextCount()), def('LAST_SESSION_CONTEXT_COUNT'));
   } finally {
-    if (saved.e === undefined) delete process.env.LAST_SESSION_CONTEXT_ENABLED; else process.env.LAST_SESSION_CONTEXT_ENABLED = saved.e;
-    if (saved.m === undefined) delete process.env.LAST_SESSION_CONTEXT_MAX_CHARS; else process.env.LAST_SESSION_CONTEXT_MAX_CHARS = saved.m;
+    for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   }
 });
 

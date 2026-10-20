@@ -33,7 +33,7 @@
 
 import fs from 'fs';
 import { log, warn } from './logger.js';
-import { settingFilePath, settingFileStat } from './sttVocabulary.js';
+import { settingFilePath, settingFileStat, stripFileFrontmatter } from './sttVocabulary.js';
 
 // ── correction map ───────────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ export function currentCorrections() {
     try { fileText = fs.readFileSync(fp, 'utf8'); }
     catch (e) { warn(`stt: STT_CORRECTIONS_FILE ${fp} read failed: ${e.message}`); }
   }
-  const { rules, invalid } = parseCorrections(`${inline}\n${fileText}`);
+  const { rules, invalid } = parseCorrections(`${inline}\n${stripFileFrontmatter(fileText)}`);
   const value = { rules, matcher: compileCorrections(rules), file: stat ? fp : null };
   corrCache = { key, value };
   if (rules.length) log(`stt: correction map: ${rules.length} rules${value.file ? ` (file ${value.file})` : ''}`);

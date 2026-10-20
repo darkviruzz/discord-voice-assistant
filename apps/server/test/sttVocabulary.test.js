@@ -165,6 +165,22 @@ test('currentVocabulary: inline names first, then the file (relative to the vaul
   }
 });
 
+test('currentVocabulary: a vault note with frontmatter — the frontmatter never becomes names (with and without inline names)', () => {
+  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'stt-vocab-fm-'));
+  try {
+    fs.writeFileSync(path.join(vault, 'STT-Vokabular.md'),
+      '﻿---\r\ntags: [rabenauge/stt]\r\nrabenauge-setting: STT_VOCABULARY_FILE\r\n---\r\n# Spielercharaktere\r\nRabenauge\r\nWyvern   # Kommentar\r\n');
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    process.env.STT_VOCABULARY_FILE = 'STT-Vokabular.md';
+    process.env.STT_VOCABULARY = '';
+    assert.deepEqual(currentVocabulary().used, ['Rabenauge', 'Wyvern']);
+    process.env.STT_VOCABULARY = 'Faylith';
+    assert.deepEqual(currentVocabulary().used, ['Faylith', 'Rabenauge', 'Wyvern']);
+  } finally {
+    fs.rmSync(vault, { recursive: true, force: true });
+  }
+});
+
 test('currentVocabulary: nothing configured → no prompt; context passes through unchanged', () => {
   assert.deepEqual(currentVocabulary(), { names: [], text: '', used: [], dropped: [], file: null });
   assert.equal(sttPrompt(undefined), undefined);

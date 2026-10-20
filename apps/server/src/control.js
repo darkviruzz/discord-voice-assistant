@@ -23,7 +23,7 @@ import { FinalizeRegistry } from './finalize/inflight.js';
 import { llmConfig, summaryConfig } from './providers/llm.js';
 import { sttConfig } from './providers/stt.js';
 import { ttsConfig } from './providers/tts.js';
-import { lastSessionContextEnabled, lastSessionContextMaxChars } from './lastSession.js';
+import { lastSessionContextEnabled, lastSessionContextMaxChars, lastSessionContextCount } from './lastSession.js';
 import { getVersion } from './version.js';
 import { startKeepWarm, stopKeepWarm } from './keepWarm.js';
 
@@ -116,6 +116,7 @@ function logSessionMeta(sessionId, msg) {
     rag: ragConfig(),
     lastSessionContext: {
       enabled: lastSessionContextEnabled(),
+      count: lastSessionContextCount(),
       maxChars: lastSessionContextMaxChars(),
     },
     stt: {

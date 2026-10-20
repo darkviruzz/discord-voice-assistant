@@ -4,16 +4,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  transcriptBody, compactTranscript, chunkRecords, chunkLines, capText, partialNote,
-  summarizeSession, writeSummaryToVault, latestSessionSummary,
+  transcriptBody, compactTranscript, chunkRecords, chunkLines, capText, capSummary, partialNote, PART_SYSTEM, FINAL_SYSTEM,
+  summarizeSession, writeSummaryToVault, latestSessionSummary, backgroundHint,
 } from '../src/finalize/summary.js';
 import { _resetVocabularyCache } from '../src/sttVocabulary.js';
+import { _resetPromptCache } from '../src/promptFiles.js';
+import { tidyClosingLine } from '../src/finalize/summary.js';
 
 const KEYS = ['SESSION_SUMMARY_ENABLED', 'SESSION_SUMMARY_CHUNK_CHARS', 'SESSION_SUMMARY_MAX_CHARS', 'SESSION_SUMMARY_TIMEOUT_MS',
-  'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL', 'STT_VOCABULARY', 'STT_VOCABULARY_FILE'];
+  'SESSION_SUMMARY_VAULT_DIR', 'OBSIDIAN_VAULT_PATH', 'SUMMARY_MODEL', 'STT_VOCABULARY', 'STT_VOCABULARY_FILE',
+  'SESSION_SUMMARY_PART_PROMPT_FILE', 'SESSION_SUMMARY_FINAL_PROMPT_FILE',
+  'SESSION_SUMMARY_CAMPAIGN_CHARS', 'SESSION_SUMMARY_PREVIOUS_CHARS', 'CAMPAIGN_CONTEXT_FILE'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 after(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } _resetVocabularyCache(); });
-beforeEach(() => { for (const k of KEYS) delete process.env[k]; _resetVocabularyCache(); });
+beforeEach(() => { for (const k of KEYS) delete process.env[k]; _resetVocabularyCache(); _resetPromptCache(); });
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sess-sum-'));
 const line = (i) => `\`20:${String(i % 60).padStart(2, '0')}\` **Anna (Mira):** Wir gehen nach Graufurt und reden mit Baron Kelthur über den Vertrag Nummer ${i}.`;
@@ -170,6 +174,94 @@ test('summary is capped at SESSION_SUMMARY_MAX_CHARS', async () => {
   assert.ok(out.endsWith('.'));
 });
 
+test('capSummary keeps the closing "Ort: … · Ingame-Datum: …" line and shortens the text before it', () => {
+  const body = 'Die Gruppe verlässt Graufurt. '.repeat(20).trim();
+  const stand = 'Ort: Crossford · Ingame-Datum: 4. Readying 576';
+  const out = capSummary(`${body}\n\n${stand}`, 200);
+  assert.ok(out.length <= 200, `${out.length} chars`);
+  assert.ok(out.endsWith(`.\n\n${stand}`), out);
+  assert.equal(capSummary(`${body}\nIngame-Datum: 3. Fireseek`, 120).split('\n').at(-1), 'Ingame-Datum: 3. Fireseek');
+  assert.equal(capSummary(`Kurz.\n${stand}`, 500), `Kurz.\n${stand}`, 'short enough: unchanged');
+  assert.equal(capSummary(body, 200), capText(body, 200), 'no closing line: a plain cut');
+  assert.equal(capSummary(`${body}\nOrt: ${'x'.repeat(150)}`, 200), capText(`${body}\nOrt: ${'x'.repeat(150)}`, 200),
+    'a closing line longer than half the room is not kept at the cost of the text');
+});
+
+test('summary prompts come from the vault notes when set; the spelling hint is still appended', async () => {
+  const vault = tmp();
+  const dir = path.join(vault, 'Rabenauge', 'Konfiguration');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Prompt Sitzung Abschnitt.md'), '---\ntags: [rabenauge/prompt]\n---\n%% Notiz für Cowork %%\nEIGENER ABSCHNITTS-PROMPT\n');
+  fs.writeFileSync(path.join(dir, 'Prompt Sitzung Zusammenfassung.md'), 'EIGENER GESAMT-PROMPT\n');
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.SESSION_SUMMARY_PART_PROMPT_FILE = 'Rabenauge/Konfiguration/Prompt Sitzung Abschnitt.md';
+  process.env.SESSION_SUMMARY_FINAL_PROMPT_FILE = 'Rabenauge/Konfiguration/Prompt Sitzung Zusammenfassung.md';
+  process.env.STT_VOCABULARY = 'Gaglath, Macklepenny';
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  const systems = [];
+  const fake = async ({ messages }) => { systems.push(messages[0].content); return { content: 'Notiz.' }; };
+  await summarizeSession(md(40), { completeFn: fake });
+  assert.ok(systems.length >= 3);
+  const parts = systems.slice(0, -1);
+  assert.ok(parts.every((s) => s.startsWith('EIGENER ABSCHNITTS-PROMPT\nKorrekte Schreibweisen von Namen und Begriffen der Kampagne: Gaglath, Macklepenny.')), parts[0]);
+  assert.ok(parts.every((s) => !s.includes('Notiz für Cowork') && !s.includes('tags:')), 'frontmatter and %% comments stay out');
+  assert.match(systems.at(-1), /^EIGENER GESAMT-PROMPT\nKorrekte Schreibweisen/);
+
+  // Short session = one call with the final prompt.
+  systems.length = 0;
+  await summarizeSession(md(5), { completeFn: fake });
+  assert.match(systems[0], /^EIGENER GESAMT-PROMPT\n/);
+});
+
+test('summary prompt notes missing or empty → the built-in prompts, one warning each', async () => {
+  const vault = tmp();
+  fs.writeFileSync(path.join(vault, 'leer.md'), '---\ntags: [x]\n---\n%% noch nichts %%\n');
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.SESSION_SUMMARY_PART_PROMPT_FILE = 'fehlt.md';
+  process.env.SESSION_SUMMARY_FINAL_PROMPT_FILE = 'leer.md';
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+  const systems = [];
+  const fake = async ({ messages }) => { systems.push(messages[0].content); return { content: 'Notiz.' }; };
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(' '));
+  try {
+    await summarizeSession(md(40), { completeFn: fake });
+    await summarizeSession(md(40), { completeFn: fake });
+  } finally { console.warn = orig; }
+  assert.ok(systems.slice(0, -1).some((s) => s === PART_SYSTEM));
+  assert.equal(systems.at(-1), FINAL_SYSTEM);
+  const promptWarns = warns.filter((w) => w.includes('prompt: '));
+  assert.equal(promptWarns.length, 2, promptWarns.join('\n'));
+  assert.match(promptWarns.join('\n'), /SESSION_SUMMARY_PART_PROMPT_FILE .*fehlt\.md not readable/);
+  assert.match(promptWarns.join('\n'), /SESSION_SUMMARY_FINAL_PROMPT_FILE .*leer\.md is empty/);
+});
+
+// Round 3 on gemma4:12b (2026-10-19): no in-game date was mentioned and the
+// reply ended "Ort: Crossford · Ingame-Datum:".
+test('tidyClosingLine drops empty fields of the closing line, and the line when nothing is left', async () => {
+  const body = 'Die Gruppe zieht sich zurück.';
+  assert.equal(tidyClosingLine(`${body}\n\nOrt: Crossford · Ingame-Datum:`), `${body}\n\nOrt: Crossford`);
+  assert.equal(tidyClosingLine(`${body}\nOrt: Crossford · Ingame-Datum: unbekannt.`), `${body}\nOrt: Crossford`);
+  assert.equal(tidyClosingLine(`${body}\nOrt: <Ort> · Ingame-Datum: 4. Readying`), `${body}\nIngame-Datum: 4. Readying`);
+  assert.equal(tidyClosingLine(`${body}\n\nOrt: … · Ingame-Datum: …`), body, 'nothing left → no line');
+  assert.equal(tidyClosingLine(`${body}\nIngame-Datum:`), body);
+  const full = `${body}\n\nOrt: Crossford, am Nyr Dyv · Ingame-Datum: 4. Readying 576`;
+  assert.equal(tidyClosingLine(full), full, 'filled fields stay as written');
+  assert.equal(tidyClosingLine('Ort: Graufurt ist weit. Mehr nicht.'), 'Ort: Graufurt ist weit. Mehr nicht.', 'a one-line text is no closing line');
+
+  const out = await summarizeSession(md(5), { completeFn: async () => ({ content: `${body}\n\nOrt: Crossford · Ingame-Datum:` }) });
+  assert.equal(out, `${body}\n\nOrt: Crossford`);
+});
+
+test('a long final reply loses text, not its closing place/date line', async () => {
+  process.env.SESSION_SUMMARY_MAX_CHARS = '300';
+  const reply = `${'Die Gruppe kämpft gegen die Wyvern. '.repeat(30)}\nOrt: Crossford · Ingame-Datum: 4. Readying`;
+  const out = await summarizeSession(md(5), { completeFn: async () => ({ content: reply }) });
+  assert.ok(out.length <= 300);
+  assert.ok(out.endsWith('\n\nOrt: Crossford · Ingame-Datum: 4. Readying'), out);
+});
+
 test('vault copy: off by default, written inside the vault, refuses to escape it', () => {
   const vault = tmp();
   try {
@@ -187,6 +279,72 @@ test('vault copy: off by default, written inside the vault, refuses to escape it
   } finally { fs.rmSync(vault, { recursive: true, force: true }); }
 });
 
+test('backgroundHint: campaign + previous session, each capped, 0 = off, with the not-this-session rule', () => {
+  assert.equal(backgroundHint(), '');
+  const h = backgroundHint({ campaign: 'Spugnoir ist ein Magierlehrling.', previous: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.match(h, /^Hintergrundwissen zur Kampagne .*Es beschreibt nicht diese Sitzung: übernimm daraus nichts.*\nSpugnoir ist ein Magierlehrling\./);
+  assert.match(h, /\n\nKurzfassung der vorigen Sitzung .*nicht wiederholen:\nDie Gruppe floh aus Saltmarsh\.$/);
+  process.env.SESSION_SUMMARY_CAMPAIGN_CHARS = '0';
+  process.env.SESSION_SUMMARY_PREVIOUS_CHARS = '12';
+  const cut = backgroundHint({ campaign: 'weg', previous: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.ok(!cut.includes('Hintergrundwissen'), 'campaign off');
+  assert.match(cut, /:\nDie Gruppe$/, 'previous capped at a word boundary');
+});
+
+test('the background goes into every prompt and comes off the chunk size', async () => {
+  const systems = [];
+  const users = [];
+  const fake = async ({ messages }) => { systems.push(messages[0].content); users.push(messages[1].content); return { content: 'Notiz.' }; };
+  process.env.SESSION_SUMMARY_CHUNK_CHARS = '6000';
+  await summarizeSession(md(150), { completeFn: fake });
+  const plainParts = users.filter((u) => u.startsWith('Ausschnitt')).length;
+  assert.ok(systems.every((s) => !s.includes('Hintergrundwissen')), 'no background without CAMPAIGN.md / previous summary');
+
+  systems.length = 0; users.length = 0;
+  const campaign = `Spugnoir ist ein Magierlehrling. ${'Weiteres Wissen. '.repeat(150)}`;
+  await summarizeSession(md(150), { completeFn: fake, campaign, previousSummary: 'Die Gruppe floh aus Saltmarsh.' });
+  assert.ok(systems.length >= 3);
+  for (const s of systems) {
+    assert.match(s, /Hintergrundwissen zur Kampagne/);
+    assert.match(s, /Spugnoir ist ein Magierlehrling/);
+    assert.match(s, /Kurzfassung der vorigen Sitzung .*\nDie Gruppe floh aus Saltmarsh\./);
+  }
+  const parts = users.filter((u) => u.startsWith('Ausschnitt'));
+  assert.ok(parts.length > plainParts, `smaller chunks with background: ${parts.length} vs ${plainParts} parts`);
+  assert.ok(parts.every((u) => u.length < 6000 - 2000), 'chunk shrank by 3/4 of the ~2.9k-char background (~2.2k)');
+});
+
+test('the background is appended to a prompt from a vault note too', async () => {
+  const vault = tmp();
+  try {
+    fs.writeFileSync(path.join(vault, 'Abschnitt.md'), '---\ntags: [x]\n---\nEigener Abschnitts-Prompt.\n');
+    fs.writeFileSync(path.join(vault, 'Final.md'), 'Eigener Schluss-Prompt.\n');
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    process.env.SESSION_SUMMARY_PART_PROMPT_FILE = 'Abschnitt.md';
+    process.env.SESSION_SUMMARY_FINAL_PROMPT_FILE = 'Final.md';
+    process.env.SESSION_SUMMARY_CHUNK_CHARS = '2000';
+    const systems = [];
+    await summarizeSession(md(40), {
+      completeFn: async ({ messages }) => { systems.push(messages[0].content); return { content: 'Notiz.' }; },
+      campaign: 'Spugnoir ist ein Magierlehrling.', previousSummary: 'Die Gruppe floh aus Saltmarsh.',
+    });
+    assert.ok(systems.length >= 3);
+    assert.match(systems[0], /^Eigener Abschnitts-Prompt\.\n[\s\S]*Hintergrundwissen zur Kampagne[\s\S]*Spugnoir ist ein Magierlehrling\.[\s\S]*Die Gruppe floh aus Saltmarsh\./);
+    assert.match(systems.at(-1), /^Eigener Schluss-Prompt\.\n[\s\S]*Hintergrundwissen zur Kampagne/);
+  } finally { fs.rmSync(vault, { recursive: true, force: true }); }
+});
+
+test('the background defaults to CAMPAIGN.md from the vault', async () => {
+  const vault = tmp();
+  try {
+    fs.writeFileSync(path.join(vault, 'CAMPAIGN.md'), '# Kampagne\nMacklepenny ist ein Gnom-Magier, Gaglath ein Halbork.');
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    const systems = [];
+    await summarizeSession(md(5), { completeFn: async ({ messages }) => { systems.push(messages[0].content); return { content: 'ok' }; } });
+    assert.match(systems[0], /Hintergrundwissen zur Kampagne.*\n# Kampagne\nMacklepenny ist ein Gnom-Magier/s);
+  } finally { fs.rmSync(vault, { recursive: true, force: true }); }
+});
+
 test('latestSessionSummary orders by session start, not by file time', () => {
   const root = tmp();
   try {
@@ -200,6 +358,8 @@ test('latestSessionSummary orders by session start, not by file time', () => {
     fs.mkdirSync(path.join(root, 'nosummary'));
     assert.deepEqual(latestSessionSummary(root), { text: 'neueste Sitzung', archiveName: 'new', sessionStartMs: 2000 });
     assert.equal(latestSessionSummary(root, { excludeArchiveName: 'new' }).archiveName, 'old');
+    assert.equal(latestSessionSummary(root, { beforeMs: 2000 }).archiveName, 'old', 'the previous session of the one that started at 2000');
+    assert.equal(latestSessionSummary(root, { beforeMs: 1000 }), null);
     assert.equal(latestSessionSummary(path.join(root, 'missing')), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

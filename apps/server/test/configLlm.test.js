@@ -85,7 +85,6 @@ test('LLM vars are documented in apps/server/.env.example with the catalog defau
   const example = fs.readFileSync(path.join(serverDir, '.env.example'), 'utf8');
   for (const key of llmKeysUsed()) {
     const e = catalogEntry('server', key);
-    if (e.applyMode === 'restart' && e.def === '') continue; // SYSTEM_PROMPT: optional inline alternative
     const m = example.match(new RegExp(`^(#\\s*)?${key}=(.*)$`, 'm'));
     assert.ok(m, `${key} missing from apps/server/.env.example`);
     if (!m[1] && !isSecretEntry(e)) assert.equal(m[2].trim(), e.def, `${key} default in .env.example`);

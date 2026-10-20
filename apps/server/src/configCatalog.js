@@ -252,7 +252,25 @@ export const CATALOG = [
       + 'werden in Abschnitte geteilt, einzeln verdichtet und dann zusammengeführt. '
       + '18000 Zeichen ≈ 5,6k Token (gemma4, gemessen) — passt samt Prompt und Antwort in '
       + 'ein 8k-Kontextfenster (num_ctx). Größer = weniger, längere LLM-Aufrufe (nur mit '
-      + 'größerem Kontextfenster), kleiner = für Modelle mit kleinem Kontextfenster.',
+      + 'größerem Kontextfenster), kleiner = für Modelle mit kleinem Kontextfenster. Der '
+      + 'Hintergrund (SESSION_SUMMARY_CAMPAIGN_CHARS / _PREVIOUS_CHARS) geht automatisch '
+      + 'davon ab (¾ seiner Länge), damit ein Aufruf im selben Kontextfenster bleibt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_CAMPAIGN_CHARS',
+    label: 'Zusammenfassung: Kampagnen-Hintergrund (Zeichen)', type: 'number', def: '4000',
+    applyMode: 'next-finalize',
+    desc: 'So viele Zeichen aus CAMPAIGN.md (CAMPAIGN_CONTEXT_FILE) gehen in jeden Aufruf der '
+      + 'Session-Zusammenfassung, damit das Modell weiß, wer Spielerfigur, NSC oder Ort ist '
+      + '(vorher wurde z. B. ein NSC als Gegenstand eingeordnet). Mit der Regel, daraus nichts '
+      + 'als Ereignis dieser Sitzung zu übernehmen. 0 = aus.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_PREVIOUS_CHARS',
+    label: 'Zusammenfassung: vorige Sitzung (Zeichen)', type: 'number', def: '1500',
+    applyMode: 'next-finalize',
+    desc: 'So viele Zeichen der Zusammenfassung der vorigen Sitzung gehen als Hintergrund mit, '
+      + 'damit Bezüge darauf verständlich sind (nicht wiederholt). 0 = aus.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_TIMEOUT_MS',
@@ -273,6 +291,29 @@ export const CATALOG = [
       + 'Kopie der Zusammenfassung als Notiz geschrieben wird — der Vault-Index nimmt sie '
       + 'dann auf. Leer = aus (Standard: nichts wird ungefragt in den Vault geschrieben). '
       + 'Pfade außerhalb des Vaults werden abgelehnt.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_PART_PROMPT_FILE',
+    label: 'Prompt-Datei: Abschnitt verdichten', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Eigener System-Prompt für das Verdichten eines Transkript-Abschnitts (lange '
+      + 'Sessions), z. B. als Notiz im Vault: Rabenauge/Konfiguration/Prompt Sitzung Abschnitt.md. '
+      + 'Absoluter Pfad, ./… relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH. '
+      + 'Frontmatter und %%Kommentare%% werden entfernt. Die Namensliste (STT-Vokabular) '
+      + 'hängt der Server weiter selbst an. Leer, fehlende oder leere Datei = eingebauter '
+      + 'Prompt (Vorlage: docs/prompts/). Wird bei jeder Zusammenfassung neu gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_FINAL_PROMPT_FILE',
+    label: 'Prompt-Datei: Session-Zusammenfassung', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Eigener System-Prompt für die fertige Zusammenfassung (summary.md) — aus den '
+      + 'Abschnitts-Notizen bzw. bei kurzen Sessions direkt aus dem Transkript, z. B. '
+      + 'Rabenauge/Konfiguration/Prompt Sitzung Zusammenfassung.md. Absoluter Pfad, ./… '
+      + 'relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH; Format wie '
+      + 'SESSION_SUMMARY_PART_PROMPT_FILE. Endet die Antwort mit einer Zeile '
+      + '"Ort: … · Ingame-Datum: …", bleibt sie beim Kürzen erhalten. Leer, fehlende oder '
+      + 'leere Datei = eingebauter Prompt. Wird bei jeder Zusammenfassung neu gelesen.',
   },
   {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'FINALIZE_PROGRESS_MS',
@@ -560,6 +601,51 @@ export const CATALOG = [
       + '(dort LLM_REASONING_EFFORT / LLM_CHAT_TEMPLATE_KWARGS). Wird pro Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_JSON_FORMAT',
+    label: 'Antwortformat erzwingen (JSON)', type: 'enum',
+    enumValues: ['auto', 'schema', 'json', 'off'], def: 'auto', applyMode: 'live',
+    desc: 'Erzwingt bei Rabenauge-Antworten gültiges JSON {text, speaker_id, model}: das '
+      + 'Modell kann dann nur noch in dieser Form antworten (gemma4 setzte sonst ab und zu '
+      + '```json-Zäune oder antwortete als Fließtext). auto = JSON-Schema bei '
+      + 'LLM_PROVIDER=ollama, nichts bei openai (ein strikter Server lehnt response_format '
+      + 'ab); schema = Schema bei beiden; json = beliebiges JSON-Objekt; off = freier Text. '
+      + 'Ein eigener System-Prompt muss dieselben Felder verlangen. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PRIME',
+    label: 'Antwort-Prompt vorwärmen', type: 'enum',
+    enumValues: ['auto', 'true', 'false'], def: 'auto', applyMode: 'live',
+    desc: 'Schickt während einer Sprach-Session den gleichbleibenden Anfang des nächsten '
+      + 'Antwort-Prompts (System-Prompt, letzte Session, rollende Zusammenfassung, '
+      + 'Live-Transkript, Verlauf) vorab ans LLM, sobald er sich ändert (ein erzeugtes '
+      + 'Token). Eine Frage muss dann nur noch ihren eigenen Teil verarbeiten (neueste '
+      + 'Zeilen, RAG-Treffer, Frage): gemessen 6 s statt 16 s Prompt-Verarbeitung '
+      + '(gemma4:12b, RX 6800 XT). Kostet im Hintergrund ~1–4 s GPU pro Änderung. auto = an '
+      + 'bei LLM_PROVIDER=ollama, aus bei openai (ein gehosteter Dienst würde jede '
+      + 'Vorwärm-Anfrage berechnen).',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PRIME_DELAY_MS',
+    label: 'Vorwärmen: Wartezeit nach Änderung (ms)', type: 'number', def: '2500', applyMode: 'live',
+    desc: 'So lange nach einer neuen Transkriptzeile (bzw. Antwort, Zusammenfassung) '
+      + 'wartet das Vorwärmen (LLM_PRIME); weitere Zeilen in dieser Zeit fasst es zu einer '
+      + 'Anfrage zusammen. Größer = weniger GPU-Last im Hintergrund, aber mehr neue Zeilen, '
+      + 'die eine Frage selbst verarbeiten muss.',
+  },
+  {
+    scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_PROMPT_BUDGET_CHARS',
+    label: 'Antwort-Prompt: max. Zeichen', type: 'number', def: '22000', applyMode: 'live',
+    desc: 'Obergrenze für den ganzen Antwort-Prompt (alle Nachrichten zusammen), damit er ins '
+      + 'Kontextfenster des Modells passt (0 = aus). Deutsch ≈ 3,2 Zeichen pro Token: 22000 '
+      + 'Zeichen ≈ 6,9k Tokens lassen bei 8192 Tokens Kontext Platz für Vorlage und Antwort. '
+      + 'Der vorgewärmte Anfang wird vorab gegen das Budget abzüglich einer Reserve für die '
+      + 'größten RAG-Treffer gekürzt: zuerst die ältesten Session-Zusammenfassungen (die '
+      + 'neueste bleibt; eine weggelassene kommt in dieser Sprach-Session nicht zurück), dann '
+      + 'die ältesten Verlaufsrunden (2 bleiben), dann die ältesten Live-Transkript-Zeilen. '
+      + 'Bei der Frage selbst gehen zuerst die schwächsten RAG-Treffer (einer bleibt), damit '
+      + 'der vorgewärmte Anfang gültig bleibt. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'LLM_REASONING_EFFORT',
     label: 'reasoning_effort (OpenAI-kompatibel)', type: 'string', def: '', applyMode: 'live',
     desc: 'Nur bei LLM_PROVIDER=openai: wird als reasoning_effort mitgeschickt, z. B. none, '
@@ -600,17 +686,21 @@ export const CATALOG = [
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'SYSTEM_PROMPT_FILE',
-    label: 'System-Prompt-Datei', type: 'string', def: './prompt.txt', applyMode: 'restart',
-    desc: 'Pfad zu einer Textdatei mit dem System-Prompt (Persönlichkeit/Regeln des '
-      + 'Assistenten), relativ zu apps/server. Wird EINMALIG beim Import geladen '
-      + '(llm.js) — Änderung erst nach Neustart wirksam. Vorrang vor SYSTEM_PROMPT.',
+    label: 'System-Prompt-Datei', type: 'string', def: './prompt.txt', applyMode: 'live',
+    desc: 'Datei mit dem System-Prompt (Persönlichkeit/Regeln des Assistenten). ./… = '
+      + 'relativ zu apps/server (z. B. ./prompt.txt), absoluter Pfad, sonst relativ zu '
+      + 'OBSIDIAN_VAULT_PATH (z. B. Rabenauge/Konfiguration/Prompt Persona.md). Eine '
+      + 'Obsidian-Notiz geht: Frontmatter und %%Kommentare%% werden entfernt. Wird pro '
+      + 'Anfrage gelesen (Änderungen an der Datei greifen bei der nächsten Antwort). Vorrang '
+      + 'vor SYSTEM_PROMPT; fehlende oder leere Datei = SYSTEM_PROMPT bzw. eingebauter '
+      + 'Prompt (Vorlage: docs/prompts/), mit einer Warnung im Log.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'SYSTEM_PROMPT',
-    label: 'System-Prompt (inline)', type: 'string', def: '', applyMode: 'restart',
+    label: 'System-Prompt (inline)', type: 'string', def: '', applyMode: 'live',
     desc: 'Alternative zu SYSTEM_PROMPT_FILE: der System-Prompt direkt als Text. Wird '
-      + 'nur genutzt, wenn keine Datei gesetzt/lesbar ist, und ebenfalls einmalig beim '
-      + 'Import geladen — Änderung erst nach Neustart wirksam.',
+      + 'nur genutzt, wenn keine Datei gesetzt/lesbar ist. Leer = eingebauter Prompt. '
+      + 'Wird pro Anfrage gelesen.',
   },
   {
     scope: 'server', group: 'Server · LLM (Ollama)', key: 'HISTORY_TURNS',
@@ -722,6 +812,15 @@ export const CATALOG = [
       + 'Zusammenfassung gelesen.',
   },
   {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LIVE_SUMMARY_PROMPT_FILE',
+    label: 'Prompt-Datei: rollende Zusammenfassung', type: 'string', def: '', applyMode: 'live',
+    desc: 'Eigener System-Prompt für die rollende Zusammenfassung der laufenden Session, '
+      + 'z. B. als Notiz im Vault: Rabenauge/Konfiguration/Prompt Live-Zusammenfassung.md. '
+      + 'Absoluter Pfad, ./… relativ zu apps/server, sonst relativ zu OBSIDIAN_VAULT_PATH. '
+      + 'Frontmatter und %%Kommentare%% werden entfernt. Leer, fehlende oder leere Datei = '
+      + 'eingebauter Prompt (Vorlage: docs/prompts/). Wird bei jeder Zusammenfassung neu gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'OBSIDIAN_VAULT_PATH',
     label: 'Obsidian-Vault-Wurzel', type: 'string', def: '', applyMode: 'live',
     desc: 'Wurzelverzeichnis des Obsidian-Vaults: Wissensbasis der semantischen Vault-Suche '
@@ -799,6 +898,16 @@ export const CATALOG = [
       + '0 = aus. Änderung greift bei der nächsten Anfrage.',
   },
   {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_EXCLUDE',
+    label: 'Vom Index ausgeschlossene Pfade', type: 'string', def: '', applyMode: 'live',
+    desc: 'Vault-Pfade, die nie als Kontext dienen (Vorlagen, Tool-Notizen, Exporte). Komma- '
+      + 'oder semikolongetrennt, Groß-/Kleinschreibung egal. "Templates/" = Ordner (ohne '
+      + 'weiteres / in jeder Tiefe), "99_Material/Archiv/" = Ordner ab Vault-Wurzel, '
+      + '"CLAUDE.md" = Dateiname überall, * und ** als Platzhalter. Änderung greift bei der '
+      + 'nächsten Anfrage: ausgeschlossene Notizen fliegen aus dem Index, wieder '
+      + 'aufgenommene werden eingebettet.',
+  },
+  {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_PROVIDER',
     label: 'Embedding-Anbieter', type: 'enum', enumValues: ['ollama', 'openai'], def: 'ollama',
     applyMode: 'live',
@@ -859,9 +968,20 @@ export const CATALOG = [
       + 'nacherzählen" markiert, es gibt keine Begrüßung beim /join. Wird pro Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_COUNT',
+    label: 'Letzte Sessions: Anzahl', type: 'number', def: '1', applyMode: 'live',
+    desc: 'Wie viele der zuletzt finalisierten Sessions (1–5) als Kontext mitgehen — neueste '
+      + 'zuerst, jede mit Datum („Letzte Sitzung", „Vorletzte Sitzung"). 2 empfohlen: dann '
+      + 'beantwortet Rabenauge auch „Fasse die letzten beiden Sessions zusammen" aus den '
+      + 'richtigen Sessions (die Vault-Suche kennt kein „neueste zuerst"). Alle teilen sich '
+      + 'LAST_SESSION_CONTEXT_MAX_CHARS. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · Live- & Kampagnen-Kontext', key: 'LAST_SESSION_CONTEXT_MAX_CHARS',
     label: 'Letzte Session: max. Zeichen', type: 'number', def: '2500', applyMode: 'live',
-    desc: 'Obergrenze für den Kontextblock der letzten Session (gekürzt am Satzende).',
+    desc: 'Obergrenze für den Kontextblock der letzten Session(s), gekürzt am Satzende. Bei '
+      + 'mehreren Sessions (LAST_SESSION_CONTEXT_COUNT) gleichmäßig aufgeteilt; was eine kurze '
+      + 'Zusammenfassung nicht braucht, bekommen die längeren.',
   },
 
   // ======================= SERVER: TTS ======================================

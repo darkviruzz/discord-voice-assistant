@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { summarize, maybeFold, rebuildLiveContext } from '../src/rollingSummary.js';
+import { summarize, maybeFold, rebuildLiveContext, SUMMARY_SYSTEM } from '../src/rollingSummary.js';
+import { _resetPromptCache } from '../src/promptFiles.js';
 import { appendLive } from '../src/liveContext.js';
 
 // A scripted stand-in for Ollama's /api/chat: each request is recorded and
@@ -38,7 +39,8 @@ after(() => {
 });
 
 const ENV = ['OLLAMA_URL', 'OLLAMA_MODEL', 'SUMMARY_MODEL', 'SUMMARY_MAX_CHARS', 'LIVE_CONTEXT_ENABLED',
-  'LIVE_RAW_WINDOW_CHARS', 'LIVE_FOLD_CHARS', 'LIVE_FOLD_MIN_INTERVAL_MS', 'TRANSCRIPT_DIR', 'SPEAKER_MAP_FILE'];
+  'LIVE_RAW_WINDOW_CHARS', 'LIVE_FOLD_CHARS', 'LIVE_FOLD_MIN_INTERVAL_MS', 'TRANSCRIPT_DIR', 'SPEAKER_MAP_FILE',
+  'LIVE_SUMMARY_PROMPT_FILE', 'OBSIDIAN_VAULT_PATH'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
@@ -48,6 +50,7 @@ beforeEach(() => {
   process.env.SPEAKER_MAP_FILE = path.join(tdir, 'no-speaker-map.json');
   requests = [];
   script = [];
+  _resetPromptCache();
 });
 afterEach(() => {
   for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
@@ -72,6 +75,29 @@ test('summarize folds the previous summary + segment lines into one /api/chat ca
   assert.equal(body.messages[0].role, 'system');
   assert.match(body.messages[1].content, /Bisherige Zusammenfassung:\nBisher: Ankunft im Dorf\./);
   assert.match(body.messages[1].content, /Neue Gesprächsausschnitte:\n\[Greta\] Wir gehen rein\n\[Rabenauge\] Es ist dunkel\./);
+});
+
+test('summarize: built-in prompt by default, LIVE_SUMMARY_PROMPT_FILE (vault note) when set, re-read per call', async () => {
+  await summarize('', [e('A', 'x', 1)]);
+  assert.equal(requests[0].body.messages[0].content, SUMMARY_SYSTEM);
+
+  const vault = fs.mkdtempSync(path.join(tdir, 'vault-'));
+  const fp = path.join(vault, 'Prompt Live-Zusammenfassung.md');
+  fs.writeFileSync(fp, '---\ntags: [rabenauge/prompt]\n---\n%% für Cowork %%\nEIGENER LIVE-PROMPT\n');
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.LIVE_SUMMARY_PROMPT_FILE = 'Prompt Live-Zusammenfassung.md';
+  await summarize('', [e('A', 'x', 1)]);
+  assert.equal(requests[1].body.messages[0].content, 'EIGENER LIVE-PROMPT');
+
+  fs.writeFileSync(fp, 'GEÄNDERTER LIVE-PROMPT, länger\n');
+  const t = new Date(Date.now() + 5000);
+  fs.utimesSync(fp, t, t);
+  await summarize('', [e('A', 'x', 1)]);
+  assert.equal(requests[2].body.messages[0].content, 'GEÄNDERTER LIVE-PROMPT, länger', 'an edit applies to the next fold');
+
+  fs.rmSync(fp);
+  await summarize('', [e('A', 'x', 1)]);
+  assert.equal(requests[3].body.messages[0].content, SUMMARY_SYSTEM, 'note gone → built-in');
 });
 
 test('summarize without a previous summary sends only the new lines; falls back to OLLAMA_MODEL', async () => {

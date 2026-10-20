@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   renderForLlm, windowChars, selectFoldSegment, splitForRebuild,
-  makeEntry, appendLive, renderLiveContext, removeEntries,
+  makeEntry, appendLive, renderLiveContext, renderLiveSplit, removeEntries,
   liveContextEnabled, rawWindowChars, foldChars, _internal,
 } from '../src/liveContext.js';
 
@@ -160,4 +160,24 @@ test('env getters return sane defaults and survive bad values', () => {
   } finally {
     for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   }
+});
+
+// ── split at the last primed entry (prompt cache, see contextPrime.js) ───────
+
+test('renderLiveSplit: lines up to the cut are primed, newer ones fresh', () => {
+  const a = entry('A', 'eins', 1); const b = entry('B', 'zwei', 2); const c = entry('C', 'drei', 3);
+  const session = { liveContext: { buffer: [a, b, c] } };
+  assert.deepEqual(renderLiveSplit(session, b), { primed: '[A] eins\n[B] zwei', fresh: '[C] drei', last: b });
+  assert.deepEqual(renderLiveSplit(session, c), { primed: '[A] eins\n[B] zwei\n[C] drei', fresh: '', last: c });
+});
+
+test('renderLiveSplit: no cut, or a cut folded out of the buffer → everything primed', () => {
+  const a = entry('A', 'eins', 1); const b = entry('B', 'zwei', 2);
+  const session = { liveContext: { buffer: [a, b] } };
+  const all = { primed: '[A] eins\n[B] zwei', fresh: '', last: b };
+  assert.deepEqual(renderLiveSplit(session, null), all);
+  assert.deepEqual(renderLiveSplit(session, entry('A', 'eins', 1)), all, 'identity, not equality');
+  assert.equal(renderLiveSplit(session, null).primed, renderLiveContext(session), 'same text as the unsplit render');
+  assert.deepEqual(renderLiveSplit({ liveContext: { buffer: [] } }, a), { primed: '', fresh: '', last: null });
+  assert.deepEqual(renderLiveSplit(null), { primed: '', fresh: '', last: null });
 });

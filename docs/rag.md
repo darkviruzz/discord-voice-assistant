@@ -89,6 +89,7 @@ Alle im Web-Panel (Gruppe „Server · RAG (Vault-Suche)") und in
 | `RAG_MAX_CHUNK_CHARS` | `2000` | max. Zeichen pro Abschnitt |
 | `RAG_INDEX_DIR` | `./data/rag` | Index-Verzeichnis (Docker: `/data/rag`) |
 | `RAG_RESCAN_INTERVAL_MS` | `300000` | periodischer Abgleich, `0` = aus |
+| `RAG_EXCLUDE` | leer | nie indexierte Pfade, z. B. `Templates/, wiki-comments/, CLAUDE.md, *.excalidraw.md` (`Ordner/` = in jeder Tiefe, `a/b/` = ab Vault-Wurzel, `*`/`**` Platzhalter) |
 | `EMBED_PROVIDER` | `ollama` | `ollama` \| `openai` |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding-Modell |
 | `EMBED_BASE_URL` / `EMBED_API_KEY` | leer | nur `openai` (URL inkl. `/v1`) |
@@ -148,6 +149,28 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
   bleibt jeder Aufruf im Kontextfenster.
 - **Schreibweisen:** Jeder Aufruf bekommt die Namen aus
   `STT_VOCABULARY`/`_FILE` als korrekte Schreibweisen.
+- **Nur Spielgeschehen:** Die Prompts lassen weg, was am realen Tisch
+  besprochen wird (Termine, Schichtdienste, Technik, Figurenbau), halten NSCs in
+  ihrer Rolle (kein Verbündeter wird zum Gegner, keine Person zum Gegenstand) und
+  nennen Täter und Opfer nur, wenn es eindeutig gesagt wird. Anlass war Runde 3
+  (12.10.2026): „Terminorganisation aufgrund Schichtdienste" als offene Frage,
+  „Macklepenny von Gaglath besiegt" für einen NSC-Begleiter. Die Zusammenfassung
+  endet mit `Ort: … · Ingame-Datum: …`, wenn das genannt wurde; die Zeile bleibt
+  beim Kürzen erhalten.
+- **Eigene Prompts:** `SESSION_SUMMARY_PART_PROMPT_FILE` und
+  `SESSION_SUMMARY_FINAL_PROMPT_FILE` ersetzen die eingebauten Texte, z. B. durch
+  Notizen im Vault. Vorlagen: [`docs/prompts/`](prompts/README.md). Diese Notizen
+  mit `RAG_EXCLUDE` aus dem Index heraushalten, z. B. `Rabenauge/Konfiguration/`.
+- **Hintergrund:** Jeder Aufruf bekommt außerdem zwei Texte:
+  - einen Auszug aus `CAMPAIGN.md` (`SESSION_SUMMARY_CAMPAIGN_CHARS`, Standard
+    4000 Zeichen), damit das Modell weiß, wer Spielerfigur, NSC oder Ort ist;
+  - die Zusammenfassung der vorigen Sitzung (`SESSION_SUMMARY_PREVIOUS_CHARS`,
+    Standard 1500), damit Bezüge darauf verständlich sind.
+
+  Dazu kommt die Regel, daraus nichts als Ereignis dieser Sitzung zu übernehmen.
+  Der Hintergrund geht von der Abschnittsgröße ab (¾ seiner Länge), damit jeder
+  Aufruf im Kontextfenster bleibt. 0 schaltet einen Teil ab. Er hängt wie die
+  Schreibweisen auch an eigenen Prompt-Dateien.
 - **Gemessen** am 2026-10-19 (3-h-Session, 245 KB, gemma4:12b auf der
   RX 6800 XT, Ollama-Kontext 8192): vorher 21 + 1 Aufrufe in 9,6 min, die
   Zusammenführung mit 7,5k Token fast am Limit. Jetzt 10 + 1 Aufrufe in
@@ -167,7 +190,13 @@ Finalize schreibt eine Zusammenfassung (`summary.md` im Archiv). So entsteht sie
 Die jeweils
 letzte bekommt Rabenauge bei jeder Anfrage als Hintergrund
 (`LAST_SESSION_CONTEXT_*`) — beantwortet wird das nur auf Nachfrage („Was war
-letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Damit auch ältere
+letztes Mal?“) bzw. per `/recap`, nie als Begrüßung. Mit
+`LAST_SESSION_CONTEXT_COUNT=2` (empfohlen) sind es die letzten beiden, neueste
+zuerst und jede mit Datum, im Budget `LAST_SESSION_CONTEXT_MAX_CHARS`. Wird
+der ganze Antwort-Prompt zu groß (`LLM_PROMPT_BUDGET_CHARS`, siehe
+[providers.md](providers.md#prompt-budget)), fallen die älteren davon zuerst
+weg; die neueste bleibt. Die Vault-Suche kennt kein „neueste zuerst“: bei „Fasse die letzten beiden Sessions
+zusammen“ fand sie im Live-Test Session-Notizen von 2025. Damit auch ältere
 Sessions über die Vault-Suche auffindbar sind, `SESSION_SUMMARY_VAULT_DIR`
 setzen: dann landet jede Zusammenfassung als Notiz im Vault und wird
 automatisch mitindiziert. Im Docker-Stack geht das nicht: dort ist der Vault

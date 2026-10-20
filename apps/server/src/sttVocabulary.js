@@ -51,6 +51,16 @@ export function vocabularyMinMs() {
 }
 
 // Text → names, in order, deduplicated case-insensitively.
+// A settings file's text without BOM and YAML frontmatter. Needed before the
+// file is appended to the inline setting: "inline\n---\n…" no longer starts
+// with the frontmatter, so the parsers' own (start-anchored) strip misses it
+// and the frontmatter lines would become names / correction entries.
+export function stripFileFrontmatter(text) {
+  return String(text ?? '')
+    .replace(/^﻿/, '')
+    .replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, '');
+}
+
 export function parseVocabulary(text) {
   const src = String(text ?? '')
     .replace(/^﻿/, '')
@@ -129,7 +139,7 @@ export function settingFilePath(key) {
     warnOnce(`novault|${key}|${file}`, `stt: ${key} "${file}" is relative but OBSIDIAN_VAULT_PATH is empty — file ignored`);
     return null;
   }
-  return path.resolve(vault, file);
+  return path.resolve(vault, file.replace(/\\/g, '/')); // "a\b.md" works on Linux too
 }
 
 // statSync of a settings file, or null (warned once per path) when missing.
@@ -155,7 +165,7 @@ export function currentVocabulary() {
     try { fileText = fs.readFileSync(fp, 'utf8'); }
     catch (e) { warn(`stt: STT_VOCABULARY_FILE ${fp} read failed: ${e.message}`); }
   }
-  const names = parseVocabulary(`${inline}\n${fileText}`);
+  const names = parseVocabulary(`${inline}\n${stripFileFrontmatter(fileText)}`);
   const value = { names, ...vocabularyPrompt(names), file: stat ? fp : null };
   cache = { key, value };
   if (names.length) {

@@ -144,6 +144,18 @@ test('currentCorrections: inline + vault-relative file, re-read on change, bad e
   assert.match(missing.lines.join('\n'), /STT_CORRECTIONS_FILE .*fehlt\.md not readable/);
 });
 
+test('currentCorrections: a vault note with frontmatter — no frontmatter lines as (invalid) entries', () => {
+  const vault = tmpdir();
+  fs.writeFileSync(path.join(vault, 'STT-Korrekturen.md'),
+    '﻿---\r\ntags: [rabenauge/stt]\r\nrabenauge-setting: STT_CORRECTIONS_FILE\r\n---\r\n# Regeln\r\nRhoga | Rhogaar => Rhogar\r\n');
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.STT_CORRECTIONS_FILE = 'STT-Korrekturen.md';
+  process.env.STT_CORRECTIONS = '';
+  const r = captureWarn(() => currentCorrections());
+  assert.deepEqual(r.value.rules.map((x) => x.from), ['Rhoga', 'Rhogaar']);
+  assert.equal(r.lines.length, 0, 'no "entries ignored" warning');
+});
+
 // ── hallucination filter ─────────────────────────────────────────────────────
 
 test('matchHallucination: whole utterance only — any case, punctuation, apostrophes, repeats, * prefixes', () => {

@@ -34,8 +34,9 @@ import { log, warn, debug } from '../logger.js';
 import { embed, embedSignature, embedModel, embedProvider } from '../providers/embed.js';
 import { RagIndexer, DEFAULT_TOP_K, MAX_TOP_K, clampTopK } from './indexer.js';
 import { DEFAULT_MAX_CHUNK_CHARS } from './chunker.js';
+import { parseExcludeList } from './scanner.js';
 
-export { MAX_TOP_K, clampTopK };
+export { DEFAULT_TOP_K, MAX_TOP_K, clampTopK };
 
 const DEFAULT_TIMEOUT_MS = 800;
 // setTimeout() clamps larger delays to 1 ms (TimeoutOverflowWarning), which
@@ -82,6 +83,13 @@ function rescanIntervalMs() {
   return envPositiveInt('RAG_RESCAN_INTERVAL_MS', DEFAULT_RESCAN_MS, { allowZero: true });
 }
 
+// Vault paths never indexed (RAG_EXCLUDE, syntax: scanner.js parseExcludeList).
+// Part of the indexer config: a change restarts the indexer, whose next sync
+// prunes newly excluded notes and indexes newly included ones.
+function excludePatterns() {
+  return parseExcludeList(envStr('RAG_EXCLUDE'));
+}
+
 // Default ./data/rag (relative to the server's working directory, next to
 // config.overrides.json); compose sets /data/rag on the server-data volume.
 function indexDir() {
@@ -102,6 +110,7 @@ function desiredConfig() {
     indexDir: indexDir(),
     maxChunkChars: maxChunkChars(),
     rescanIntervalMs: rescanIntervalMs(),
+    exclude: excludePatterns(),
   };
 }
 

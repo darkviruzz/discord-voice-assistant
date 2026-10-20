@@ -3,6 +3,8 @@ import path from 'path';
 import { warn, log, debug } from '../logger.js';
 import { complete, summaryModel } from '../providers/llm.js';
 import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
+import { promptText } from '../promptFiles.js';
+import { campaignFileText } from '../campaignContext.js';
 
 // Session summary at finalize: a short German recap of the finished session,
 // built from the merged transcript. It is what Rabenauge answers "Was war
@@ -17,8 +19,12 @@ import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
 // SESSION_SUMMARY_MAX_CHARS (notes that do not fit one merge call are merged
 // in batches first). Uses the summary endpoint of the LLM provider
 // (SUMMARY_PROVIDER/SUMMARY_BASE_URL/SUMMARY_MODEL, each falling back to the
-// answer LLM). The STT vocabulary (STT_VOCABULARY/_FILE) goes into every
-// prompt as the spelling reference for names.
+// answer LLM). Every prompt carries the STT vocabulary (STT_VOCABULARY/_FILE)
+// as the spelling reference for names, and as background the campaign context
+// file (CAMPAIGN.md: who is who) and the previous session's summary
+// (backgroundHint) — with the rule that neither describes this session. The
+// part and final prompts can come from vault notes (see PART_SYSTEM below);
+// both hints are appended to whichever text is used.
 //
 // Sizing (measured 2026-10-19, gemma4:12b on Ollama with its 8192-token
 // context, 3 h session): the raw transcript lines cost 2.5 chars/token, so a
@@ -34,16 +40,35 @@ import { currentVocabulary, vocabularyPrompt } from '../sttVocabulary.js';
 // what was condensed so far and ends with a note that it is incomplete
 // (partialNote). Only with no note at all is the result null.
 
+// The built-in prompts. PART and FINAL can be replaced by a file (vault note)
+// via SESSION_SUMMARY_PART_PROMPT_FILE / SESSION_SUMMARY_FINAL_PROMPT_FILE
+// (promptFiles.js; starters in docs/prompts/); the batch merge, needed only
+// when the notes do not fit one final call, always uses MERGE_SYSTEM. The
+// spelling hint is appended to whichever text is used.
+//
+// The rules target what round 3 (2026-10-12, gemma4:12b) got wrong: the
+// players' scheduling talk ("Terminorganisation aufgrund Schichtdienste") and
+// character building ("für Droga noch ein Druide") ended up as open questions,
+// and an allied NPC whose turn a player took in combat became "von Gaglath
+// besiegt".
 const NAME_RULE = 'Eigennamen exakt übernehmen. Ist unklar, ob ein Name eine Person, ein Ort oder ein Gegenstand ist, nenne ihn ohne Einordnung.';
+const IN_GAME_RULE = 'Nur das Spielgeschehen zählt: was die Figuren in der Spielwelt erleben, tun und entscheiden. '
+  + 'Weglassen, was am realen Spieltisch besprochen wird: Termine und Terminplanung, Arbeit, Schichtdienste und Privates, '
+  + 'Technikprobleme, Smalltalk, Regeldiskussionen, Würfelwürfe und Schadenswerte, das Erstellen, Benennen oder Verwalten von Spielfiguren.';
+const ROLE_RULE = 'NSCs behalten ihre Rolle: Begleiter und Verbündete der Gruppe nicht zu Gegnern machen, Personen nicht zu Gegenständen. '
+  + 'Wer wen angreift, besiegt, heilt oder rettet, nur nennen, wenn es eindeutig gesagt wird — sonst ohne Täter und Opfer formulieren. Nichts dazuerfinden.';
 
-const PART_SYSTEM = [
+export const PART_SYSTEM = [
   'Du protokollierst eine Pen-and-Paper-Spielrunde.',
   'Du bekommst einen Ausschnitt des Sitzungs-Transkripts (eine Zeile pro Wortbeitrag, "Spieler (Figur): Text").',
+  'Die Spielleitung beschreibt die Welt und spricht für die NSCs. Im Kampf führen Spieler oft auch die Züge von NSC-Begleitern; "X ist dran" heißt nur, dass X an der Reihe ist.',
   'Notiere knapp in deutscher Prosa (Fließtext, kein Markdown, keine Aufzählungszeichen), was in diesem Ausschnitt im Spiel passiert ist:',
   'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände, offene Fragen.',
+  'Nennt jemand ein Datum oder eine Tageszeit der Spielwelt oder wechselt die Gruppe den Ort, notiere es.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
-  'Smalltalk, Regeldiskussionen und Wiederholungen weglassen.',
-  'Antworte NUR mit den Notizen, ohne Vorrede.',
+  'Antworte NUR mit den Notizen, ohne Vorrede. Enthält der Ausschnitt kein Spielgeschehen, antworte nur: "Kein Spielgeschehen."',
 ].join('\n');
 
 // Batch merge (only when the notes do not fit one final call).
@@ -51,18 +76,23 @@ const MERGE_SYSTEM = [
   'Du protokollierst eine Pen-and-Paper-Spielrunde.',
   'Du bekommst chronologische Notizen zu einem Teil der Sitzung.',
   'Fasse sie zu kürzeren chronologischen Notizen in deutscher Prosa zusammen (Fließtext, kein Markdown). Behalte',
-  'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände und offene Fragen.',
+  'Ereignisse, Entscheidungen, Orte, NSCs, Gegenstände, offene Fragen und genannte Daten der Spielwelt.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
   'Antworte NUR mit den Notizen, ohne Vorrede.',
 ].join('\n');
 
-const FINAL_SYSTEM = [
+export const FINAL_SYSTEM = [
   'Du schreibst die Zusammenfassung einer Pen-and-Paper-Sitzung für die Spielrunde.',
-  'Du bekommst chronologische Notizen zur gesamten Sitzung.',
+  'Du bekommst chronologische Notizen zur gesamten Sitzung (bei kurzen Sitzungen direkt das Transkript, eine Zeile pro Wortbeitrag, "Spieler (Figur): Text").',
   'Schreibe daraus eine zusammenhängende deutsche Zusammenfassung:',
-  'was passiert ist, was entschieden wurde, wo die Gruppe am Ende steht und welche Fragen offen sind.',
+  'was in der Spielwelt passiert ist, was entschieden wurde, wo die Gruppe am Ende steht und welche Fragen im Spiel offen sind.',
+  IN_GAME_RULE,
+  ROLE_RULE,
   NAME_RULE,
   'Keine Aufzählungszeichen, keine Überschriften, keine Vorrede.',
+  'Letzte Zeile: wo die Gruppe am Ende ist und das Datum der Spielwelt, soweit genannt — "Ort: <Ort> · Ingame-Datum: <Datum>", ohne genanntes Datum nur "Ort: <Ort>". Nichts schätzen; das reale Datum der Sitzung ist kein Ingame-Datum. Ist beides unbekannt, entfällt die Zeile.',
 ].join('\n');
 
 // The STT vocabulary as a spelling reference. Whisper only reads ~224 prompt
@@ -79,6 +109,27 @@ export function spellingHint() {
     + 'Das Transkript stammt aus einer Spracherkennung, die solche Namen oft ähnlich klingend, '
     + 'aber falsch schreibt: falsch erkannte Varianten stillschweigend korrigieren. Die Liste '
     + 'sagt nichts darüber, wer oder was ein Name ist.';
+}
+
+// Background knowledge for every prompt, '' when there is none:
+// - the campaign context file (CAMPAIGN.md, the same one the answers use), cut
+//   to SESSION_SUMMARY_CAMPAIGN_CHARS, so the model knows who is a player
+//   character, an NSC or a place;
+// - the previous session's summary, cut to SESSION_SUMMARY_PREVIOUS_CHARS, so
+//   references to it make sense.
+// The rule matters: without it a model "summarises" the background as if it
+// had happened in this session. 0 switches a part off.
+export function backgroundHint({ campaign = '', previous = '' } = {}) {
+  const parts = [];
+  const c = capText(campaign, intEnv('SESSION_SUMMARY_CAMPAIGN_CHARS', 4000, 0));
+  if (c) {
+    parts.push('Hintergrundwissen zur Kampagne — nur, um Namen, Figuren, Orte und Beziehungen richtig einzuordnen. '
+      + 'Es beschreibt nicht diese Sitzung: übernimm daraus nichts, was im Transkript bzw. in den Notizen nicht vorkommt.\n'
+      + c);
+  }
+  const p = capText(previous, intEnv('SESSION_SUMMARY_PREVIOUS_CHARS', 1500, 0));
+  if (p) parts.push(`Kurzfassung der vorigen Sitzung — nur, damit Bezüge darauf verständlich sind; nicht wiederholen:\n${p}`);
+  return parts.join('\n\n');
 }
 
 const withHint = (system, hint) => (hint ? `${system}\n${hint}` : system);
@@ -188,6 +239,34 @@ export function capText(text, limit) {
   return (sp > 0 ? head.slice(0, sp) : head).trimEnd();
 }
 
+// The closing "Ort: … · Ingame-Datum: …" line FINAL_SYSTEM asks for.
+const CLOSING_LINE_RE = /\n[ \t]*((?:Ort|Ingame-Datum)[ \t]*:[^\n]{0,200}?)[ \t]*$/i;
+// A field of that line without a value: "Ingame-Datum:", "…", "<Datum>", "unbekannt".
+const EMPTY_FIELD_RE = /^[^:]+:\s*(?:…|\.{3}|[-–—]|<[^>]*>|unbekannt|nicht genannt|keine Angabe)?\s*\.?$/i;
+
+// The closing line without empty fields, dropped when none is left. gemma4:12b
+// wrote "Ort: Crossford · Ingame-Datum:" when no date had been mentioned
+// (round 3, 2026-10-19).
+export function tidyClosingLine(text) {
+  const t = String(text || '').trim();
+  const m = t.match(CLOSING_LINE_RE);
+  if (!m) return t;
+  const line = m[1].split(/\s+[·|]\s+|\s*·\s*/).map((f) => f.trim()).filter((f) => f && !EMPTY_FIELD_RE.test(f)).join(' · ');
+  return line ? `${t.slice(0, m.index + 1)}${line}` : t.slice(0, m.index).trimEnd();
+}
+
+// capText for the finished summary: its closing line is kept and the text
+// before it is shortened — a plain cut keeps the front and would drop exactly
+// that line.
+
+export function capSummary(text, limit) {
+  const t = String(text || '').trim();
+  const m = t.length > limit ? t.match(CLOSING_LINE_RE) : null;
+  if (!m || m[1].length + 2 > limit / 2) return capText(t, limit);
+  const head = capText(t.slice(0, m.index), limit - m[1].length - 2);
+  return head ? `${head}\n\n${m[1]}` : capText(t, limit);
+}
+
 // Total time budget for one summary (all LLM calls). The summary runs inside
 // the finalize the bot waits for: the bot gives up after FINALIZE_IDLE_TIMEOUT_MS
 // without progress (every LLM call sends a tick, the server's keepalive covers
@@ -263,18 +342,30 @@ export function partialNote({ covered, total, until = null, timeUp = false, fail
 
 // transcriptMd → summary string, or null (disabled, empty transcript, no part
 // condensed). A summary that misses parts ends with partialNote().
-export async function summarizeSession(transcriptMd, { completeFn = complete, onProgress = null, now = () => Date.now(), assistantName } = {}) {
+// `previousSummary`: the summary of the session before this one (finalize
+// passes it); `campaign`: the background text, default the CAMPAIGN.md file.
+export async function summarizeSession(transcriptMd, {
+  completeFn = complete, onProgress = null, now = () => Date.now(), assistantName,
+  previousSummary = '', campaign = campaignFileText(),
+} = {}) {
   if (!summaryEnabled()) return null;
   const records = compactTranscript(transcriptBody(transcriptMd, { assistantName }));
   if (records.reduce((len, r) => len + r.line.length + 1, 0) < 200) {
     debug('session-summary: transcript too short — skipped');
     return null;
   }
-  const chunkChars = intEnv('SESSION_SUMMARY_CHUNK_CHARS', 18000, 2000);
+  const background = backgroundHint({ campaign, previous: previousSummary });
+  // The background sits in every call's prompt. It is prose (~4.3 chars/token)
+  // against the compacted transcript's ~3.2, so 3/4 of its length comes off the
+  // chunk to keep a call within the same context window (8k on Ollama here).
+  const chunkChars = Math.max(2000, intEnv('SESSION_SUMMARY_CHUNK_CHARS', 18000, 2000) - Math.ceil(background.length * 0.75));
   const maxChars = intEnv('SESSION_SUMMARY_MAX_CHARS', 2500, 300);
   const budgetMs = summaryBudgetMs();
   const model = summaryModel();
-  const hint = spellingHint();
+  const hint = [spellingHint(), background].filter(Boolean).join('\n\n');
+  // Read once per summary, so all calls of one run use the same text.
+  const partSystem = promptText('SESSION_SUMMARY_PART_PROMPT_FILE', PART_SYSTEM);
+  const finalSystem = promptText('SESSION_SUMMARY_FINAL_PROMPT_FILE', FINAL_SYSTEM);
   const started = now();
   const deadline = started + budgetMs;
   const chunks = chunkRecords(records, chunkChars);
@@ -316,8 +407,8 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
 
   try {
     if (chunks.length === 1) {
-      const content = await ask(FINAL_SYSTEM, `Transkript:\n${chunks[0].text}\n\nHöchstens ${maxChars} Zeichen.`);
-      return capText(content, maxChars) || null;
+      const content = await ask(finalSystem, `Transkript:\n${chunks[0].text}\n\nHöchstens ${maxChars} Zeichen.`);
+      return capSummary(tidyClosingLine(content), maxChars) || null;
     }
 
     // Map: one note per part, until time runs short or the LLM looks down.
@@ -330,7 +421,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       const c = chunks[i];
       const when = clockRange(c);
       try {
-        const content = await ask(PART_SYSTEM,
+        const content = await ask(partSystem,
           `Ausschnitt ${i + 1} von ${chunks.length}${when ? ` (${when})` : ''}:\n${c.text}\n\nHöchstens etwa ${noteChars} Zeichen.`,
           reserveMs());
         notes.push({ first: i + 1, last: i + 1, from: c.from, to: c.to, text: capText(content, 2 * noteChars) });
@@ -374,7 +465,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
     let text = null;
     if (!unmerged && joinedLength(level) <= mergeChars) {
       try {
-        text = await ask(FINAL_SYSTEM, `Notizen:\n${level.map(noteForLlm).join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.`);
+        text = await ask(finalSystem, `Notizen:\n${level.map(noteForLlm).join('\n\n')}\n\nHöchstens ${maxChars} Zeichen.`);
       } catch (e) {
         warn('session-summary: final merge failed —', e.message);
         if (roomMs(0) < MIN_CALL_MS) timeUp = true;
@@ -390,7 +481,7 @@ export async function summarizeSession(transcriptMd, { completeFn = complete, on
       timeUp, failed, unmerged: !text,
     }) : '';
     const room = maxChars - (marker ? marker.length + 2 : 0);
-    const body = text ? capText(text, room) : condenseNotes(level, room);
+    const body = text ? capSummary(tidyClosingLine(text), room) : condenseNotes(level, room);
     const secs = Math.round((now() - started) / 1000);
     if (marker) warn(`session-summary: ${calls} LLM calls in ${secs} s — incomplete: ${marker} (budget SESSION_SUMMARY_TIMEOUT_MS=${budgetMs})`);
     else log(`session-summary: ${calls} LLM calls in ${secs} s for ${chunks.length} parts`);
@@ -432,10 +523,40 @@ export function writeSummaryToVault(summary, { title, dateLabel }) {
 // happened last time"). Ordered by the session's start (manifest.json
 // sessionStartMs), not file mtime — a re-finalize of an old session must not
 // make it "the last session". Returns { text, archiveName, sessionStartMs } or null.
-export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { excludeArchiveName = null } = {}) {
+// `beforeMs`: only sessions that started before it (the previous session of a
+// re-finalized old one, not the newest).
+export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { excludeArchiveName = null, beforeMs = null } = {}) {
   let best = null;
+  for (const c of summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs })) {
+    if (!best || c.key > best.key) best = c;
+  }
+  if (!best) return null;
+  try {
+    const text = fs.readFileSync(best.file, 'utf8').trim();
+    return text ? { text, archiveName: best.archiveName, sessionStartMs: best.start } : null;
+  } catch { return null; }
+}
+
+// The `count` newest summaries, newest first, by the same order as
+// latestSessionSummary (sessionStartMs, else mtime). Sessions with an empty or
+// unreadable summary.md are skipped, so "the last two" are two with content.
+export function latestSessionSummaries(archiveRoot = process.env.ARCHIVE_DIR ?? './archive', { count = 1, excludeArchiveName = null, beforeMs = null } = {}) {
+  const out = [];
+  const sorted = summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs }).sort((a, b) => b.key - a.key);
+  for (const c of sorted) {
+    if (out.length >= count) break;
+    let text = '';
+    try { text = fs.readFileSync(c.file, 'utf8').trim(); } catch { /* vanished */ }
+    if (text) out.push({ text, archiveName: c.archiveName, sessionStartMs: c.start });
+  }
+  return out;
+}
+
+// Archive sessions with a summary.md → [{ file, archiveName, key, start }].
+function summaryCandidates(archiveRoot, { excludeArchiveName, beforeMs }) {
+  const out = [];
   let dirs;
-  try { dirs = fs.readdirSync(archiveRoot, { withFileTypes: true }); } catch { return null; }
+  try { dirs = fs.readdirSync(archiveRoot, { withFileTypes: true }); } catch { return out; }
   for (const d of dirs) {
     if (!d.isDirectory() || d.name === excludeArchiveName) continue;
     const dir = path.join(archiveRoot, d.name);
@@ -445,11 +566,8 @@ export function latestSessionSummary(archiveRoot = process.env.ARCHIVE_DIR ?? '.
     let start = null;
     try { start = Number(JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')).sessionStartMs); } catch { /* no manifest */ }
     const key = Number.isFinite(start) && start > 0 ? start : st.mtimeMs;
-    if (!best || key > best.key) best = { file: f, archiveName: d.name, key, start };
+    if (Number.isFinite(beforeMs) && key >= beforeMs) continue;
+    out.push({ file: f, archiveName: d.name, key, start });
   }
-  if (!best) return null;
-  try {
-    const text = fs.readFileSync(best.file, 'utf8').trim();
-    return text ? { text, archiveName: best.archiveName, sessionStartMs: best.start } : null;
-  } catch { return null; }
+  return out;
 }

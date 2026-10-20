@@ -4,16 +4,17 @@ import { drainBuffer } from './uplink.js';
 import { detectWakeWord } from './wakeword.js';
 import { transcribe } from './stt.js';
 import { sttProviderLabel } from './providers/stt.js';
-import { chat } from './llm.js';
+import { chat, primeChat } from './llm.js';
 import { streamTtsToSession, cancelTtsForSession } from './ttsStream.js';
 import { logTranscriptEvent } from './transcript.js';
 import { log, warn, debug } from './logger.js';
 import { broadcastToAllBots } from './broadcast.js';
-import { appendLive, renderLiveContext, liveContextEnabled } from './liveContext.js';
+import { appendLive, liveContextEnabled } from './liveContext.js';
 import { publishEntry, publishAnnotation } from './liveBus.js';
 import { maybeFold } from './rollingSummary.js';
-import { getCampaignContext } from './campaignContext.js';
-import { lastSessionBlock } from './lastSession.js';
+import { llmProvider } from './providers/llm.js';
+import { createPrimer, primeEnabledFor } from './contextPrime.js';
+import { createAnswerPrompt } from './answerPrompt.js';
 import { loadSpeakerMap } from './speakerMap.js';
 import { speakerLabel, normalizeText } from './finalize/merge.js';
 import { postprocessUtterance, applyCorrections, matchHallucination } from './sttPostprocess.js';
@@ -463,28 +464,32 @@ function discordPostRepliesEnabled() {
   return (process.env.DISCORD_POST_REPLIES ?? 'false') === 'true';
 }
 
-// Assemble the extra `system` blocks for a voice session, in priority order:
-// campaign context → rolling summary → live transcript. Empty parts are skipped
-// so an unavailable block costs nothing. `query` is forwarded to the campaign
-// lookup (semantic vault RAG when enabled, else the static CAMPAIGN.md).
-// Async because that lookup may embed the query (an HTTP round-trip). Returns
-// [] when live context is disabled.
-async function buildSystemBlocks(session, query) {
-  const blocks = [];
-  // Recap source for "Was war letztes Mal?" / /recap — independent of the live
-  // context switch and also for text queries outside a voice session.
-  const last = lastSessionBlock();
-  if (!liveContextEnabled()) return last ? [last] : [];
-  const campaign = await getCampaignContext(query);
-  if (campaign) blocks.push(`Kampagnen-Kontext:\n${campaign}`);
-  if (last) blocks.push(last);
-  const summary = session?.liveContext?.summary;
-  if (summary && summary.trim()) {
-    blocks.push(`Bisheriger Gesprächsverlauf (Zusammenfassung):\n${summary.trim()}`);
-  }
-  const live = renderLiveContext(session);
-  if (live) blocks.push(`Aktuelles Live-Transkript der Runde:\n${live}`);
-  return blocks;
+// The answer prompt within LLM_PROMPT_BUDGET_CHARS, for the primer (its front)
+// and for each question (answerPrompt.js).
+const prompts = createAnswerPrompt();
+
+const primeOn = () => liveContextEnabled() && primeEnabledFor(llmProvider());
+
+// Keeps the stable front of the next answer prompt in the LLM server's prompt
+// cache while a voice session runs (contextPrime.js). Fed by every change of
+// that front: a new live-transcript line, a reply, a fold into the rolling
+// summary.
+const primer = createPrimer({
+  buildPrefix: async (session) => {
+    const { systemBlocks, history, last } = await prompts.front(session);
+    return { prefix: { systemBlocks, history }, cut: last };
+  },
+  prime: ({ systemBlocks, history }) => primeChat(systemBlocks, history),
+  enabled: primeOn,
+});
+
+// Test hook: the primer (idle(), cutFor()).
+export const _internal = { primer };
+
+function foldThenPrime(session) {
+  maybeFold(session)
+    .catch((e) => warn('pipeline: fold error:', e.message))
+    .finally(() => primer.schedule(session));
 }
 
 function sessionlessHistory(scope) {
@@ -573,15 +578,15 @@ async function answerQuestion({
     return;
   }
 
-  // Voice sessions get campaign context + rolling summary + live transcript as
-  // extra system blocks; text/global queries get none (no live buffer).
-  // Text queries without a voice session get campaign + last-session context
-  // too (live transcript/rolling summary only exist inside a session).
-  const systemBlocks = await buildSystemBlocks(session, query);
-
+  // Voice sessions get last session + rolling summary + live transcript as
+  // system blocks and the newest lines + RAG hits next to the question. Text
+  // queries without a voice session get campaign + last-session context too
+  // (live transcript/rolling summary only exist inside a session).
   let response;
+  primer.answerStarted(session);
   try {
-    response = await chat(history, query, { systemBlocks });
+    const prompt = await prompts.answer(session, history, query, { cut: primer.cutFor(session), primed: primeOn() });
+    response = await chat(prompt.history, query, { systemBlocks: prompt.systemBlocks, contextBlocks: prompt.contextBlocks });
   } catch (e) {
     warn('pipeline: llm error:', e.message);
     // A typed question is answered in its channel (see below) — on an LLM
@@ -599,6 +604,8 @@ async function answerQuestion({
       });
     }
     return;
+  } finally {
+    primer.answerFinished(session);
   }
 
   const { text: responseText, speakerId, model: ttsModel } = response;
@@ -619,7 +626,8 @@ async function answerQuestion({
   if (sid) lastResponses.set(sid.toString(), responseText);
 
   // Mirror the reply into the live-transcript buffer so later turns see it,
-  // then fold if the raw window overflowed. Fire-and-forget (single-flight).
+  // then fold if the raw window overflowed and prime the next answer's front.
+  // Fire-and-forget (single-flight).
   if (session) {
     const stored = appendLive(session, { label: wakeWordName(), text: responseText, startMs: Date.now(), kind: 'assistant' });
     if (stored) {
@@ -630,7 +638,7 @@ async function answerQuestion({
       stored.endMs = stored.startMs + Math.max(1500, words * 360);
       if (sid) publishEntry(sid, stored);
     }
-    maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
+    foldThenPrime(session);
   }
 
   // A typed question (/ask, /recap, @mention) always gets its answer in the
@@ -903,7 +911,7 @@ export async function runPipeline(sessionId, userId, metadata = {}) {
         // "[Sprecherwechsel]") — bereits gezeigte Partials zurücknehmen.
         retractPartial();
       }
-      maybeFold(session).catch((e) => warn('pipeline: fold error:', e.message));
+      foldThenPrime(session);
     }
 
     // 4. Read wake-word config.

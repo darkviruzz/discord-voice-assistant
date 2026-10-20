@@ -57,6 +57,25 @@ test('openai: /chat/completions on LLM_BASE_URL with bearer, model override wins
   assert.equal(seen[0].body.keep_alive, undefined);
 });
 
+test('format: Ollama gets it as `format`, openai as response_format (json_schema / json_object)', async () => {
+  const schema = { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] };
+  process.env.OLLAMA_URL = BASE;
+  reply = () => [200, { message: { content: '{"text":"x"}' } }];
+  await complete({ messages: [{ role: 'user', content: 'q' }], format: schema });
+  assert.deepEqual(seen[0].body.format, schema);
+  await complete({ messages: [{ role: 'user', content: 'q' }] });
+  assert.equal('format' in seen[1].body, false, 'no format → none sent');
+  process.env.LLM_PROVIDER = 'openai';
+  process.env.LLM_BASE_URL = `${BASE}/v1`;
+  reply = () => [200, { choices: [{ message: { content: '{"text":"x"}' } }] }];
+  await complete({ messages: [{ role: 'user', content: 'q' }], format: schema });
+  assert.deepEqual(seen[2].body.response_format, { type: 'json_schema', json_schema: { name: 'response', schema } });
+  await complete({ messages: [{ role: 'user', content: 'q' }], format: 'json' });
+  assert.deepEqual(seen[3].body.response_format, { type: 'json_object' });
+  await complete({ messages: [{ role: 'user', content: 'q' }] });
+  assert.equal('response_format' in seen[4].body, false);
+});
+
 test('openai: missing base URL and malformed replies fail loudly', async () => {
   process.env.LLM_PROVIDER = 'openai';
   await assert.rejects(() => complete({ messages: [] }), /LLM_BASE_URL is empty/);

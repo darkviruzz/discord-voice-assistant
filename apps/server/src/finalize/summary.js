@@ -492,31 +492,56 @@ export async function summarizeSession(transcriptMd, {
   }
 }
 
-// Optional copy into the Obsidian vault (SESSION_SUMMARY_VAULT_DIR, relative to
-// OBSIDIAN_VAULT_PATH; empty = off, the default — nothing is written into the
-// user's vault unasked). The vault RAG index picks the note up on its next sync.
-export function writeSummaryToVault(summary, { title, dateLabel }) {
-  const rel = (process.env.SESSION_SUMMARY_VAULT_DIR || '').trim();
+// Write a note into the Obsidian vault: folder `rel` relative to
+// OBSIDIAN_VAULT_PATH (an absolute path inside the vault works too). Returns
+// the file path, or null when off (empty `rel`), outside the vault or failed —
+// never throws, a vault copy must not fail a finalize.
+function writeVaultNote(body, { rel, varName, tag, type, title, dateLabel, heading }) {
+  rel = (rel || '').trim();
   const vault = (process.env.OBSIDIAN_VAULT_PATH || '').trim();
-  if (!rel || !vault || !summary) return null;
+  if (!rel || !vault || !body) return null;
   const dir = path.resolve(vault, rel);
-  // Must stay inside the vault (rel comes from config, '..' would escape it).
-  if (path.relative(path.resolve(vault), dir).startsWith('..')) {
-    warn('session-summary: SESSION_SUMMARY_VAULT_DIR points outside the vault — not written');
+  // Must stay inside the vault (rel comes from config, '..' or another drive
+  // would escape it).
+  const inside = path.relative(path.resolve(vault), dir);
+  if (inside.startsWith('..') || path.isAbsolute(inside)) {
+    warn(`${tag}: ${varName} points outside the vault — not written`);
     return null;
   }
   try {
     fs.mkdirSync(dir, { recursive: true });
     const safe = String(title).replace(/[^\p{L}\p{N} ._-]+/gu, '_').slice(0, 80);
     const file = path.join(dir, `${safe}.md`);
-    const front = ['---', 'type: session-summary', `date: ${dateLabel}`, 'source: rabenauge-finalize', '---', ''].join('\n');
-    fs.writeFileSync(file, `${front}# ${title}\n\n${summary}\n`);
-    log('session-summary: written to vault', file);
+    const front = ['---', `type: ${type}`, `date: ${dateLabel}`, 'source: rabenauge-finalize', '---', ''].join('\n');
+    fs.writeFileSync(file, `${front}${heading ? `# ${title}\n\n` : ''}${String(body).trimEnd()}\n`);
+    log(`${tag}: written to vault`, file);
     return file;
   } catch (e) {
-    warn('session-summary: vault write failed —', e.message);
+    warn(`${tag}: vault write failed —`, e.message);
     return null;
   }
+}
+
+// Optional copy into the Obsidian vault (SESSION_SUMMARY_VAULT_DIR, relative to
+// OBSIDIAN_VAULT_PATH; empty = off, the default — nothing is written into the
+// user's vault unasked). The vault RAG index picks the note up on its next sync.
+export function writeSummaryToVault(summary, { title, dateLabel }) {
+  return writeVaultNote(summary, {
+    rel: process.env.SESSION_SUMMARY_VAULT_DIR, varName: 'SESSION_SUMMARY_VAULT_DIR', tag: 'session-summary',
+    type: 'session-summary', title, dateLabel, heading: true,
+  });
+}
+
+// Optional copy of the finished transcript.md into the vault
+// (TRANSCRIPT_VAULT_DIR, same rules; empty = off). The transcript brings its
+// own "# Session …" heading. A re-finalize overwrites the note. Put it in a
+// folder outside the RAG index (e.g. 99_Rabenauge/Transkripte with 99_*/ in
+// RAG_EXCLUDE) — a 5-hour transcript is ~450 KB of raw dialogue.
+export function writeTranscriptToVault(md, { title, dateLabel }) {
+  return writeVaultNote(md, {
+    rel: process.env.TRANSCRIPT_VAULT_DIR, varName: 'TRANSCRIPT_VAULT_DIR', tag: 'transcript',
+    type: 'session-transcript', title, dateLabel, heading: false,
+  });
 }
 
 // Summary of the most recent finalized session in the archive (for "what

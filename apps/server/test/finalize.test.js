@@ -124,6 +124,33 @@ test('finalizeSession writes transcript + archive with checksums', async () => {
   assert.ok(fs.existsSync(path.join(result.archiveDir, 'audio', 'a.wav')));
 });
 
+test('finalizeSession copies the finished transcript into the vault when TRANSCRIPT_VAULT_DIR is set', async () => {
+  const upload = tmpdir();
+  const out = tmpdir();
+  const vault = tmpdir();
+  const saved = { v: process.env.OBSIDIAN_VAULT_PATH, d: process.env.TRANSCRIPT_VAULT_DIR };
+  process.env.OBSIDIAN_VAULT_PATH = vault;
+  process.env.TRANSCRIPT_VAULT_DIR = '99_Rabenauge/Transkripte';
+  try {
+    const result = await finalizeSession({
+      sessionId: String(BASE), manifest: { ...baseManifest(upload), sessionName: '2023-11-14T22-13-20-000Z' }, events, uploadDir: upload,
+      archiveRoot: path.join(out, 'archive'), transcriptRoot: path.join(out, 'transcripts'),
+      transcribeFn: fakeStt({ 'a.wav': { text: 'Auf nach Graufurt', words: null }, 'b.wav': { text: 'Moment mal', words: null } }),
+      opts: { timeZone: 'UTC', summarizeFn: async () => null },
+    });
+    const note = path.join(vault, '99_Rabenauge', 'Transkripte', '2023-11-14 Session-Transkript _2023-11-14T22-13-20-000Z_.md');
+    assert.ok(fs.existsSync(note), 'vault note written');
+    const text = fs.readFileSync(note, 'utf8');
+    assert.match(text, /^---\ntype: session-transcript\ndate: 2023-11-14\n/);
+    assert.ok(text.endsWith(fs.readFileSync(result.transcriptPath, 'utf8').trimEnd() + '\n'), 'same transcript as transcript.md');
+    assert.ok(fs.existsSync(result.transcriptPath), 'transcripts/ copy unchanged');
+  } finally {
+    for (const [k, v] of [['OBSIDIAN_VAULT_PATH', saved.v], ['TRANSCRIPT_VAULT_DIR', saved.d]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
+
 test('the session summary sees the players only — not the assistant\'s replies', async () => {
   const upload = tmpdir();
   const out = tmpdir();

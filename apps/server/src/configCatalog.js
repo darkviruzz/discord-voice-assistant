@@ -293,6 +293,17 @@ export const CATALOG = [
       + 'Pfade außerhalb des Vaults werden abgelehnt.',
   },
   {
+    scope: 'server', group: 'Server · Finalize & Speicherung', key: 'TRANSCRIPT_VAULT_DIR',
+    label: 'Fertiges Transkript zusätzlich in den Vault schreiben', type: 'string', def: '',
+    applyMode: 'next-finalize',
+    desc: 'Ordner relativ zu OBSIDIAN_VAULT_PATH (z. B. 99_Rabenauge/Transkripte), in den '
+      + 'nach jedem Finalize eine Kopie von transcript.md als Notiz '
+      + '„<Datum> Session-Transkript (<Session>)“ geschrieben wird; ein Neu-Finalize '
+      + 'überschreibt sie. Leer = aus. Pfade außerhalb des Vaults werden abgelehnt. Am '
+      + 'besten ein Ordner außerhalb des RAG-Index (RAG_EXCLUDE) — ein Transkript ist '
+      + 'mehrere hundert KB Rohdialog. Die Live-Protokolle (TRANSCRIPT_DIR) bleiben, wo sie sind.',
+  },
+  {
     scope: 'server', group: 'Server · Finalize & Speicherung', key: 'SESSION_SUMMARY_PART_PROMPT_FILE',
     label: 'Prompt-Datei: Abschnitt verdichten', type: 'string', def: '',
     applyMode: 'next-finalize',

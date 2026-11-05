@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { buildModelFromEvents, mergeTranscript, speakerLabel, isBracketOnly, markDetections, computeParticipants, weaveAssistantTurns } from './merge.js';
 import { buildAudioArchive } from './archive.js';
-import { summarizeSession, writeSummaryToVault, latestSessionSummary } from './summary.js';
+import { summarizeSession, writeSummaryToVault, writeTranscriptToVault, latestSessionSummary } from './summary.js';
 import { resetLastSessionCache } from '../lastSession.js';
 import { postprocessUtterance } from '../sttPostprocess.js';
 import { warn, log, debug } from '../logger.js';
@@ -186,6 +186,10 @@ export async function finalizeSession({
   const transcriptPath = path.join(transcriptDir, 'transcript.md');
   fs.writeFileSync(transcriptPath, md);
   fs.writeFileSync(path.join(archiveDir, 'transcript.md'), md);
+  // Session date in the FINALIZE time zone — names the vault notes.
+  const dateLabel = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(model.sessionStartMs));
+  // Optional copy into the Obsidian vault (TRANSCRIPT_VAULT_DIR; off when empty).
+  writeTranscriptToVault(md, { title: `${dateLabel} Session-Transkript (${dirName})`, dateLabel });
 
   // JSONL snapshot.
   if (jsonlPath && fs.existsSync(jsonlPath)) {
@@ -211,7 +215,6 @@ export async function finalizeSession({
   if (summary) {
     fs.writeFileSync(path.join(archiveDir, 'summary.md'), summary + '\n');
     fs.writeFileSync(path.join(transcriptDir, 'summary.md'), summary + '\n');
-    const dateLabel = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(model.sessionStartMs));
     writeSummaryToVault(summary, { title: `${dateLabel} Session-Zusammenfassung (${dirName})`, dateLabel });
     // The recap context ("Was war letztes Mal?", /recap) caches its archive
     // lookup for 30 s — a /recap right after this finalize must see it.

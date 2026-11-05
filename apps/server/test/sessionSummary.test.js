@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   transcriptBody, compactTranscript, chunkRecords, chunkLines, capText, capSummary, partialNote, PART_SYSTEM, FINAL_SYSTEM,
-  summarizeSession, writeSummaryToVault, latestSessionSummary, backgroundHint,
+  summarizeSession, writeSummaryToVault, writeTranscriptToVault, latestSessionSummary, backgroundHint,
 } from '../src/finalize/summary.js';
 import { _resetVocabularyCache } from '../src/sttVocabulary.js';
 import { _resetPromptCache } from '../src/promptFiles.js';
@@ -277,6 +277,34 @@ test('vault copy: off by default, written inside the vault, refuses to escape it
     assert.equal(writeSummaryToVault('x', { title: 'y', dateLabel: 'z' }), null);
     assert.ok(!fs.existsSync(path.join(vault, '..', 'outside', 'y.md')));
   } finally { fs.rmSync(vault, { recursive: true, force: true }); }
+});
+
+test('transcript vault copy: off by default, own front matter, no extra heading, stays inside the vault', () => {
+  const vault = tmp();
+  const saved = process.env.TRANSCRIPT_VAULT_DIR;
+  try {
+    process.env.OBSIDIAN_VAULT_PATH = vault;
+    delete process.env.TRANSCRIPT_VAULT_DIR;
+    const md = '# Session 03.11.2026 — DnD\n\n[19:19:50] **Fabi (Rhogar):** Auf nach Crossford.\n';
+    assert.equal(writeTranscriptToVault(md, { title: 't', dateLabel: '2026-11-03' }), null, 'off unless configured');
+    process.env.TRANSCRIPT_VAULT_DIR = '99_Rabenauge/Transkripte';
+    const f = writeTranscriptToVault(md, { title: '2026-11-03 Session-Transkript (2026-11-03T18-19-50-276Z)', dateLabel: '2026-11-03' });
+    assert.equal(f, path.join(vault, '99_Rabenauge', 'Transkripte', '2026-11-03 Session-Transkript _2026-11-03T18-19-50-276Z_.md'));
+    assert.equal(fs.readFileSync(f, 'utf8'), `---\ntype: session-transcript\ndate: 2026-11-03\nsource: rabenauge-finalize\n---\n${md}`);
+    // Re-finalize overwrites the same note.
+    assert.equal(writeTranscriptToVault('# neu\n', { title: '2026-11-03 Session-Transkript (2026-11-03T18-19-50-276Z)', dateLabel: '2026-11-03' }), f);
+    assert.match(fs.readFileSync(f, 'utf8'), /\n# neu\n$/);
+    // An absolute path inside the vault is fine; anything outside is refused.
+    process.env.TRANSCRIPT_VAULT_DIR = path.join(vault, 'Abs');
+    assert.ok(writeTranscriptToVault(md, { title: 'a', dateLabel: 'd' }).startsWith(path.join(vault, 'Abs')));
+    process.env.TRANSCRIPT_VAULT_DIR = '../outside';
+    assert.equal(writeTranscriptToVault(md, { title: 'b', dateLabel: 'd' }), null);
+    process.env.TRANSCRIPT_VAULT_DIR = path.join(os.tmpdir(), 'elsewhere-transcripts');
+    assert.equal(writeTranscriptToVault(md, { title: 'c', dateLabel: 'd' }), null);
+  } finally {
+    if (saved === undefined) delete process.env.TRANSCRIPT_VAULT_DIR; else process.env.TRANSCRIPT_VAULT_DIR = saved;
+    fs.rmSync(vault, { recursive: true, force: true });
+  }
 });
 
 test('backgroundHint: campaign + previous session, each capped, 0 = off, with the not-this-session rule', () => {

@@ -45,11 +45,11 @@ Live-Test gemergt.
 
 ## Offene Punkte / Entscheidungen
 
-- **DATA_DIR des Bots** liegt laut Betriebsnotizen auf `/tmp/voice-sessions`
-  — `/tmp` wird beim Reboot geleert: noch nicht finalisierte Aufnahmen und die
-  Panel-Overrides (`config.overrides.json`) gingen verloren. Empfehlung:
-  persistenter Pfad (z. B. `/var/lib/discord-bot/sessions`, dem `discordbot`
-  gehörend).
+- **DATA_DIR des Bots** liegt noch auf `/tmp/voice-sessions` — `/tmp` wird
+  beim Reboot geleert (am 2026-11-05 passiert). Umzug nach
+  `/home/discordbot/voice-sessions` und NAS-Archiv der Originale: Schritte in
+  [`../bot-host-speicher.md`](../bot-host-speicher.md). Der Bot warnt beim Start
+  und bei `/join`, solange DATA_DIR unter `/tmp` liegt.
 - **Rabenauge-Antwortqualität/Latenz:** live läuft `gemma4:12b`.
   - Modellwahl am 2026-10-19 besprochen: lokal ist es das beste deutsche Modell
     bis 14B (EuroEval DE 2.01).

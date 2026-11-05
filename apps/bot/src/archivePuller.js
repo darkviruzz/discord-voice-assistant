@@ -8,6 +8,8 @@ import { Readable, PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import { httpBaseUrl } from './transport/index.js';
 import { log, warn, debug } from './logger.js';
+import { isDiskFullError } from './fsSafe.js';
+import { diskConfig, freeBytes, formatBytes } from './diskSpace.js';
 
 // Where the bot keeps its own (persistent-host) copy of the finished session
 // archives (transcript.md, manifest.json, speaker-map.json, session.jsonl,
@@ -16,7 +18,22 @@ import { log, warn, debug } from './logger.js';
 // pulls it back here over the same WireGuard link. Mirrors BOT_TRANSCRIPT_DIR in
 // transcriptWriter.js (default ~/archive, longer default retention).
 const DIR = process.env.BOT_ARCHIVE_DIR || join(homedir(), 'archive');
-const RETENTION_DAYS = Number(process.env.BOT_ARCHIVE_RETENTION_DAYS) || 60;
+// Unset/invalid → 60 days. 0, "off" or "never" → never prune (for a
+// BOT_ARCHIVE_DIR on the NAS that is meant to keep the originals).
+export function retentionDays(raw = process.env.BOT_ARCHIVE_RETENTION_DAYS) {
+  if (raw == null || String(raw).trim() === '') return 60;
+  if (/^(0|off|never|nie)$/i.test(String(raw).trim())) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 60;
+}
+const RETENTION_DAYS = retentionDays();
+
+// BOT_ARCHIVE_PULL=false turns the pull off — for a persistent server that
+// keeps its own archive and no separate archive storage on the bot side.
+// Read per finalize.
+function pullEnabled(env = process.env) {
+  return !/^(0|false|no|off)$/i.test(String(env.BOT_ARCHIVE_PULL ?? 'true').trim());
+}
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 // Same shape the server's archive routes accept: a single root file ('name') or
@@ -57,11 +74,20 @@ async function streamToFileWithSha(webBody, dest) {
 // the manifest. Files land in BOT_ARCHIVE_DIR/<archiveName>/<relPath>.
 //
 // Returns:
-//   { skipped: true }                          — no server base URL / no name (no-op)
-//   { ok, files, failed: [relPath], bytes }    — ok=false if any single file failed
+//   { skipped: true, reason }                     — pull off / no server base URL / no name (no-op)
+//   { ok: false, noSpace: { need, free }, ... }   — not enough room: nothing pulled
+//   { ok, files, failed: [relPath], bytes }       — ok=false if any single file failed
 // Throws ONLY on a total failure (manifest unreachable); individual file
-// failures are collected in `failed` and a corrupt partial file is deleted.
-export async function pullArchive({ archiveName } = {}) {
+// failures are collected in `failed` and their partial files are deleted.
+// It never fills the disk: the archive must fit next to DISK_RESERVE_MB, and a
+// disk-full error stops the pull instead of failing every remaining file.
+export async function pullArchive({ archiveName, _deps = {} } = {}) {
+  const getFree = _deps.freeBytes ?? freeBytes;
+  const streamToFile = _deps.streamToFile ?? streamToFileWithSha;
+  if (!pullEnabled()) {
+    debug('archivePuller: BOT_ARCHIVE_PULL=false — skipping archive pull');
+    return { skipped: true, reason: 'disabled' };
+  }
   const base = httpBaseUrl();
   if (!base) {
     debug('archivePuller: no SERVER_BASE_URL — skipping archive pull');
@@ -92,6 +118,17 @@ export async function pullArchive({ archiveName } = {}) {
   const manifest = await mRes.json();
   const files = Array.isArray(manifest.files) ? manifest.files : [];
 
+  // Room check before writing anything. On 2026-11-04 the pull filled the bot
+  // host's disk and the finalize bookkeeping after it failed.
+  const need = files.reduce((sum, f) => sum + (Number(f?.bytes) || 0), 0);
+  const { reserveBytes } = diskConfig();
+  let free = null;
+  try { free = getFree(DIR); } catch (e) { debug('archivePuller: cannot measure free space:', e.message); }
+  if (free != null && free - reserveBytes < need) {
+    warn(`archivePuller: ${archiveName} skipped — needs ${formatBytes(need)}, only ${formatBytes(free)} free in ${DIR} (reserve ${formatBytes(reserveBytes)})`);
+    return { ok: false, noSpace: { need, free }, files: 0, failed: [], bytes: 0 };
+  }
+
   const destRoot = join(DIR, archiveName);
   mkdirSync(destRoot, { recursive: true });
 
@@ -100,8 +137,10 @@ export async function pullArchive({ archiveName } = {}) {
   let bytes = 0;
 
   // Sequential — no parallel storm over the tunnel.
+  let diskFull = false;
   for (const f of files) {
     const relPath = f && f.relPath;
+    if (diskFull) { if (relPath) failed.push(relPath); continue; }
     if (!isSafeRelPath(relPath)) {
       warn('archivePuller: skipping unsafe relPath', relPath);
       if (relPath) failed.push(relPath);
@@ -113,7 +152,7 @@ export async function pullArchive({ archiveName } = {}) {
       const url = `${base}/finalize/archive/${encName}/file?path=${encodeURIComponent(relPath)}`;
       const res = await fetch(url, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const sha = await streamToFileWithSha(res.body, dest);
+      const sha = await streamToFile(res.body, dest);
       if (f.sha256 && sha !== f.sha256) {
         try { rmSync(dest, { force: true }); } catch {}
         throw new Error(`sha256 mismatch (want ${String(f.sha256).slice(0, 12)}…, got ${sha.slice(0, 12)}…)`);
@@ -122,17 +161,25 @@ export async function pullArchive({ archiveName } = {}) {
       bytes += Number(f.bytes) || 0;
       debug('archivePuller: pulled', relPath, sha.slice(0, 12));
     } catch (e) {
-      warn('archivePuller: failed', relPath, '-', e.message);
+      // A broken stream leaves a partial file — never keep it around.
+      try { rmSync(dest, { force: true }); } catch {}
       failed.push(relPath);
+      if (isDiskFullError(e)) {
+        diskFull = true;
+        warn('archivePuller: disk full at', relPath, '— stopping the pull (remaining files not attempted)');
+      } else {
+        warn('archivePuller: failed', relPath, '-', e.message);
+      }
     }
   }
 
   const ok = failed.length === 0;
   log(`archivePuller: ${archiveName} → ${destRoot} (${okCount}/${files.length} files, ${bytes} bytes${ok ? '' : `, ${failed.length} failed`})`);
-  return { ok, files: okCount, failed, bytes };
+  return { ok, files: okCount, failed, bytes, ...(diskFull ? { diskFull: true } : {}) };
 }
 
 function pruneOldArchives() {
+  if (!RETENTION_DAYS) return; // 0/off/never → keep everything
   try {
     mkdirSync(DIR, { recursive: true });
     const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;

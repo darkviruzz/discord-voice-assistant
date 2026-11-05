@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import express from 'express';
 import {
   buildManifest, applyRetention, chunksDir, sourceChunksDir, writeManifest, uploadSession,
+  pruneArchived, archivedRetentionDays,
 } from '../src/finalize.js';
 // The upload is exercised against the REAL server route (C1), like archivePuller.test.js.
 import { registerFinalizeHttpRoutes } from '../../server/src/finalizeHttp.js';
@@ -199,4 +200,43 @@ test('uploadSession runs FINALIZE_UPLOAD_CMD with {src} and {sessionId} substitu
 test('uploadSession propagates a failing upload command (WAVs must be kept for a retry)', async () => {
   process.env.FINALIZE_UPLOAD_CMD = `${JSON.stringify(process.execPath)} -e "console.error('scp: connection refused'); process.exit(7)"`;
   await assert.rejects(() => uploadSession(makeSession()), /exited 7: scp: connection refused/);
+});
+
+test('applyRetention delete-after-pull deletes only when the archive pull verified every file', () => {
+  const pulled = makeSession();
+  assert.equal(applyRetention(pulled, { policy: 'delete-after-pull', pulled: true }).policy, 'delete');
+  assert.equal(fs.existsSync(chunksDir(pulled)), false);
+  assert.equal(fs.existsSync(path.join(path.dirname(pulled.dir), '_archived')), false);
+
+  const notPulled = makeSession();
+  assert.equal(applyRetention(notPulled, { policy: 'delete-after-pull', pulled: false }).policy, 'move');
+  const moved = path.join(path.dirname(notPulled.dir), '_archived', notPulled.id, 'chunks');
+  assert.equal(fs.readFileSync(path.join(moved, `111_${notPulled.startedAt}.wav`), 'utf8'), 'AUDIO-A', 'kept when the pull failed');
+});
+
+test('pruneArchived removes _archived folders past ARCHIVED_RETENTION_DAYS, nothing when unset', () => {
+  const root = scratch('bot-archived-prune-');
+  const DAY = 24 * 60 * 60 * 1000;
+  const mk = (name, days) => {
+    const d = path.join(root, '_archived', name, 'chunks');
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'x.wav'), 'x');
+    const t = new Date(Date.now() - days * DAY);
+    fs.utimesSync(path.join(root, '_archived', name), t, t);
+  };
+  mk('old', 20);
+  mk('new', 2);
+  assert.deepEqual(pruneArchived(root, null), []);
+  assert.deepEqual(pruneArchived(root, 14), ['old']);
+  assert.equal(fs.existsSync(path.join(root, '_archived', 'old')), false);
+  assert.ok(fs.existsSync(path.join(root, '_archived', 'new', 'chunks', 'x.wav')));
+  assert.deepEqual(pruneArchived(scratch('bot-archived-none-'), 14), [], 'no _archived dir → nothing');
+});
+
+test('archivedRetentionDays: unset, 0 and words mean never', () => {
+  assert.equal(archivedRetentionDays(undefined), null);
+  assert.equal(archivedRetentionDays(''), null);
+  assert.equal(archivedRetentionDays('0'), null);
+  assert.equal(archivedRetentionDays('off'), null);
+  assert.equal(archivedRetentionDays('14'), 14);
 });

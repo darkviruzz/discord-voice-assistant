@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureDir, safePath, debug, log } from './logger.js';
 import { nowMs, fmtTs, toInt } from './util.js';
+import { writeFileAtomic } from './fsSafe.js';
 
 const DATA_DIR = process.env.DATA_DIR || path.resolve('./data');
 const IDLE_HOURS = toInt(process.env.SESSION_IDLE_HOURS, 4);
@@ -48,10 +49,12 @@ export class SessionManager {
     return best;
   }
 
-  // Persist any session object (not necessarily the active one).
+  // Persist any session object (not necessarily the active one). Atomic: a
+  // failed write (disk full) leaves the previous session.json intact instead
+  // of a truncated, unparseable one.
   static save(session) {
     if (!session?.dir) return;
-    fs.writeFileSync(path.join(session.dir, 'session.json'), JSON.stringify(session, null, 2));
+    writeFileAtomic(path.join(session.dir, 'session.json'), JSON.stringify(session, null, 2));
   }
 
   // Find a session by its wire id (= startedAt as a string). Used to resolve
@@ -97,7 +100,7 @@ export class SessionManager {
     const dir = path.join(DATA_DIR, id);
     ensureDir(dir);
     const s = { id, dir, startedAt: nowMs(), lastActivity: nowMs(), status: SessionStatus.OPEN, timeline: [] };
-    fs.writeFileSync(path.join(dir, 'session.json'), JSON.stringify(s, null, 2));
+    writeFileAtomic(path.join(dir, 'session.json'), JSON.stringify(s, null, 2));
     this.active = s;
     log('Neue Session gestartet:', id);
     return s;
@@ -162,7 +165,7 @@ export class SessionManager {
 
   persist() {
     if (!this.active) return;
-    fs.writeFileSync(path.join(this.active.dir, 'session.json'), JSON.stringify(this.active, null, 2));
+    writeFileAtomic(path.join(this.active.dir, 'session.json'), JSON.stringify(this.active, null, 2));
   }
 
   static tryAutoFinalizeOld() {

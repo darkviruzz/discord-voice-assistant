@@ -220,3 +220,70 @@ test('startArchiveCleanup prunes archive dirs past the retention window, keeps r
   assert.ok(existsSync(looseFile), 'only directories are pruned');
   assert.ok(existsSync(join(botArchiveDir, ARCHIVE_NAME, 'transcript.md')), 'freshly pulled archive kept');
 });
+
+test('the archive must fit next to the reserve — otherwise nothing is fetched or written', async () => {
+  const hits = [];
+  const app = express();
+  app.get('/finalize/archive/:n/manifest', (req, res) => res.json({
+    files: [
+      { relPath: 'audio/a.wav', sha256: 'x', bytes: 600e6 },
+      { relPath: 'audio/b.wav', sha256: 'y', bytes: 600e6 },
+    ],
+  }));
+  app.get('/finalize/archive/:n/file', (req, res) => { hits.push(req.query.path); res.end('x'); });
+  const NAME = 'nospace-2026-11-04';
+  const r = await withServer(app, () => pullArchive({ archiveName: NAME, _deps: { freeBytes: () => 1e9 } }));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.noSpace, { need: 1.2e9, free: 1e9 });
+  assert.deepEqual(hits, [], 'no file requested');
+  assert.equal(existsSync(join(botArchiveDir, NAME)), false, 'no folder created');
+});
+
+test('a full disk stops the pull: partial file removed, remaining files not attempted', async () => {
+  const bufs = { 'transcript.md': Buffer.from('t'), 'audio/a.wav': Buffer.from('aaaa'), 'audio/b.wav': Buffer.from('bbbb') };
+  const hits = [];
+  const app = express();
+  app.get('/finalize/archive/:n/manifest', (req, res) => res.json({
+    files: Object.entries(bufs).map(([relPath, b]) => ({ relPath, sha256: sha256(b), bytes: b.length })),
+  }));
+  app.get('/finalize/archive/:n/file', (req, res) => { hits.push(req.query.path); res.end(bufs[req.query.path]); });
+  let n = 0;
+  const streamToFile = async (body, dest) => {
+    n++;
+    const buf = Buffer.from(await new Response(body).arrayBuffer());
+    if (n === 2) {
+      writeFileSync(dest, buf.subarray(0, 2)); // partial, like a write cut off by EDQUOT
+      throw Object.assign(new Error('Unknown system error -122: Unknown system error -122, write'), { errno: -122 });
+    }
+    writeFileSync(dest, buf);
+    return sha256(buf);
+  };
+  const NAME = 'diskfull-2026-11-04';
+  const r = await withServer(app, () => pullArchive({ archiveName: NAME, _deps: { freeBytes: () => 1e12, streamToFile } }));
+  assert.equal(r.ok, false);
+  assert.equal(r.diskFull, true);
+  assert.equal(r.files, 1);
+  assert.deepEqual(r.failed, ['audio/a.wav', 'audio/b.wav']);
+  assert.deepEqual(hits, ['transcript.md', 'audio/a.wav'], 'b.wav never requested');
+  assert.equal(existsSync(join(botArchiveDir, NAME, 'audio', 'a.wav')), false, 'partial file removed');
+  assert.ok(existsSync(join(botArchiveDir, NAME, 'transcript.md')));
+});
+
+test('BOT_ARCHIVE_PULL=false turns the pull off', async () => {
+  process.env.BOT_ARCHIVE_PULL = 'false';
+  try {
+    assert.deepEqual(await pullArchive({ archiveName: ARCHIVE_NAME }), { skipped: true, reason: 'disabled' });
+  } finally {
+    delete process.env.BOT_ARCHIVE_PULL;
+  }
+});
+
+test('retentionDays: default 60, 0/off/never = keep forever', async () => {
+  const { retentionDays } = await import('../src/archivePuller.js');
+  assert.equal(retentionDays(undefined), 60);
+  assert.equal(retentionDays(''), 60);
+  assert.equal(retentionDays('30'), 30);
+  assert.equal(retentionDays('0'), null);
+  assert.equal(retentionDays('never'), null);
+  assert.equal(retentionDays('kaputt'), 60);
+});

@@ -1,4 +1,5 @@
 import { log, warn, debug } from './logger.js';
+import { describeError } from './fsSafe.js';
 
 // Bot-side idle auto-finalize for sessions that were LEFT (/leave, or open
 // sessions found on disk at bot start).
@@ -57,7 +58,7 @@ export class LeaveFinalizeScheduler {
       if (this.isBlocked(sessionId)) { log(`leave-finalize: ${sessionId} is active again — skipped`); return; }
       log(`leave-finalize: idle limit reached for ${sessionId} — finalizing`);
       try { await this.run(sessionId); }
-      catch (e) { warn(`leave-finalize: ${sessionId} failed — ${e.message} (bleibt offen, /finalize run)`); }
+      catch (e) { warn(`leave-finalize: ${sessionId} failed — ${describeError(e)} (bleibt offen, /finalize run)`); }
     });
     this.chain = job;
     return job;

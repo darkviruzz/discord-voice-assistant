@@ -9,7 +9,10 @@ import {
 import { log, warn, error, debug } from './logger.js';
 import { SessionManager, SessionStatus } from './session.js';
 import { UtteranceRecorder } from './recorder.js';
-import { buildManifest, writeManifest, uploadSession, applyRetention } from './finalize.js';
+import { buildManifest, writeManifest, uploadSession, applyRetention, startArchivedCleanup } from './finalize.js';
+import { runFinalizeFlow, withFinalizeLock } from './finalizeFlow.js';
+import { describeError, isDiskFullError } from './fsSafe.js';
+import { DiskWatch, diskConfig, measureRecording, joinDiskLines, statusDiskLine, isTmpPath, freeBytes, formatBytes } from './diskSpace.js';
 import { getVersion } from './version.js';
 import { ensureServerReachable } from './serverAutoStart.js';
 import { scheduleServerStop, cancelServerStop } from './serverAutoStop.js';
@@ -46,6 +49,18 @@ const client = new Client({
 });
 
 const sessions = new SessionManager();
+// Free-space watch on DATA_DIR while recording (see diskSpace.js): silent while
+// there is room, one channel message each when < 1 h and < 15 min are left.
+const diskWatch = new DiskWatch({
+  measure: () => measureRecording(SessionManager.sessionsRoot()),
+  notify: (text) => {
+    warn('disk:', text);
+    resolveSessionTextChannel(sessions.active)
+      .then((ch) => ch?.send(text))
+      .catch((e) => warn('disk warning send failed:', e.message));
+  },
+  intervalMs: () => diskConfig().checkIntervalMs,
+});
 // userId -> UtteranceRecorder (in-flight chunk); lets us dispose() recorders
 // when the voice connection leaves READY (their decryption context goes stale).
 const activeRecordings = new Map();
@@ -223,7 +238,9 @@ function recoverOldSessions() {
     const s = SessionManager.loadById(entry.id);
     if (!s) continue;
     s.status = SessionStatus.OPEN;
-    SessionManager.save(s);
+    // A full disk at boot must not abort startup (transport.start comes after).
+    try { SessionManager.save(s); }
+    catch (e) { warn(`Session ${s.id}: Status-Reset nicht gespeichert — ${describeError(e)}`); continue; }
     warn(`Session ${s.id} hing in FINALIZING (Bot-Neustart während Finalize) — wieder auf OPEN gesetzt.`);
   }
   let open = [];
@@ -242,6 +259,10 @@ client.once('clientReady', async () => {
   setBotStatus(null);
   startTranscriptCleanup();
   startArchiveCleanup();
+  startArchivedCleanup(SessionManager.sessionsRoot());
+  if (isTmpPath(SessionManager.sessionsRoot())) {
+    warn(`DATA_DIR liegt unter /tmp (${SessionManager.sessionsRoot()}) — wird beim Neustart des Bot-Hosts geleert (Aufnahmen, _archived, config.overrides.json). Persistenten Pfad in apps/bot/.env setzen.`);
+  }
   await recoverOldSessions();
   transport.start({ botId: client.user.id, isSessionActive: hasActiveSession });
 
@@ -270,6 +291,7 @@ client.once('clientReady', async () => {
 
 // Detach the active in-memory session and tear down its voice connection.
 function detachActiveSession() {
+  diskWatch.stop();
   disposeAllRecordings('detach');
   // Tell the server the bot left voice (stops clock_sync logging).
   const wid = sessions.wireSessionId();
@@ -340,139 +362,109 @@ async function resolveSessionTextChannel(session, preferred = null) {
 // /finalize run or a racing auto-finalize for the same session.
 const _finalizeInFlight = new Set();
 
-// Shared finalize flow for both manual (/finalize run) and server-initiated
-// (idle auto-finalize) paths: link → lock → manifest → upload → server
-// finalize → status + checksum-gated retention → detach if active. Throws on
-// failure (status reverted / never changed, so it can be retried).
-async function performFinalize(session, opts = {}) {
-  if (_finalizeInFlight.has(session.id)) throw new Error('Diese Session wird bereits finalisiert.');
-  _finalizeInFlight.add(session.id);
-  // Finalize needs the server alive (upload + STT + transcript build). Cancel
-  // any pending idle auto-stop so it can't fire mid-finalize — this also covers
-  // a finalize started after /leave, when the stop was already armed.
-  cancelServerStop();
-  // It also needs the control link for its whole duration (finalize_session
-  // and its reply). Hold it: otherwise the idle release armed by /leave (60 s
-  // grace) drops the socket in the middle of a re-STT that runs for minutes.
-  const releaseLink = transport.holdLink(`finalize ${session.id}`);
-  // Live status in the session's text channel: bot-side steps (connect,
-  // upload) and the server's finalize_progress (x/N utterances, merge, audio),
-  // then the result or the error. Survives the 15-min interaction-token limit
-  // and covers auto-finalizes, which have no interaction at all.
-  const status = new FinalizeStatus({
-    resolveChannel: () => resolveSessionTextChannel(session, opts.channel),
-    header: `🗄️ **Finalize** Session \`${session.id}\`${opts.reason ? ` — ${opts.reason}` : ''}`,
-  });
-  _finalizeStatuses.set(session.id, status);
-  const wireId = String(session.startedAt);
-  const offProgress = transport.onFinalizeProgress((m) => {
-    if (String(m?.sessionId) === wireId) status.update(formatProgress(m));
-  });
-  const onProgress = (text) => { status.update(text); opts.onProgress?.(text); };
-  await status.start('⏳ Startet …');
-  try {
-    // Before touching status/manifest/upload: an unreachable server must leave
-    // the session exactly as it was, so /finalize run can simply be retried.
-    await ensureFinalizeLink(onProgress);
-    const out = await runFinalize(session, { ...opts, onProgress });
-    await status.done(finalizeResultText(out.result, out.retentionNote, { reFinalize: opts.fromArchive, maxChars: status.textRoom() }));
-    return out;
-  } catch (e) {
-    await status.fail(`❌ Finalize fehlgeschlagen: ${e.message}\nDie lokalen Aufnahmen bleiben erhalten — erneut mit \`/finalize run session:${session.id}\`.`);
-    throw e;
-  } finally {
-    offProgress?.();
-    _finalizeStatuses.delete(session.id);
-    _finalizeInFlight.delete(session.id);
-    // Last hold gone → the normal idle policy applies again: with no active
-    // session the link is released after the grace period.
-    releaseLink();
-    // Finalize is done (success or failure) → re-arm the idle auto-stop. A
-    // finalize started after /leave (session already detached, so nothing else
-    // re-arms it) would otherwise leave the cloud server running indefinitely.
-    // The hasWork re-check at fire time skips the stop if a session is live.
-    scheduleServerStop({ hasWork: hasServerWork });
+// Finalize writes session.json and manifest.json before it uploads anything —
+// refuse up front (session untouched) when even that room is missing.
+function assertDiskForFinalize() {
+  const { reserveBytes } = diskConfig();
+  let free;
+  try { free = freeBytes(SessionManager.sessionsRoot()); } catch { return; } // cannot measure → just try
+  const need = Math.min(reserveBytes, 50e6);
+  if (free < need) {
+    throw new Error(`💾 Speicher auf dem Bot-Host fast voll (${formatBytes(free)} frei). Erst Platz schaffen, dann erneut \`/finalize run\`.`);
   }
 }
 
-// performFinalize's body, run with the control link up and held.
-async function runFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
-  const prevStatus = session.status;
-  session.status = SessionStatus.FINALIZING;
-  SessionManager.save(session);
-  try {
-    let result;
-    if (fromArchive) {
-      // Re-finalize: no upload — the server rebuilds from the archived originals.
-      onProgress('⏳ Server finalisiert aus dem Archiv neu …');
-      result = await transport.finalizeSession({ sessionId: String(session.startedAt), sessionName: session.id });
-    } else {
-      const manifest = buildManifest(session, {
-        channelName,
-        guildName,
-        wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
-        botVersion: getVersion(),
+// Shared finalize flow for both manual (/finalize run) and server-initiated
+// (idle auto-finalize) paths: link → lock → manifest → upload → server
+// finalize → status + checksum-gated retention → detach if active. Throws on
+// failure (status reverted / never changed, so it can be retried). The lock is
+// released whatever happens — also when setting up the status message fails.
+async function performFinalize(session, opts = {}) {
+  return withFinalizeLock(_finalizeInFlight, session.id, async () => {
+    // Finalize needs the server alive (upload + STT + transcript build). Cancel
+    // any pending idle auto-stop so it can't fire mid-finalize — this also covers
+    // a finalize started after /leave, when the stop was already armed.
+    cancelServerStop();
+    // It also needs the control link for its whole duration (finalize_session
+    // and its reply). Hold it: otherwise the idle release armed by /leave (60 s
+    // grace) drops the socket in the middle of a re-STT that runs for minutes.
+    const releaseLink = transport.holdLink(`finalize ${session.id}`);
+    let offProgress = null;
+    try {
+      // Live status in the session's text channel: bot-side steps (connect,
+      // upload) and the server's finalize_progress (x/N utterances, merge, audio),
+      // then the result or the error. Survives the 15-min interaction-token limit
+      // and covers auto-finalizes, which have no interaction at all.
+      const status = new FinalizeStatus({
+        resolveChannel: () => resolveSessionTextChannel(session, opts.channel),
+        header: `🗄️ **Finalize** Session \`${session.id}\`${opts.reason ? ` — ${opts.reason}` : ''}`,
       });
-      if (manifest.utterances.length === 0) throw new Error('Session enthält keine aufgenommenen Äußerungen.');
-      writeManifest(session, manifest);
-
-      onProgress(`⏳ Lade ${manifest.utterances.length} Audiodateien zum Server …`);
-      // Ensure the server-side upload dir exists (scp won't create it remotely).
-      try { await transport.finalizePrepare(manifest.sessionId); }
-      catch (e) { warn('finalize: prepare failed (continuing):', e.message); }
-      await uploadSession(session);
-
-      onProgress('⏳ Server transkribiert und baut das Transkript …');
-      result = await transport.finalizeSession({ sessionId: manifest.sessionId, sessionName: session.id });
-    }
-    if (!result.ok) throw new Error(result.error || 'Finalize fehlgeschlagen');
-
-    const fullyVerified = (result.missing?.length ?? 0) === 0 && (result.mismatched?.length ?? 0) === 0;
-    session.status = SessionStatus.FINALIZED;
-    session.finalizedAt = Date.now();
-    session.finalize = { transcriptPath: result.transcriptPath, archiveDir: result.archiveDir, userCount: result.userCount };
-    SessionManager.save(session);
-
-    // Pull the finished archive back onto the persistent bot host immediately —
-    // on a cloud instance the archive dies with the box at auto-stop, and the
-    // instance can only reach Proxmox (not the bot), so the bot must pull. Purely
-    // additive: a failure here NEVER kips the finalize result (stop.sh --backup
-    // stays as the safety net), it only annotates the status line.
-    let archiveNote = '';
-    if (result.archiveName) {
+      _finalizeStatuses.set(session.id, status);
+      const wireId = String(session.startedAt);
+      offProgress = transport.onFinalizeProgress((m) => {
+        if (String(m?.sessionId) === wireId) status.update(formatProgress(m));
+      });
+      const onProgress = (text) => { status.update(text); opts.onProgress?.(text); };
+      await status.start('⏳ Startet …');
       try {
-        const pull = await pullArchive({ archiveName: result.archiveName });
-        if (pull && pull.ok) {
-          archiveNote = ` 📦 Archiv lokal gesichert (${pull.files} Dateien).`;
-        } else if (pull && !pull.skipped) {
-          archiveNote = ` ⚠️ Archiv-Pull unvollständig (${pull.failed?.length ?? 0} Datei(en) fehlgeschlagen) — stop.sh --backup bleibt als Netz.`;
-        }
+        // Before touching status/manifest/upload: an unreachable server or a
+        // full disk must leave the session exactly as it was, so /finalize run
+        // can simply be retried.
+        assertDiskForFinalize();
+        await ensureFinalizeLink(onProgress);
+        const out = await runFinalize(session, { ...opts, onProgress });
+        await status.done(finalizeResultText(out.result, out.retentionNote, { reFinalize: opts.fromArchive, maxChars: status.textRoom() }));
+        return out;
       } catch (e) {
-        warn('finalize: archive pull failed:', e.message);
-        archiveNote = ' ⚠️ Archiv-Pull fehlgeschlagen — stop.sh --backup bleibt als Netz.';
+        await status.fail(`❌ Finalize fehlgeschlagen: ${describeError(e)}\nDie lokalen Aufnahmen bleiben erhalten — erneut mit \`/finalize run session:${session.id}\`.`);
+        throw e;
       }
+    } finally {
+      try { offProgress?.(); } catch {}
+      _finalizeStatuses.delete(session.id);
+      // Last hold gone → the normal idle policy applies again: with no active
+      // session the link is released after the grace period.
+      releaseLink();
+      // Finalize is done (success or failure) → re-arm the idle auto-stop. A
+      // finalize started after /leave (session already detached, so nothing else
+      // re-arms it) would otherwise leave the cloud server running indefinitely.
+      // The hasWork re-check at fire time skips the stop if a session is live.
+      scheduleServerStop({ hasWork: hasServerWork });
     }
+  });
+}
 
-    let retentionNote = '';
-    if (fromArchive) {
-      retentionNote = '';
-    } else if (fullyVerified) {
-      const r = applyRetention(session);
-      retentionNote = r.noop ? '' : (r.policy === 'delete' ? ' Lokale WAVs gelöscht (Original liegt im Server-Archiv).' : ' Lokale WAVs ins _archived/ verschoben.');
-    } else {
-      retentionNote = ` ⚠️ ${result.missing?.length ?? 0} fehlende / ${result.mismatched?.length ?? 0} fehlerhafte Uploads – lokale WAVs bleiben für erneuten Versuch erhalten.`;
-    }
-
+// performFinalize's body, run with the control link up and held. The status
+// rules live in finalizeFlow.js; here only the bot's wiring.
+async function runFinalize(session, { channelName = null, guildName = null, onProgress = () => {}, fromArchive = false } = {}) {
+  const out = await runFinalizeFlow(session, {
+    fromArchive,
+    onProgress,
+    manifestExtra: {
+      channelName,
+      guildName,
+      wakeWord: process.env.WAKE_WORD ?? 'Rabenauge',
+      botVersion: getVersion(),
+    },
+  }, {
+    saveSession: (s) => SessionManager.save(s),
+    buildManifest,
+    writeManifest,
+    prepare: (sessionId) => transport.finalizePrepare(sessionId),
+    upload: uploadSession,
+    finalizeSession: (payload) => transport.finalizeSession(payload),
+    pullArchive,
+    applyRetention: (s, { pulled }) => applyRetention(s, { pulled }),
+    warn,
+  });
+  // Finalized = over: leave voice if still attached, and end the session for
+  // the server link too (no revival on the next reconnect, later /recap not
+  // logged into this session). Never turns a finished finalize into a failure.
+  try {
     if (sessions.active && sessions.active.id === session.id) detachActiveSession();
-    // Finalized = over for the server link too (no revival on the next
-    // reconnect, later /recap not logged into this session).
     transport.endSessionIfCurrent(String(session.startedAt));
-    return { result, fullyVerified, retentionNote: retentionNote + archiveNote };
-  } catch (e) {
-    session.status = prevStatus;
-    SessionManager.save(session);
-    throw e;
-  }
+  } catch (e) { warn('finalize: detach after finalize failed:', e.message); }
+  return out;
 }
 
 // Server-initiated finalize (idle timeout). The server decided the timing; the
@@ -497,7 +489,7 @@ async function handleAutoFinalize({ sessionId }) {
     // Result and errors show up in the session's status message (performFinalize).
     await performFinalize(session, { reason: 'automatisch (Inaktivität)' });
   } catch (e) {
-    warn('auto-finalize failed:', e.message);
+    warn('auto-finalize failed:', describeError(e));
   }
 }
 
@@ -551,10 +543,10 @@ client.on('interactionCreate', async (i) => {
       if (sub === 'status') {
         const connected = transport.isConnected();
         const ver = transport.serverVersion();
-        return i.reply({
-          content: connected ? `🟢 Server verbunden${ver ? ` (v${ver})` : ''}.` : '🔴 Keine Server-Verbindung.',
-          flags: MessageFlags.Ephemeral,
-        });
+        const lines = [connected ? `🟢 Server verbunden${ver ? ` (v${ver})` : ''}.` : '🔴 Keine Server-Verbindung.'];
+        const disk = statusDiskLine(measureRecording(SessionManager.sessionsRoot()));
+        if (disk) lines.push(disk);
+        return i.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
       }
       if (sub === 'restart') {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
@@ -689,6 +681,7 @@ client.on('interactionCreate', async (i) => {
           // Treat it like an implicit /leave (kicked, channel deleted, network
           // gone): without this the session was neither reported as left nor
           // armed for idle auto-finalize, and the server link stayed open.
+          diskWatch.stop();
           disposeAllRecordings('voice disconnect');
           transport.clearVoiceConnection();
           const wid = sessions.wireSessionId();
@@ -718,11 +711,16 @@ client.on('interactionCreate', async (i) => {
       leaveFinalizer.cancelAll();
       const { resumed } = sessions.resumeOrStart();
       _activeVoiceChannelId = channel.id;
+      // Free space for this session: silent while it fits, a line in the join
+      // reply when the planned length won't fit; then watched while recording.
+      const diskLines = joinDiskLines(measureRecording(SessionManager.sessionsRoot()), { dataDir: SessionManager.sessionsRoot() });
+      diskWatch.start();
       // Remember where this session talks — finalize status messages (also
       // auto-finalizes after a bot restart) go to this channel.
       if (sessions.active && i.channelId && sessions.active.textChannelId !== i.channelId) {
         sessions.active.textChannelId = i.channelId;
-        SessionManager.save(sessions.active);
+        try { SessionManager.save(sessions.active); }
+        catch (e) { warn('join: session.json not saved:', describeError(e)); }
       }
       transport.sessionStart({
         sessionId: sessions.wireSessionId(),
@@ -796,8 +794,8 @@ client.on('interactionCreate', async (i) => {
         const rec = new UtteranceRecorder(sessions.active, connection, receiver, user, {
           silenceMs: 1500,
           onChunkDone: (u) => {
+            // addUtterance persists session.json itself (via touch()).
             sessions.addUtterance(u);
-            sessions.persist();
             debug('chunk saved:', u.file, u.durationMs + 'ms');
           }
         });
@@ -817,6 +815,7 @@ client.on('interactionCreate', async (i) => {
       otherLines.push(resumed
         ? `Verbunden mit **${channel.name}**. Session **fortgesetzt** (\`${sessions.active.id}\`).`
         : `Verbunden mit **${channel.name}**. Aufnahme läuft (neue Session \`${sessions.active.id}\`).`);
+      otherLines.push(...diskLines);
 
       // Reminder: speakers currently in the channel without a mapping (best
       // effort — needs the server online; falls back silently otherwise).
@@ -836,6 +835,7 @@ client.on('interactionCreate', async (i) => {
     if (i.commandName === 'leave') {
       const conn = getVoiceConnection(i.guildId);
       if (conn) conn.destroy();
+      diskWatch.stop();
       disposeAllRecordings('leave');
       transport.clearVoiceConnection();
       // Leaving voice does NOT end the session. Recording resumes on the next
@@ -843,7 +843,9 @@ client.on('interactionCreate', async (i) => {
       // auto-finalize armed here) owns session teardown.
       const wireId = sessions.wireSessionId();
       if (wireId) transport.voiceState({ sessionId: wireId, state: 'left' });
-      sessions.touch();
+      // A failing save (disk full) must not abort the leave: lastActivity is
+      // updated in memory either way and the idle auto-finalize still gets armed.
+      try { sessions.touch(); } catch (e) { warn('leave: session.json not saved:', describeError(e)); }
       if (sessions.active) leaveFinalizer.arm(sessions.active.id, sessions.active.lastActivity);
       _activeVoiceChannelId = null;
       _outage.active = false;
@@ -962,12 +964,14 @@ client.on('interactionCreate', async (i) => {
         await i.editReply({ content: finalizeResultText(result, retentionNote, { reFinalize }) }).catch(() => {});
       } catch (e) {
         error(e);
-        await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${e.message}` }).catch(() => {});
+        await i.editReply({ content: `❌ Finalize fehlgeschlagen: ${describeError(e)}` }).catch(() => {});
       }
     }
   } catch (e) {
     error(e);
-    try { await (i.deferred || i.replied ? i.followUp('Fehler.') : i.reply('Fehler.')); } catch {}
+    // A full disk gets a message that says so; anything else stays generic.
+    const text = isDiskFullError(e) ? `❌ ${describeError(e)}` : 'Fehler.';
+    try { await (i.deferred || i.replied ? i.followUp(text) : i.reply(text)); } catch {}
   }
 });
 

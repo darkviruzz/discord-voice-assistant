@@ -174,3 +174,24 @@ test('loadById returns null for unknown or corrupt sessions; save() ignores dir-
   assert.doesNotThrow(() => SessionManager.save({ id: 'x' }));
   assert.doesNotThrow(() => SessionManager.save(null));
 });
+
+test('save() on a full disk keeps the previous session.json loadable (2026-11-04: it was cut off at 640 KiB)', () => {
+  const s = seed('2026-11-03T18-19-50-276Z', { status: 'open', timeline: [{ userId: '1', file: 'a.wav' }] });
+  const loaded = SessionManager.loadById(s.id);
+  loaded.status = SessionStatus.FINALIZING;
+  const orig = fs.writeFileSync;
+  fs.writeFileSync = (p, data) => {
+    orig(p, String(data).slice(0, 20));
+    throw Object.assign(new Error('Unknown system error -122: Unknown system error -122, write'), { errno: -122 });
+  };
+  try {
+    assert.throws(() => SessionManager.save(loaded), (e) => e.errno === -122);
+  } finally {
+    fs.writeFileSync = orig;
+  }
+  const again = SessionManager.loadById(s.id);
+  assert.ok(again, 'still parseable');
+  assert.equal(again.status, 'open');
+  assert.equal(again.timeline.length, 1);
+  assert.deepEqual(fs.readdirSync(path.join(root, s.id)), ['session.json'], 'no temp file left behind');
+});

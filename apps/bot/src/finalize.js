@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { log, warn, debug } from './logger.js';
 import { httpBaseUrl } from './transport/index.js';
+import { writeFileAtomic } from './fsSafe.js';
 
 // Build the finalize manifest the server needs: per-utterance WAV basenames
 // with checksums + absolute-on-bot-clock timing derived from the session.
@@ -76,7 +77,7 @@ export function writeManifest(session, manifest) {
   const dir = sourceChunksDir(session);
   fs.mkdirSync(dir, { recursive: true });
   const fp = path.join(dir, 'manifest.json');
-  fs.writeFileSync(fp, JSON.stringify(manifest, null, 2));
+  writeFileAtomic(fp, JSON.stringify(manifest, null, 2));
   return fp;
 }
 
@@ -168,14 +169,20 @@ function runShell(cmd) {
 }
 
 // After the server confirms a durable archive (matching checksums), apply the
-// retention policy to the local WAVs: 'move' to <DATA_DIR>/_archived/<id>/ or
-// 'delete'. Default 'move' (never destroy audio implicitly).
-export function applyRetention(session, { policy = process.env.ARCHIVE_RETENTION ?? 'move' } = {}) {
+// retention policy to the local WAVs:
+//   move              → <DATA_DIR>/_archived/<id>/ (default; never destroy audio implicitly)
+//   delete            → remove them
+//   delete-after-pull → remove them only if the bot's own archive pull
+//                       (BOT_ARCHIVE_DIR, e.g. on the NAS) verified every file;
+//                       otherwise move, like the default
+// Returns { policy (as applied), done, noop? }.
+export function applyRetention(session, { policy = process.env.ARCHIVE_RETENTION ?? 'move', pulled = false } = {}) {
   const src = chunksDir(session);
   if (!fs.existsSync(src)) return { policy, done: true, noop: true }; // already archived/removed
-  if (policy === 'delete') {
+  const effective = policy === 'delete-after-pull' ? (pulled ? 'delete' : 'move') : policy;
+  if (effective === 'delete') {
     fs.rmSync(src, { recursive: true, force: true });
-    log('finalize: deleted local WAVs for', session.id);
+    log('finalize: deleted local WAVs for', session.id, policy === 'delete-after-pull' ? '(archive pull verified)' : '');
   } else {
     const dest = path.join(path.dirname(session.dir), '_archived', session.id, 'chunks');
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -183,5 +190,47 @@ export function applyRetention(session, { policy = process.env.ARCHIVE_RETENTION
     fs.renameSync(src, dest);
     log('finalize: moved local WAVs to', dest);
   }
-  return { policy, done: true };
+  return { policy: effective, done: true };
+}
+
+// ARCHIVED_RETENTION_DAYS: delete <DATA_DIR>/_archived/<id> folders older than
+// N days. Their WAVs are only the bot's leftover copy — the server archive
+// (and, with BOT_ARCHIVE_DIR on the NAS, the pulled copy) holds the originals,
+// and a re-finalize from Discord rebuilds from the server archive. Unset, 0 or
+// "off" → never prune (the default).
+export function archivedRetentionDays(raw = process.env.ARCHIVED_RETENTION_DAYS) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function pruneArchived(dataDir, days, now = Date.now()) {
+  if (!days) return [];
+  const root = path.join(dataDir, '_archived');
+  let names;
+  try { names = fs.readdirSync(root); } catch { return []; }
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const pruned = [];
+  for (const name of names) {
+    const p = path.join(root, name);
+    try {
+      const st = fs.statSync(p);
+      if (st.isDirectory() && st.mtimeMs < cutoff) {
+        fs.rmSync(p, { recursive: true, force: true });
+        pruned.push(name);
+      }
+    } catch (e) { warn('finalize: _archived cleanup failed for', name, '-', e.message); }
+  }
+  if (pruned.length) log(`finalize: _archived cleanup removed ${pruned.length} folder(s) older than ${days} days:`, pruned.join(', '));
+  return pruned;
+}
+
+let _archivedTimer = null;
+// Call once at bot startup: prunes now, then daily.
+export function startArchivedCleanup(dataDir) {
+  if (_archivedTimer) return;
+  const days = archivedRetentionDays();
+  if (!days) return;
+  pruneArchived(dataDir, days);
+  _archivedTimer = setInterval(() => pruneArchived(dataDir, days), 24 * 60 * 60 * 1000);
+  _archivedTimer.unref?.();
 }

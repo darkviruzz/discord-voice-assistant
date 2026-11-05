@@ -14,6 +14,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { writeFileAtomic } from './fsSafe.js';
 
 function log(...args) { console.log('[configOverrides]', ...args); }
 function debug(...args) { if (process.env.DEBUG === '1') console.log('[configOverrides]', ...args); }
@@ -31,8 +32,9 @@ const BOT_KEYS = new Set([
   'SERVER_START_TIMEOUT_MS', 'SERVER_STOP_DELAY_MS',
   'DATA_DIR', 'SESSION_IDLE_HOURS', 'AUTO_FINALIZE_AFTER_LEAVE',
   'BOT_TRANSCRIPT_DIR', 'BOT_TRANSCRIPT_RETENTION_DAYS',
-  'BOT_ARCHIVE_DIR', 'BOT_ARCHIVE_RETENTION_DAYS',
-  'ARCHIVE_RETENTION', 'FINALIZE_IDLE_TIMEOUT_MS', 'FINALIZE_MAX_MS',
+  'BOT_ARCHIVE_DIR', 'BOT_ARCHIVE_RETENTION_DAYS', 'BOT_ARCHIVE_PULL',
+  'ARCHIVE_RETENTION', 'ARCHIVED_RETENTION_DAYS', 'FINALIZE_IDLE_TIMEOUT_MS', 'FINALIZE_MAX_MS',
+  'SESSION_PLAN_HOURS', 'DISK_MB_PER_HOUR', 'DISK_RESERVE_MB', 'DISK_CHECK_INTERVAL_MIN',
   'GATE_MS', 'PLAYOUT_MAX_MS', 'INTERRUPT_MIN_MS', 'RESUME_GATE_MS', 'REWIND_MS',
 ]);
 
@@ -85,7 +87,9 @@ function read() {
 function write(bot) {
   const fp = file();
   fs.mkdirSync(path.dirname(fp), { recursive: true });
-  fs.writeFileSync(fp, JSON.stringify({ version: 1, bot }, null, 2));
+  // Atomic: on a full disk the old file stays as it was (plain writeFileSync
+  // left it empty, and the panel overrides were gone at the next boot).
+  writeFileAtomic(fp, JSON.stringify({ version: 1, bot }, null, 2));
 }
 
 // Beim Bot-Start aufrufen: persistierte Overrides auf process.env legen.

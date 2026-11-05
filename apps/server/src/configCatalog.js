@@ -1263,11 +1263,40 @@ export const CATALOG = [
   // ======================= BOT: Daten & Session =============================
   {
     scope: 'bot', group: 'Bot · Daten & Session', key: 'DATA_DIR',
-    label: 'Aufnahme-Datenverzeichnis', type: 'string', def: '/opt/discord-recorder/data',
+    label: 'Aufnahme-Datenverzeichnis', type: 'string', def: './data',
     applyMode: 'restart',
     desc: 'Verzeichnis für Session-Aufnahmen (WAV/OGG/JSON) auf dem Bot-Host. Wird als '
       + 'Modul-Konstante beim Bot-Start gelesen — greift nach Bot-Neustart. (Auch Speicherort '
-      + 'des Bot-Override-Layers.)',
+      + 'des Bot-Override-Layers.) Nicht unter /tmp legen: /tmp wird beim Neustart des '
+      + 'Bot-Hosts geleert — der Bot warnt dann beim Start und bei /join.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Speicherplatz', key: 'SESSION_PLAN_HOURS',
+    label: 'Geplante Session-Länge (Stunden)', type: 'number', def: '5', applyMode: 'live',
+    desc: 'Bei /join prüft der Bot, ob der freie Platz in DATA_DIR für so viele Stunden '
+      + 'Aufnahme reicht. Reicht er, kommt keine Meldung; sonst eine Zeile in der '
+      + '/join-Antwort mit der geschätzten Restdauer.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Speicherplatz', key: 'DISK_MB_PER_HOUR',
+    label: 'Aufnahme-Bedarf (MB pro Stunde)', type: 'number', def: '400', applyMode: 'live',
+    desc: 'Geschätzter Platzbedarf einer Session-Stunde (gemessen: ca. 370 MB, 48-kHz-WAV '
+      + 'je Äußerung). Grundlage aller Restdauer-Schätzungen.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Speicherplatz', key: 'DISK_RESERVE_MB',
+    label: 'Reserve für Finalize (MB)', type: 'number', def: '300', applyMode: 'live',
+    desc: 'Platz, der nie für Aufnahmen verplant wird: Finalize braucht ihn für '
+      + 'session.json/manifest.json, und der Archiv-Pull lässt ihn immer frei '
+      + '(passt das Archiv nicht daneben, wird der Pull übersprungen statt die Platte zu füllen).',
+  },
+  {
+    scope: 'bot', group: 'Bot · Speicherplatz', key: 'DISK_CHECK_INTERVAL_MIN',
+    label: 'Prüfintervall während der Aufnahme (Minuten)', type: 'number', def: '10',
+    applyMode: 'live',
+    desc: 'Während einer Session prüft der Bot so oft den freien Platz und schreibt je '
+      + 'einmal in den Kanal, wenn weniger als 1 h bzw. 15 min Aufnahme übrig sind. '
+      + 'Greift ab dem nächsten /join.',
   },
   {
     scope: 'bot', group: 'Bot · Daten & Session', key: 'SESSION_IDLE_HOURS',
@@ -1327,8 +1356,17 @@ export const CATALOG = [
     applyMode: 'restart',
     desc: 'Wie viele Tage gepullte Archiv-Ordner in BOT_ARCHIVE_DIR aufbewahrt werden, '
       + 'bevor sie automatisch gelöscht werden (Prüfung täglich, einmal sofort beim '
-      + 'Bot-Start). Wird als Modul-Konstante beim Bot-Start gelesen — greift erst '
+      + 'Bot-Start). 0 = nie löschen (für ein Archiv auf dem NAS, das die Originale '
+      + 'dauerhaft hält). Wird als Modul-Konstante beim Bot-Start gelesen — greift erst '
       + 'nach einem Bot-Neustart.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Finalize-Archiv-Pull', key: 'BOT_ARCHIVE_PULL',
+    label: 'Archiv nach Finalize zurückholen', type: 'boolean', def: 'true', applyMode: 'live',
+    desc: 'true = nach jedem erfolgreichen Finalize das Server-Archiv nach BOT_ARCHIVE_DIR '
+      + 'ziehen (nötig für Cloud-Server, die beim Auto-Stop verschwinden, und für ein '
+      + 'NAS-Archiv). false = nicht ziehen — wenn der Server selbst dauerhaft archiviert '
+      + 'und es kein separates Archiv gibt. Wird pro Finalize gelesen.',
   },
 
   // ======================= BOT: Finalize-Upload =============================
@@ -1347,11 +1385,20 @@ export const CATALOG = [
   },
   {
     scope: 'bot', group: 'Bot · Finalize-Upload', key: 'ARCHIVE_RETENTION',
-    label: 'Lokale WAVs nach Finalize', type: 'enum', enumValues: ['move', 'delete'],
+    label: 'Lokale WAVs nach Finalize', type: 'enum', enumValues: ['move', 'delete', 'delete-after-pull'],
     def: 'move', applyMode: 'live',
     desc: 'Was nach erfolgreichem (checksum-bestätigtem) Finalize mit den lokalen WAVs '
-      + 'des Bots passiert: move = in _archived/ verschieben, delete = löschen. Wird pro '
-      + 'Finalize gelesen.',
+      + 'des Bots passiert: move = in _archived/ verschieben, delete = löschen, '
+      + 'delete-after-pull = löschen, sobald der Archiv-Pull nach BOT_ARCHIVE_DIR alle '
+      + 'Dateien per sha256 bestätigt hat (sonst verschieben). Wird pro Finalize gelesen.',
+  },
+  {
+    scope: 'bot', group: 'Bot · Finalize-Upload', key: 'ARCHIVED_RETENTION_DAYS',
+    label: 'Aufbewahrung _archived/ (Tage)', type: 'number', def: '0', applyMode: 'restart',
+    desc: 'Löscht Ordner in DATA_DIR/_archived/ (die nach dem Finalize verschobenen WAVs), '
+      + 'die älter als so viele Tage sind (Prüfung täglich, einmal beim Bot-Start). Die '
+      + 'Originale liegen im Server-Archiv; ein Neu-Finalize per Discord baut aus dem '
+      + 'Server-Archiv. 0 = nie löschen. Greift nach einem Bot-Neustart.',
   },
 
   // ======================= BOT: Finalize-Wartezeit ==========================

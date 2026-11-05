@@ -23,6 +23,7 @@ const ENV_KEYS = [
   'RAG_MAX_CHUNK_CHARS', 'RAG_RESCAN_INTERVAL_MS', 'OLLAMA_URL', 'DATA_DIR',
   'EMBED_PROVIDER', 'EMBED_BASE_URL', 'EMBED_MODEL', 'EMBED_API_KEY', 'EMBED_KEEP_ALIVE',
   'EMBED_QUERY_PREFIX', 'EMBED_DOC_PREFIX',
+  'RAG_MAX_CHUNKS_PER_NOTE', 'RAG_NAME_BOOST', 'RAG_EXCLUDE', 'TRANSCRIPT_VAULT_DIR',
 ];
 const FAST = { debounceMs: 50, saveDelayMs: 10, retryBaseMs: 20, retryMaxMs: 100 };
 
@@ -41,6 +42,9 @@ beforeEach(async () => {
   process.env.OLLAMA_URL = ollama.url;
   process.env.OBSIDIAN_VAULT_PATH = vault;
   process.env.RAG_INDEX_DIR = path.join(tmp, 'index');
+  // These tests count chunks of the same note; the per-note limit (default 1)
+  // has its own tests below.
+  process.env.RAG_MAX_CHUNKS_PER_NOTE = '0';
   _resetState();
 });
 
@@ -253,6 +257,45 @@ test('ragConfig reports the effective settings and the index state', async () =>
   assert.equal(cfg.index.notes, 1);
   assert.ok(cfg.index.lastSyncAt);
   assert.ok(fs.existsSync(path.join(tmp, 'index', 'index.bin')));
+});
+
+test('a named note comes first and the hits come from different notes (defaults)', async () => {
+  delete process.env.RAG_MAX_CHUNKS_PER_NOTE; // defaults: 1 chunk per note, name boost 0.15
+  // A long session note whose sections repeat the question's words, and the
+  // short NPC note the question is actually about.
+  writeNote(vault, '10_Campaign/Session Notes/20261103_Notizen.md',
+    '# Notizen\n\n## Abend\nWer ist Spugnoir fragte Rhogar\n\n## Später\nWer ist Spugnoir wollte Gaglath\n\n## Ende\nWer ist Spugnoir blieb offen\n');
+  writeNote(vault, '30_NPCs/Spugnoir.md', '# Spugnoir\nSpugnoir ist ein Magierlehrling.\n\n## Zauber\nZwei Zauber aus Hommlet.\n');
+  writeNote(vault, 'b.md', TAVERN);
+  await startAndSync();
+  // The bag-of-words test embedding puts the session note further ahead than a
+  // real model does (measured there: 0.15 is enough), so this test boosts more.
+  const hits = await queryRag('Wer ist Spugnoir?', { nameBoost: 0.3 });
+  assert.equal(hits[0].source, '30_NPCs/Spugnoir.md');
+  assert.equal(new Set(hits.map((h) => h.source)).size, hits.length, 'one chunk per note (default)');
+
+  process.env.RAG_NAME_BOOST = '0';
+  process.env.RAG_MAX_CHUNKS_PER_NOTE = '0';
+  const plain = await queryRag('Wer ist Spugnoir?');
+  assert.ok(plain.slice(0, 3).every((h) => h.source.startsWith('10_Campaign/')), 'without the new ranking the session note takes all three hits');
+  const cfg = ragConfig();
+  assert.equal(cfg.nameBoost, 0);
+  assert.equal(cfg.maxChunksPerNote, 0);
+  delete process.env.RAG_NAME_BOOST;
+  delete process.env.RAG_MAX_CHUNKS_PER_NOTE;
+  assert.equal(ragConfig().nameBoost, 0.15);
+  assert.equal(ragConfig().maxChunksPerNote, 1);
+});
+
+test('transcripts copied into the vault (TRANSCRIPT_VAULT_DIR) are never indexed, even without RAG_EXCLUDE', async () => {
+  writeNote(vault, '99_Rabenauge/Transkripte/2026-11-03 Session-Transkript.md', '# Session\n\n## Drache\nDer rote Drache war heute Thema am Tisch.\n');
+  writeNote(vault, 'a.md', DRAGON);
+  process.env.TRANSCRIPT_VAULT_DIR = '99_Rabenauge/Transkripte';
+  await startAndSync();
+  const hits = await queryRag('Drache');
+  assert.ok(hits.length > 0);
+  assert.ok(hits.every((h) => !h.source.startsWith('99_Rabenauge/')), hits.map((h) => h.source).join(', '));
+  assert.equal(ragStatus().notes, 1);
 });
 
 test('default index dir is DATA_DIR/rag (./data/rag)', () => {

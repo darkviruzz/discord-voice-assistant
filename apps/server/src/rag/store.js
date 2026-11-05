@@ -33,6 +33,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { buildNameIndex } from './names.js';
 
 export const FORMAT_VERSION = 1;
 const MAGIC = Buffer.from('VARAGIX\n', 'latin1');
@@ -69,6 +70,8 @@ export class VectorStore {
     this.dim = 0;
     this.notes = new Map(); // source → { hash, fp, meta, chunks: [{ text, heading, vec }] }
     this.chunkCount = 0;
+    this.version = 0;       // bumped on every change (name index cache key)
+    this._names = null;     // { version, index } — see nameIndex()
   }
 
   reset(signature) {
@@ -76,6 +79,16 @@ export class VectorStore {
     this.dim = 0;
     this.notes.clear();
     this.chunkCount = 0;
+    this.version++;
+  }
+
+  // The notes' names (file names + aliases) for name matching (names.js),
+  // rebuilt only after the store changed.
+  nameIndex() {
+    if (this._names?.version !== this.version) {
+      this._names = { version: this.version, index: buildNameIndex([...this.notes].map(([s, n]) => [s, n.meta])) };
+    }
+    return this._names.index;
   }
 
   get noteCount() { return this.notes.size; }
@@ -99,6 +112,7 @@ export class VectorStore {
     if (dim && this.chunkCount === 0) this.dim = dim;
     this.notes.set(source, { hash, fp, meta, chunks: stored });
     this.chunkCount += stored.length;
+    this.version++;
   }
 
   // Another note (not `exceptSource`) with exactly this content digest.
@@ -115,17 +129,26 @@ export class VectorStore {
     this.notes.delete(source);
     this.chunkCount -= old.chunks.length;
     if (this.chunkCount === 0) this.dim = 0;
+    this.version++;
     return true;
   }
 
   // Closest chunks first: [{ text, source, distance }]. `threshold` = max
   // cosine distance (inclusive), null/undefined = no filter.
-  search(queryVec, { topK = 3, threshold = null } = {}) {
+  //   maxPerNote > 0  at most that many chunks of one note (its best ones), so
+  //                   three paragraphs of one long session note can't take all
+  //                   the hits
+  //   boost           Map source → similarity bonus; changes only the ORDER —
+  //                   `distance` stays the raw cosine distance and the
+  //                   threshold applies to it
+  search(queryVec, { topK = 3, threshold = null, maxPerNote = 0, boost = null } = {}) {
     const k = Math.max(1, Math.floor(topK));
     if (this.chunkCount === 0) return [];
     const q = normalize(queryVec);
     if (q.length !== this.dim) throw new DimensionMismatch(`query vector dimension ${q.length} != index dimension ${this.dim}`);
     const hasThreshold = threshold !== null && threshold !== undefined && Number.isFinite(threshold);
+    const cap = Number.isFinite(maxPerNote) && maxPerNote > 0 ? Math.floor(maxPerNote) : 0;
+    if (cap || boost?.size) return this._rankedSearch(q, { k, hasThreshold, threshold, cap, boost });
     const top = []; // ascending by distance, at most k entries
     for (const [source, note] of this.notes) {
       for (const c of note.chunks) {
@@ -142,6 +165,34 @@ export class VectorStore {
       }
     }
     return top.map(({ d, c, source }) => ({ text: c.text, source, distance: d }));
+  }
+
+  // search() with a per-note cap and/or a boost: every chunk is scored, then
+  // picked in order of (distance − boost). ~2000 chunks sort in well under a
+  // millisecond.
+  _rankedSearch(q, { k, hasThreshold, threshold, cap, boost }) {
+    const cand = [];
+    for (const [source, note] of this.notes) {
+      const bonus = boost?.get(source) ?? 0;
+      for (const c of note.chunks) {
+        const d = Math.round(Math.min(2, Math.max(0, 1 - dot(q, c.vec))) * 1e4) / 1e4;
+        if (hasThreshold && d > threshold) continue;
+        cand.push({ d, r: d - bonus, c, source });
+      }
+    }
+    cand.sort((a, b) => a.r - b.r || a.d - b.d);
+    const out = [];
+    const perNote = new Map();
+    for (const x of cand) {
+      if (out.length >= k) break;
+      if (cap) {
+        const n = perNote.get(x.source) ?? 0;
+        if (n >= cap) continue;
+        perNote.set(x.source, n + 1);
+      }
+      out.push({ text: x.c.text, source: x.source, distance: x.d });
+    }
+    return out;
   }
 
   // ── persistence ──────────────────────────────────────────────────────────

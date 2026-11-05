@@ -87,7 +87,38 @@ function rescanIntervalMs() {
 // Part of the indexer config: a change restarts the indexer, whose next sync
 // prunes newly excluded notes and indexes newly included ones.
 function excludePatterns() {
-  return parseExcludeList(envStr('RAG_EXCLUDE'));
+  const own = transcriptVaultPattern();
+  return [...parseExcludeList(envStr('RAG_EXCLUDE')), ...(own ? [own] : [])];
+}
+
+// The finished transcripts the server copies into the vault
+// (TRANSCRIPT_VAULT_DIR, finalize/summary.js) are never indexed, whatever
+// RAG_EXCLUDE says: hours of table talk and small talk would crowd out the
+// notes. A vault-root-anchored folder pattern, or null when off/outside.
+function transcriptVaultPattern() {
+  const rel = envStr('TRANSCRIPT_VAULT_DIR');
+  const vault = envStr('OBSIDIAN_VAULT_PATH');
+  if (!rel || !vault) return null;
+  const inside = path.relative(path.resolve(vault), path.resolve(vault, rel));
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return null;
+  return `${inside.split(path.sep).join('/')}/`;
+}
+
+// RAG_NAME_BOOST: similarity bonus for notes the question names by file name
+// or alias (names.js) — measured best at 0.15; 0 = off.
+const DEFAULT_NAME_BOOST = 0.15;
+function nameBoost() {
+  const raw = envStr('RAG_NAME_BOOST');
+  if (!raw) return DEFAULT_NAME_BOOST;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? Math.min(v, 1) : DEFAULT_NAME_BOOST;
+}
+
+// RAG_MAX_CHUNKS_PER_NOTE: at most that many hits from one note (default 1,
+// so the three hits come from three notes); 0 = no limit.
+const DEFAULT_MAX_PER_NOTE = 1;
+function maxChunksPerNote() {
+  return envPositiveInt('RAG_MAX_CHUNKS_PER_NOTE', DEFAULT_MAX_PER_NOTE, { allowZero: true });
 }
 
 // Default ./data/rag (relative to the server's working directory, next to
@@ -246,7 +277,10 @@ function noteSuccess() {
 // the query is blank, the index isn't loaded/built yet, the embedding backend
 // fails, or the deadline passes. topK is clamped to 1..20 (invalid → 3);
 // `scoreThreshold` undefined → RAG_SCORE_THRESHOLD, null → no filter.
-export async function queryRag(query, { topK = DEFAULT_TOP_K, scoreThreshold: threshold, timeoutMs: timeoutOverride } = {}) {
+export async function queryRag(query, {
+  topK = DEFAULT_TOP_K, scoreThreshold: threshold, timeoutMs: timeoutOverride,
+  maxPerNote = maxChunksPerNote(), nameBoost: boostOverride = nameBoost(),
+} = {}) {
   if (!shutDown) reconcile();
   if (!ragEnabled()) return [];
   const text = typeof query === 'string' ? query.trim() : '';
@@ -277,6 +311,8 @@ export async function queryRag(query, { topK = DEFAULT_TOP_K, scoreThreshold: th
         threshold: threshold === undefined ? scoreThreshold() : threshold,
         timeoutMs: limit,
         signal: ac.signal,
+        maxPerNote,
+        nameBoost: boostOverride,
       }),
       deadline,
     ]);
@@ -316,6 +352,8 @@ export function ragConfig() {
     model: embedModel(),
     timeoutMs: timeoutMs(),
     scoreThreshold: scoreThreshold(),
+    nameBoost: nameBoost(),
+    maxChunksPerNote: maxChunksPerNote(),
     maxChunkChars: maxChunkChars(),
     rescanIntervalMs: rescanIntervalMs(),
     indexDir: indexDir(),

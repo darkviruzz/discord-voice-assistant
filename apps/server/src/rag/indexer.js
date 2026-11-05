@@ -44,6 +44,7 @@ import { chunkMarkdown, CHUNKER_VERSION, DEFAULT_MAX_CHUNK_CHARS } from './chunk
 import { listNotes, readNote, noteState, statNote, isHidden, compileExclude, MAX_FILE_BYTES } from './scanner.js';
 import { VectorStore, INDEX_FILE, writeFileAtomic, cleanupTempFiles, IndexFormatError, DimensionMismatch } from './store.js';
 import { VaultWatcher } from './watcher.js';
+import { matchNames } from './names.js';
 
 export const MAX_TOP_K = 20;
 export const DEFAULT_TOP_K = 3;
@@ -537,7 +538,11 @@ export class RagIndexer {
   // isn't loaded, is empty, or was built with another embedding signature
   // (a rebuild is requested then). Throws EmbeddingUnavailable when the query
   // can't be embedded. `threshold` = max cosine distance, null = no filter.
-  async query(text, { topK = DEFAULT_TOP_K, threshold = null, timeoutMs, signal } = {}) {
+  //   maxPerNote  at most that many chunks of one note (0 = no limit)
+  //   nameBoost   similarity bonus for notes the question names by file name
+  //               or alias (names.js), scaled by how much of the name it
+  //               contains, at least half; 0 = off
+  async query(text, { topK = DEFAULT_TOP_K, threshold = null, timeoutMs, signal, maxPerNote = 0, nameBoost = 0 } = {}) {
     const q = String(text ?? '').trim();
     if (!q || !this.ready || this.store.chunkCount === 0) return [];
     if (this.store.signature !== this.signatureFn()) {
@@ -545,8 +550,13 @@ export class RagIndexer {
       return [];
     }
     const [vec] = await this._embed([q], 'query', timeoutMs, signal);
+    let boost = null;
+    if (nameBoost > 0) {
+      boost = new Map();
+      for (const [source, share] of matchNames(this.store.nameIndex(), q)) boost.set(source, nameBoost * Math.max(0.5, share));
+    }
     try {
-      return this.store.search(vec, { topK: clampTopK(topK), threshold });
+      return this.store.search(vec, { topK: clampTopK(topK), threshold, maxPerNote, boost });
     } catch (e) {
       if (!(e instanceof DimensionMismatch)) throw e;
       this.logger.warn(`rag: ${e.message} — embedding model changed, rebuilding the index`);

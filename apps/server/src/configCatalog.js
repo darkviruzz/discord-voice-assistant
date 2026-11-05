@@ -885,6 +885,22 @@ export const CATALOG = [
       + 'Wird pro Anfrage gelesen.',
   },
   {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_NAME_BOOST',
+    label: 'Bonus für namentlich genannte Notizen', type: 'number', def: '0.15', applyMode: 'live',
+    desc: 'Nennt eine Frage eine Notiz beim Dateinamen oder einem Alias aus dem Frontmatter '
+      + '(„Wer ist Spugnoir?“ → 30_NPCs/Spugnoir.md), rückt sie um so viel Ähnlichkeit nach vorn '
+      + '(× Anteil der getroffenen Namenswörter, mindestens die Hälfte). Unscharf und phonetisch, '
+      + 'damit Spracherkennungs-Schreibweisen passen („Phaelith“ → Faylith). Wörter, die in vielen '
+      + 'Dateinamen stehen („Notizen“), zählen nicht. Gemessen am Kampagnen-Vault: 0.15 hebt den '
+      + 'Anteil richtiger Ersttreffer von ~50 % auf ~95 %. 0 = aus. Wird pro Anfrage gelesen.',
+  },
+  {
+    scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_MAX_CHUNKS_PER_NOTE',
+    label: 'Max. Treffer aus einer Notiz', type: 'number', def: '1', applyMode: 'live',
+    desc: 'Höchstens so viele der Treffer stammen aus derselben Notiz — sonst belegt eine lange '
+      + 'Session-Notiz mit drei Absätzen alle Plätze. 0 = keine Grenze. Wird pro Anfrage gelesen.',
+  },
+  {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'RAG_MAX_CHUNK_CHARS',
     label: 'Max. Zeichen pro Vault-Abschnitt', type: 'number', def: '2000', applyMode: 'live',
     desc: 'Notizen werden an jeder ##-Überschrift in Abschnitte geteilt; längere Abschnitte '
@@ -916,7 +932,8 @@ export const CATALOG = [
       + 'weiteres / in jeder Tiefe), "99_Material/Archiv/" = Ordner ab Vault-Wurzel, '
       + '"CLAUDE.md" = Dateiname überall, * und ** als Platzhalter. Änderung greift bei der '
       + 'nächsten Anfrage: ausgeschlossene Notizen fliegen aus dem Index, wieder '
-      + 'aufgenommene werden eingebettet.',
+      + 'aufgenommene werden eingebettet. Der Transkript-Ordner (TRANSCRIPT_VAULT_DIR) ist '
+      + 'immer ausgeschlossen, auch ohne Eintrag hier.',
   },
   {
     scope: 'server', group: 'Server · RAG (Vault-Suche)', key: 'EMBED_PROVIDER',
